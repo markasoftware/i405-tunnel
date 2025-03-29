@@ -1,5 +1,5 @@
 [package]
-name = "i405-proxy"
+name = "i405-tunnel"
 version = "0.1.0"
 edition = "2024"
 
