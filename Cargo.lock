@@ -782,7 +782,7 @@ dependencies = [
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk#9502fda25c3ce3a27324e9668ac110e82559bf41"
+source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk-and-rw-signatures#77f2b5dd8a108e74a334d595817c26d8cad8b98d"
 dependencies = [
  "bytes",
  "log",
@@ -793,7 +793,7 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "2.0.0"
-source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk#9502fda25c3ce3a27324e9668ac110e82559bf41"
+source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk-and-rw-signatures#77f2b5dd8a108e74a334d595817c26d8cad8b98d"
 dependencies = [
  "autotools",
  "bindgen",

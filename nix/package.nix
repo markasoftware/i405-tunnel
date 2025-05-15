@@ -14,7 +14,7 @@ rustPlatform.buildRustPackage {
   src = ./..;
 
   cargoLock.lockFile = ./../Cargo.lock;
-  cargoLock.outputHashes."wolfssl-3.0.0" = "sha256-YbeAzZ4K245KtHkFQB04PMjDoO406eyIMnmC/c5SGco="; # interestingly, this doesn't seem to be verified during ~nix develop~!
+  cargoLock.outputHashes."wolfssl-3.0.0" = "sha256-TqIk+A52jrWUMApFSWNqwJ5LJPZJGwO00Gxj3KWYDaU="; # interestingly, this doesn't seem to be verified during ~nix develop~!
 
   # All this to get wolfssl-rs to compile:
   nativeBuildInputs = [

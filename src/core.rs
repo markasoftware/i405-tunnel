@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use std::net::SocketAddr;
 
 use crate::array_array::IpPacketBuffer;
@@ -9,7 +8,6 @@ use crate::messages::Message;
 enum Err {}
 
 type Result<T> = std::result::Result<T, Err>;
-type SSLSession = wolfssl::Session<SSLIOCallbacks>;
 
 enum ClientServer {
     Client,
@@ -129,11 +127,16 @@ impl TLSSession {
     /// Call try_write on the underlying session, and return the encrypted bytes.
     fn try_write(&mut self, cleartext_packet: &[u8]) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
         assert!(self.handshake_complete, "Handshake must be complete before calling `try_write`");
-        match self.underlying.try_write(&mut bytes_mut)? {
+        match self.underlying.try_write_slice(cleartext_packet)? {
             wolfssl::Poll::Ready(len) => {
                 // TODO better pre-checking that packet is the right length to fit in a single IP packet when encrypted
-                assert!(len == cleartext_packet.len(), "Only {} bytes of packet of length {} were consumed", len, cleartext_packet.len());
-                Ok(self.underlying.io_cb_mut().pop_last_sent_packet().expect("Should be a sent packet after try_write"))
+                assert!(len == cleartext_packet.len(), "Only {} bytes of packet of length {} were written", len, cleartext_packet.len());
+                let result = self.underlying.io_cb_mut().pop_last_sent_packet().expect("Should be a sent packet after try_write");
+                // TODO verify this size is exactly what we expect. We need to put more robust
+                // checks all around that only packets of the correct size can get passed through to
+                // here.
+                assert!(result.len() > len, "Ciphertext length {} is shorter than cleartext {}, probably means it would have been too large for MTU!", len, result.len());
+                Ok(result)
             },
             poll_result => panic!("try_write should always complete immediately, but got {:#?}", poll_result),
         }
@@ -143,8 +146,16 @@ impl TLSSession {
     /// Call try_read on the underlying session, and return the cleartext bytes.
     fn try_read(&mut self, ciphertext_packet: &[u8]) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
         assert!(self.handshake_complete, "Handshake must be complete before calling `try_read`");
-        let mut bytes_mut = bytes::BytesMut::
-        self.underlying.try_read(result.as_mut());
+        self.underlying.io_cb_mut().set_next_packet_to_receive(ciphertext_packet);
+        let mut result = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
+        match self.underlying.try_read_slice(result.as_mut())? {
+            wolfssl::Poll::Ready(len) => {
+                // TODO verify that len is what we expect it to be
+                result.shrink(len);
+                Ok(result)
+            },
+            poll_result => panic!("try_read should always complete immediately, but got {:#?}", poll_result),
+        }
     }
 }
 
