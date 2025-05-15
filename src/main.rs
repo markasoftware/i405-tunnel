@@ -1,6 +1,9 @@
+mod array_array;
 mod config;
-mod i405pp;
-mod tcp;
+mod constants;
+mod core;
+mod hardware;
+mod messages;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
