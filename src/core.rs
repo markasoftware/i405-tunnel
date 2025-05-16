@@ -42,8 +42,9 @@ pub(crate) struct Core<H: Hardware> {
 impl Core {
     pub(crate) fn new() -> Self {
         Core {
-            packet_interval_ns: u64,
-            packet_length: u64,
+            // TODO real values
+            packet_interval_ns: 42,
+            packet_length: 1400,
 
             // quite larger than we should need, we only insert one packet of messages at a time
             pending_outgoing_messages: Vec::with_capacity(100),
@@ -143,6 +144,11 @@ impl TLSSession {
     }
 
     // TODO consider writing the result to an &mut [u8] argument instead
+
+    // TODO investigate whether wolfssl supports putting multiple dtls messages into the same
+    // packet, which could break our logic on the read side which really assumes one dtls
+    // message/packet
+
     /// Call try_read on the underlying session, and return the cleartext bytes.
     fn try_read(&mut self, ciphertext_packet: &[u8]) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
         assert!(self.handshake_complete, "Handshake must be complete before calling `try_read`");

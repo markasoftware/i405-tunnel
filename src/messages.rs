@@ -97,8 +97,8 @@ impl serdes::Serializable for ClientToServerHandshake {
     }
 }
 
-impl serdes::Deserializable<'_> for ClientToServerHandshake {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Option<Self> {
+impl serdes::Deserializable for ClientToServerHandshake {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
             return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
@@ -109,17 +109,20 @@ impl serdes::Deserializable<'_> for ClientToServerHandshake {
         // not to clutter the limited space of available types.
         let serdes_version: u32 = read_cursor.read()?;
         if serdes_version != SERDES_VERSION {
-            return Err(DeserializeMessageErr::)
+            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(serdes_version));
         }
+
+        Ok(ClientToServerHandshake {
+            protocol_version: read_cursor.read()?,
+            s2c_packet_length: read_cursor.read()?,
+            s2c_packet_interval_ns: read_cursor.read()?,
+        })
     }
 }
 
 /// The server will send this message after receiving a ClientToServerHandshake, even if the
 /// versions are incompatible.
 pub(crate) struct ServerToClientHandshake {
-    /// same as from the client, just to make sure we're both talking the same protocol
-    magic_value: u32,
-    serdes_version: u32,
     protocol_version: u32,
     /// If false, the client should abandon the connection.
     success: bool,
@@ -132,6 +135,26 @@ impl ServerToClientHandshake {
 impl serdes::Serializable for ServerToClientHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         self.success.serialize(serializer);
+    }
+}
+
+impl serdes::Deserializable for ServerToClientHandshake {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+        let magic_value: u32 = read_cursor.read()?;
+        if magic_value != MAGIC_VALUE {
+            return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
+        }
+
+        // TODO do we really need to check in this direction?
+        let serdes_version: u32 = read_cursor.read()?;
+        if serdes_version != SERDES_VERSION {
+            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(serdes_version));
+        }
+
+        Ok(ServerToClientHandshake {
+            protocol_version: read_cursor.read()?,
+            success: read_cursor.read()?,
+        })
     }
 }
 
@@ -151,9 +174,9 @@ impl serdes::Serializable for UnscheduledPacket {
     }
 }
 
-impl serdes::Deserializable<'_> for UnscheduledPacket {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Option<Self> {
-        Some(UnscheduledPacket { packet: read_cursor.read()? })
+impl serdes::Deserializable for UnscheduledPacket {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+        Ok(UnscheduledPacket { packet: read_cursor.read()? })
     }
 }
 
@@ -161,6 +184,7 @@ impl serdes::Deserializable<'_> for UnscheduledPacket {
 pub(crate) enum DeserializeMessageErr {
     UnknownMessageType(MessageType),
     Truncated(Option<MessageType>),
+    InvalidBool(u8),
     UnsupportedSerdesVersion(u32),
     WrongMagicValue(u32),
 }
@@ -175,6 +199,7 @@ impl std::fmt::Display for DeserializeMessageErr {
                 write!(f, "Truncated message of type {:#x}", message_type)
             }
             DeserializeMessageErr::Truncated(None) => write!(f, "Truncated message (unknown type)"),
+            DeserializeMessageErr::InvalidBool(byte) => write!(f, "Invalid bool byte {:#x}", byte),
             DeserializeMessageErr::UnsupportedSerdesVersion(peer_version) => write!(
                 f,
                 "Unsupported serdes version; peer has {}, but we have {}",
@@ -200,15 +225,13 @@ fn deserialize_message(read_cursor: &mut ReadCursor<&[u8]>) -> Result<Message, D
         ($($msg:ident);+) => {
             $(
                 if message_type == $msg::TYPE_BYTE {
-                    return match $msg::deserialize(read_cursor) {
-                        Some(deserialized) => Ok(deserialized),
-                        None => Err(DeserializeMessageErr::Truncated(Some(message_type))),
-                    }
+                    return Ok(Message::$msg($msg::deserialize(read_cursor)?));
                 }
             )+
         };
     }
     deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; UnscheduledPacket);
+    Err(DeserializeMessageErr::UnknownMessageType(message_type))
 }
 
 //// CURSOR ////////////////////////////////////////////////////////////////////////////////////////
@@ -268,7 +291,7 @@ where
         }
     }
 
-    fn read<'a, D: serdes::Deserializable<'a>>(&mut self) -> Option<D> {
+    fn read<D: serdes::Deserializable>(&mut self) -> Result<D, DeserializeMessageErr> {
         D::deserialize(self)
     }
 }
@@ -310,9 +333,9 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 //// SERDES ////////////////////////////////////////////////////////////////////////////////////////
 
 mod serdes {
-    use crate::messages::array_array::ArrayArray;
+    use crate::array_array::ArrayArray;
 
-    use crate::messages::{ReadCursor, WriteCursor};
+    use crate::messages::{DeserializeMessageErr, ReadCursor, WriteCursor};
 
     pub(crate) trait Serializer {
         fn serialize(&mut self, data: &[u8]);
@@ -328,33 +351,13 @@ mod serdes {
         }
     }
 
-    type VariableLengthBufferLength = u16;
-
-    pub(crate) struct VariableLengthBuffer<'a> {
-        data: &'a [u8],
-    }
-
-    impl<'a> VariableLengthBuffer<'a> {
-        pub(crate) fn new(data: &'a [u8]) -> VariableLengthBuffer<'a> {
-            VariableLengthBuffer { data }
-        }
-
-        pub(crate) fn into_inner(self) -> &'a [u8] {
-            self.data
-        }
-    }
-
-    impl<'a> Serializable for VariableLengthBuffer<'a> {
-        fn serialize<S: Serializer>(&self, serializer: &mut S) {
-            let len = VariableLengthBufferLength::try_from(self.data.len()).unwrap();
-            len.serialize(serializer);
-            serializer.serialize(self.data);
-        }
-    }
+    type SerializedArrayArrayLength = u16;
 
     impl<const C: usize> Serializable for ArrayArray<u8, C> {
         fn serialize<S: Serializer>(&self, serializer: &mut S) {
-            VariableLengthBuffer::new(&*self).serialize(serializer);
+            let len = SerializedArrayArrayLength::try_from(self.len()).unwrap();
+            len.serialize(serializer);
+            serializer.serialize(self); // I think deref coercion here?
         }
     }
 
@@ -388,23 +391,27 @@ mod serdes {
         }
     }
 
-    pub(crate) trait Deserializable<'a> where Self: Sized {
+    pub(crate) trait Deserializable where Self: Sized {
         // could theoretically make this more generic than just ReadCursor, just like how Serialize
         // is generic over Serializers, but let's not do it until we need it.
-        fn deserialize<T: AsRef<[u8]> + 'a>(read_cursor: &mut ReadCursor<T>) -> Option<Self>;
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr>;
     }
 
-    impl<'a> Deserializable<'a> for VariableLengthBuffer<'a> {
-        fn deserialize<T: AsRef<[u8]> + 'a>(read_cursor: &mut ReadCursor<T>) -> Option<VariableLengthBuffer<'a>> {
-            let len: u16 = read_cursor.read()?;
-            Some(VariableLengthBuffer::new(read_cursor.read_exact_runtime(len.into())?))
+    impl<const C: usize> Deserializable for ArrayArray<u8, C> {
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+            let len: SerializedArrayArrayLength = read_cursor.read()?;
+            Ok(Self::new(read_cursor.read_exact_runtime(len.into()).ok_or(DeserializeMessageErr::Truncated(None))?))
         }
     }
 
-    impl<const C: usize> Deserializable<'_> for ArrayArray<u8, C> {
-        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Option<Self> {
-            // I have no idea how it's able to do type inference here and it might break catastrophically one day:
-            read_cursor.read()?.into_inner()
+    impl Deserializable for bool {
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+            let byte: u8 = read_cursor.read()?;
+            match byte {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(DeserializeMessageErr::InvalidBool(byte)),
+            }
         }
     }
 
@@ -416,12 +423,12 @@ mod serdes {
                 }
             }
 
-            impl Deserializable<'_> for $integral_type {
-                fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Option<$integral_type> {
+            impl Deserializable for $integral_type {
+                fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<$integral_type, DeserializeMessageErr> {
                     // I keep getting syntax errors trying to inline this into the <...> below
                     const SIZE: usize = size_of::<$integral_type>();
-                    let read_bytes = read_cursor.read_exact_comptime::<SIZE>()?;
-                    Some($integral_type::from_be_bytes(read_bytes))
+                    let read_bytes = read_cursor.read_exact_comptime::<SIZE>().ok_or(DeserializeMessageErr::Truncated(None))?;
+                    Ok($integral_type::from_be_bytes(read_bytes))
                 }
             }
         };
