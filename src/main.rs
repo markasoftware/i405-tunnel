@@ -1,8 +1,8 @@
 mod array_array;
 mod config;
 mod constants;
-// mod core;
-// mod hardware;
+mod core;
+mod hardware;
 mod messages;
 
 fn main() {

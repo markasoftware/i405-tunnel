@@ -1,5 +1,5 @@
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use serdes::{Deserializable as _, Serializable as _};
+use serdes::Serializable as _;
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -579,7 +579,7 @@ mod test {
     /// equal
     #[test]
     fn magic_value_error() {
-        let mut arr_arr = ArrayArray::<u8, 100>::new_empty(100);
+        let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
         let mut write_cursor = WriteCursor::new(arr_arr);
         // TODO Test both handshakes
         write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
@@ -600,7 +600,7 @@ mod test {
 
     #[test]
     fn serdes_version_error() {
-        let mut arr_arr = ArrayArray::<u8, 100>::new_empty(100);
+        let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
         let mut write_cursor = WriteCursor::new(arr_arr);
         // TODO Test both handshakes
         write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
