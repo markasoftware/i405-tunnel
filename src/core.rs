@@ -114,13 +114,8 @@ impl DTLSNegotiatingSession {
         // checker complains that add_written_packet has a mutable borrow of `self` for the rest of
         // the function. Why is that the case? Why doesn't the mutable borrow of `self` simply occur
         // when `add_written_packet` is called, rather than being persistent?
-        let mut add_written_packet = |session_obj: &mut Self| match session_obj
-            .underlying
-            .io_cb_mut()
-            .pop_last_sent_packet()
-        {
-            Some(last_sent_packet) => written_packets.push(last_sent_packet),
-            None => (),
+        let mut add_written_packets = |session_obj: &mut Self| {
+            written_packets.extend(session_obj.underlying.io_cb_mut().last_sent_packets())
         };
 
         loop {
@@ -129,13 +124,13 @@ impl DTLSNegotiatingSession {
                 Err(err) => return DTLSNegotiateResult::WolfSSLErr(err),
                 // We don't use secure renegotiation, so this shouldn't happen!
                 Ok(wolfssl::Poll::AppData(_)) => return DTLSNegotiateResult::UnexpectedAppData,
-                Ok(wolfssl::Poll::PendingWrite) => add_written_packet(&mut self),
+                Ok(wolfssl::Poll::PendingWrite) => add_written_packets(&mut self),
                 Ok(wolfssl::Poll::PendingRead) => {
-                    add_written_packet(&mut self);
+                    add_written_packets(&mut self);
                     return DTLSNegotiateResult::NeedRead(self, written_packets);
                 }
                 Ok(wolfssl::Poll::Ready(())) => {
-                    add_written_packet(&mut self);
+                    add_written_packets(&mut self);
                     return DTLSNegotiateResult::Ready(
                         DTLSEstablishedSession {
                             underlying: self.underlying,
@@ -202,11 +197,11 @@ impl DTLSEstablishedSession {
                     len,
                     cleartext_packet.len()
                 );
-                let result = self
+                let written_packets = self
                     .underlying
                     .io_cb_mut()
-                    .pop_last_sent_packet()
-                    .expect("Should be a sent packet after try_write");
+                    .last_sent_packets();
+                let result = written_packets[0].clone(); // TODO NO NO NO
                 // TODO verify this size is exactly what we expect. We need to put more robust
                 // checks all around that only packets of the correct size can get passed through to
                 // here.
@@ -258,22 +253,23 @@ impl DTLSEstablishedSession {
 struct DTLSCallbacks {
     // could make this a teensy bit faster by having a BytesMut instead that we can write to, but oh
     // well.
-    last_sent_packet: Option<IpPacketBuffer>,
+    last_sent_packets: Vec<IpPacketBuffer>,
     // and this could be a Bytes
     next_packet_to_receive: Option<IpPacketBuffer>,
 }
 
 impl DTLSCallbacks {
+    const SENT_CAPACITY: usize = 10;
+
     fn new() -> DTLSCallbacks {
         DTLSCallbacks {
-            last_sent_packet: None,
+            last_sent_packets: Vec::with_capacity(Self::SENT_CAPACITY),
             next_packet_to_receive: None,
         }
     }
 
-    /// Get the last sent packet, if any.
-    fn pop_last_sent_packet(&mut self) -> Option<IpPacketBuffer> {
-        std::mem::take(&mut self.last_sent_packet)
+    fn last_sent_packets(&mut self) -> Vec<IpPacketBuffer> {
+        std::mem::take(&mut self.last_sent_packets)
     }
 
     fn set_next_packet_to_receive(&mut self, buf: &[u8]) {
@@ -290,13 +286,11 @@ impl DTLSCallbacks {
 
 impl wolfssl::IOCallbacks for DTLSCallbacks {
     fn send(&mut self, buf: &[u8]) -> wolfssl::IOCallbackResult<usize> {
-        match self.last_sent_packet {
-            Some(_) => wolfssl::IOCallbackResult::WouldBlock,
-            None => {
-                let result = buf.len();
-                self.last_sent_packet = Some(IpPacketBuffer::new(buf));
-                wolfssl::IOCallbackResult::Ok(result)
-            }
+        if self.last_sent_packets.len() < Self::SENT_CAPACITY {
+            self.last_sent_packets.push(IpPacketBuffer::new(buf));
+            wolfssl::IOCallbackResult::Ok(buf.len())
+        } else {
+            wolfssl::IOCallbackResult::WouldBlock
         }
     }
 
