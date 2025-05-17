@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 use serdes::Serializable as _;
 
@@ -199,38 +201,18 @@ impl serdes::Deserializable for UnscheduledPacket {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeserializeMessageErr {
+    #[error("Unknown message type byte: {0}")]
     UnknownMessageType(MessageType),
+    #[error("Truncated message of type TODO")]
     Truncated(Option<MessageType>),
+    #[error("Invalid bool byte {0:#x}")]
     InvalidBool(u8),
+    #[error("Unsupported serdes version; peer has {0}, but we have {serdes_version}", serdes_version = SERDES_VERSION)]
     UnsupportedSerdesVersion(u32),
+    #[error("Wrong magic value; peer gave {0:#x}, but we want {magic_value:#x}", magic_value = MAGIC_VALUE)]
     WrongMagicValue(u32),
-}
-
-impl std::fmt::Display for DeserializeMessageErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            DeserializeMessageErr::UnknownMessageType(message_type) => {
-                write!(f, "Unknown message type byte: {:#x}", message_type)
-            }
-            DeserializeMessageErr::Truncated(Some(message_type)) => {
-                write!(f, "Truncated message of type {:#x}", message_type)
-            }
-            DeserializeMessageErr::Truncated(None) => write!(f, "Truncated message (unknown type)"),
-            DeserializeMessageErr::InvalidBool(byte) => write!(f, "Invalid bool byte {:#x}", byte),
-            DeserializeMessageErr::UnsupportedSerdesVersion(peer_version) => write!(
-                f,
-                "Unsupported serdes version; peer has {}, but we have {}",
-                peer_version, SERDES_VERSION
-            ),
-            DeserializeMessageErr::WrongMagicValue(peer_magic_value) => write!(
-                f,
-                "Wrong magic value; peer has {}, expected {}",
-                peer_magic_value, MAGIC_VALUE
-            ),
-        }
-    }
 }
 
 impl serdes::Deserializable for Message {
