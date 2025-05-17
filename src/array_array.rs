@@ -2,6 +2,7 @@ use crate::constants::MAX_IP_PACKET_LENGTH;
 
 /// runtime-fixed length array inside a comptime-known fixed length array. Like a shitty
 /// ArrayVec, hence the name.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ArrayArray<T, const COMPTIME_LENGTH: usize> {
     underlying: [T; COMPTIME_LENGTH],
     runtime_length: usize,
@@ -20,7 +21,7 @@ impl<T: Default + Copy, const COMPTIME_LENGTH: usize> ArrayArray<T, COMPTIME_LEN
             underlying: [T::default(); COMPTIME_LENGTH], // there are ways to loosen the T: Copy bound but why bother
             runtime_length: other.len(),
         };
-        result.underlying.copy_from_slice(other);
+        result.underlying[..other.len()].copy_from_slice(other);
         result
     }
 
@@ -59,6 +60,12 @@ impl<T, const COMPTIME_LENGTH: usize> std::ops::Deref for ArrayArray<T, COMPTIME
 impl<T, const COMPTIME_LENGTH: usize> std::ops::DerefMut for ArrayArray<T, COMPTIME_LENGTH> {
     fn deref_mut(&mut self) -> &mut [T] {
         &mut self.underlying[0..self.runtime_length]
+    }
+}
+
+impl<T, const COMPTIME_LENGTH: usize> AsRef<[T]> for ArrayArray<T, COMPTIME_LENGTH> {
+    fn as_ref(&self) -> &[T] {
+        &*self
     }
 }
 

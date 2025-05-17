@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use clap::{Arg, ArgMatches, Command, value_parser};
 
 const DEFAULT_I405_PORT_STR: &str = "1405";
@@ -56,141 +54,21 @@ impl EzClap for WireConfiguration {
     }
 }
 
-pub struct TlsClientConfiguration {
-    pub certificate_authority_path: PathBuf,
-}
-
-impl EzClap for TlsClientConfiguration {
-    fn to_args() -> Vec<Arg> {
-        vec![
-            Arg::new("certificate_authority_path")
-                .long("certificate-authority-path")
-                .visible_alias("ca-path")
-                .value_parser(value_parser!(PathBuf))
-                .required(true)
-                .help("Path to the certificate authority file"),
-        ]
-    }
-
-    fn from_match(matches: &ArgMatches) -> Self {
-        TlsClientConfiguration {
-            certificate_authority_path: matches
-                .get_one::<PathBuf>("certificate_authority_path")
-                .unwrap()
-                .clone(),
-        }
-    }
-}
-
-pub struct TlsServerConfiguration {
-    pub certificate_path: PathBuf,
-}
-
-impl EzClap for TlsServerConfiguration {
-    fn to_args() -> Vec<Arg> {
-        vec![
-            Arg::new("certificate_path")
-                .long("certificate-path")
-                .visible_alias("cert-path")
-                .value_parser(value_parser!(PathBuf))
-                .required(true)
-                .help("Path to the certificate file"),
-        ]
-    }
-
-    fn from_match(matches: &ArgMatches) -> Self {
-        TlsServerConfiguration {
-            certificate_path: matches
-                .get_one::<PathBuf>("certificate_path")
-                .unwrap()
-                .clone(),
-        }
-    }
-}
-
-pub struct TcpClientConfiguration {
-    pub socks_listen_port: u16,
-    pub i405_server_host: String,
-    pub i405_server_port: u16,
-}
-
-impl EzClap for TcpClientConfiguration {
-    fn to_args() -> Vec<Arg> {
-        vec![
-            Arg::new("socks_listen_port")
-                .long("socks-listen-port")
-                .visible_alias("socks-port")
-                .value_parser(value_parser!(u16))
-                .default_value("1080")
-                .help("Port to listen on for SOCKS connections"),
-            Arg::new("i405_server_host")
-                .long("i405-server-host")
-                .visible_alias("i405-host")
-                .required(true)
-                .help("I405 server to connect to."),
-            Arg::new("i405_server_port")
-                .long("i405-server-port")
-                .visible_alias("i405-port")
-                .value_parser(value_parser!(u16))
-                .default_value(DEFAULT_I405_PORT_STR)
-                .help("I405 server port to connect to"),
-        ]
-    }
-
-    fn from_match(matches: &ArgMatches) -> Self {
-        TcpClientConfiguration {
-            socks_listen_port: matches.get_one::<u16>("socks_listen_port").unwrap().clone(),
-            i405_server_host: matches
-                .get_one::<String>("i405_server_host")
-                .unwrap()
-                .clone(),
-            i405_server_port: matches.get_one::<u16>("i405_server_port").unwrap().clone(),
-        }
-    }
-}
-
-pub struct TcpServerConfiguration {
-    pub i405_listen_host: String,
-    pub i405_listen_port: u16,
-}
-
-impl EzClap for TcpServerConfiguration {
-    fn to_args() -> Vec<Arg> {
-        vec![
-            // TODO allow multiple listen hosts.
-            Arg::new("i405_listen_host")
-                .long("i405-listen-host")
-                .visible_alias("i405-host")
-                .default_value("0.0.0.0")
-                .help("Host to listen on."),
-            Arg::new("i405_listen_port")
-                .long("i405-listen-port")
-                .visible_alias("i405-port")
-                .value_parser(value_parser!(u16))
-                .default_value(DEFAULT_I405_PORT_STR)
-                .help("I405 server port to listen on."),
-        ]
-    }
-
-    fn from_match(matches: &ArgMatches) -> Self {
-        TcpServerConfiguration {
-            i405_listen_host: matches
-                .get_one::<String>("i405_listen_host")
-                .unwrap()
-                .clone(),
-            i405_listen_port: matches.get_one::<u16>("i405_listen_port").unwrap().clone(),
-        }
-    }
-}
-
-pub struct TunConfiguration {
+pub struct CommonConfiguration {
+    pub pre_shared_key: Vec<u8>,
     pub tun_name: String,
     pub tun_ip: Option<String>,
 }
 
-impl EzClap for TunConfiguration {
+impl EzClap for CommonConfiguration {
     fn to_args() -> Vec<Arg> {
         vec![
+            Arg::new("pre_shared_key")
+                .long("password")
+                .visible_alias("pre-shared-key")
+                .value_parser(value_parser!(Vec<u8>))
+                .required(true)
+                .help("Encryption password that both client and server must share"),
 	    Arg::new("tun_name")
 		.long("tun-name")
 		.default_value(DEFAULT_TUN_NAME)
@@ -198,96 +76,61 @@ impl EzClap for TunConfiguration {
 	    Arg::new("tun_ip")
 		.long("tun-ip")
 		.help("IP address (optionally with netmask) to assign to the TUN device. Omit if you'll handle it yourself."),
-	]
+        ]
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
-        TunConfiguration {
+        CommonConfiguration {
+            pre_shared_key: matches
+                .get_one::<Vec<u8>>("pre_shared_key")
+                .unwrap()
+                .clone(),
             tun_name: matches.get_one::<String>("tun_name").unwrap().clone(),
             tun_ip: matches.get_one::<String>("tun_ip").cloned(),
         }
     }
 }
 
-pub struct CommonConfiguration {}
-
-impl EzClap for CommonConfiguration {
-    fn to_args() -> Vec<Arg> {
-        vec![]
-    }
-
-    fn from_match(_matches: &ArgMatches) -> Self {
-        CommonConfiguration {}
-    }
-}
-
-pub struct TopLevelTcpClientConfiguration {
+pub struct ClientConfiguration {
     common_configuration: CommonConfiguration,
     wire_configuration: WireConfiguration,
-    tls_client_configuration: TlsClientConfiguration,
-    tcp_client_configuration: TcpClientConfiguration,
 }
 
-pub struct TopLevelTcpServerConfiguration {
+pub struct ServerConfiguration {
     common_configuration: CommonConfiguration,
-    tls_server_configuration: TlsServerConfiguration,
-    tcp_server_configuration: TcpServerConfiguration,
-}
-
-pub struct TopLevelTunClientConfiguration {
-    common_configuration: CommonConfiguration,
-    wire_configuration: WireConfiguration,
-    tls_client_configuration: TlsClientConfiguration,
-    tun_configuration: TunConfiguration,
-}
-
-pub struct TopLevelTunServerConfiguration {
-    common_configuration: CommonConfiguration,
-    tls_server_configuration: TlsServerConfiguration,
-    tun_configuration: TunConfiguration,
 }
 
 pub enum Configuration {
-    TcpClient(TopLevelTcpClientConfiguration),
-    TcpServer(TopLevelTcpServerConfiguration),
-    // TunClient(TopLevelTunClientConfiguration),
-    // TunServer(TopLevelTunServerConfiguration),
+    Client(ClientConfiguration),
+    Server(ServerConfiguration),
 }
 
-fn tcp_client_command() -> Command {
-    Command::new("tcp-client")
+fn client_command() -> Command {
+    Command::new("client")
         .args(CommonConfiguration::to_args())
         .args(WireConfiguration::to_args())
-        .args(TlsClientConfiguration::to_args())
-        .args(TcpClientConfiguration::to_args())
 }
 
-fn tcp_server_command() -> Command {
-    Command::new("tcp-server")
+fn server_command() -> Command {
+    Command::new("server")
         .args(CommonConfiguration::to_args())
-        .args(TlsServerConfiguration::to_args())
-        .args(TcpServerConfiguration::to_args())
 }
 
 fn main_command() -> Command {
     Command::new("I-405")
-        .subcommand(tcp_client_command())
-        .subcommand(tcp_server_command())
+        .subcommand(client_command())
+        .subcommand(server_command())
 }
 
 pub fn parse_args() -> Configuration {
     let top_level_matches = main_command().get_matches();
     match top_level_matches.subcommand() {
-        Some(("tcp-client", matches)) => Configuration::TcpClient(TopLevelTcpClientConfiguration {
+        Some(("client", matches)) => Configuration::Client(ClientConfiguration {
             common_configuration: CommonConfiguration::from_match(matches),
             wire_configuration: WireConfiguration::from_match(matches),
-            tls_client_configuration: TlsClientConfiguration::from_match(matches),
-            tcp_client_configuration: TcpClientConfiguration::from_match(matches),
         }),
-        Some(("tcp-server", matches)) => Configuration::TcpServer(TopLevelTcpServerConfiguration {
+        Some(("server", matches)) => Configuration::Server(ServerConfiguration {
             common_configuration: CommonConfiguration::from_match(matches),
-            tls_server_configuration: TlsServerConfiguration::from_match(matches),
-            tcp_server_configuration: TcpServerConfiguration::from_match(matches),
         }),
         _ => unreachable!(),
     }

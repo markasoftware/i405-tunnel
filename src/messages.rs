@@ -27,7 +27,7 @@ impl PacketBuilder {
     }
 
     /// If there's space to add the given message to the packet, do so.
-    pub(crate) fn try_add_message(&mut self, message: Message) -> bool {
+    pub(crate) fn try_add_message(&mut self, message: &Message) -> bool {
         let mut length_serializer = serdes::LengthDeterminingSerializer::new();
         message.serialize(&mut length_serializer);
 
@@ -43,6 +43,7 @@ impl PacketBuilder {
 
 type MessageType = u8;
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
     ServerToClientHandshake(ServerToClientHandshake),
@@ -76,6 +77,7 @@ impl Message {
 
 //// INITIAL HANDSHAKE /////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ClientToServerHandshake {
     /// Need not be an exact match, it's more of a negotiation.
     protocol_version: u32,
@@ -122,6 +124,7 @@ impl serdes::Deserializable for ClientToServerHandshake {
 
 /// The server will send this message after receiving a ClientToServerHandshake, even if the
 /// versions are incompatible.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ServerToClientHandshake {
     protocol_version: u32,
     /// If false, the client should abandon the connection.
@@ -134,6 +137,9 @@ impl ServerToClientHandshake {
 
 impl serdes::Serializable for ServerToClientHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        MAGIC_VALUE.serialize(serializer);
+        SERDES_VERSION.serialize(serializer);
+        self.protocol_version.serialize(serializer);
         self.success.serialize(serializer);
     }
 }
@@ -160,6 +166,7 @@ impl serdes::Deserializable for ServerToClientHandshake {
 
 //// UNSCHEDULED PACKET ////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct UnscheduledPacket {
     packet: IpPacketBuffer,
 }
@@ -214,7 +221,8 @@ impl std::fmt::Display for DeserializeMessageErr {
     }
 }
 
-fn deserialize_message(read_cursor: &mut ReadCursor<&[u8]>) -> Result<Message, DeserializeMessageErr> {
+/// Read the next message from the cursor. Please check `has_message` first!
+fn deserialize_message<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Message, DeserializeMessageErr> {
     let message_type = match read_cursor.read_exact_comptime::<1>() {
         Some(message_type_bytes) => message_type_bytes[0],
         None => return Err(DeserializeMessageErr::Truncated(None)),
@@ -232,6 +240,11 @@ fn deserialize_message(read_cursor: &mut ReadCursor<&[u8]>) -> Result<Message, D
     }
     deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; UnscheduledPacket);
     Err(DeserializeMessageErr::UnknownMessageType(message_type))
+}
+
+/// Return whether there's another message to be read from this cursor. Does not move the cursor.
+fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
+    read_cursor.peek_exact_comptime::<1>().is_some_and(|x| x != [0])
 }
 
 //// CURSOR ////////////////////////////////////////////////////////////////////////////////////////
@@ -259,11 +272,10 @@ where
         self.underlying.as_ref().len() - self.position
     }
 
-    fn read_exact_comptime<const num: usize>(&mut self) -> Option<[u8; num]> {
+    fn peek_exact_comptime<const num: usize>(&self) -> Option<[u8; num]> {
         if self.num_bytes_left() >= num {
-            self.position += num;
             Some(
-                self.underlying.as_ref()[self.position - num..self.position]
+                self.underlying.as_ref()[self.position..self.position+num]
                     .try_into()
                     .unwrap(),
             )
@@ -271,6 +283,17 @@ where
             None
         }
     }
+
+    fn read_exact_comptime<const num: usize>(&mut self) -> Option<[u8; num]> {
+        let result = self.peek_exact_comptime::<num>();
+        if result.is_some() {
+            self.position += num;
+        }
+        result
+    }
+
+    // creating a peek_exact_runtime in the same way as above is harder, because if it's returning a
+    // reference into self, we can't then modify the position afterwards.
 
     fn read_exact_runtime(&mut self, len: usize) -> Option<&[u8]> {
         if self.num_bytes_left() >= len {
@@ -438,4 +461,57 @@ mod serdes {
     serdes_integral!(u16);
     serdes_integral!(u32);
     serdes_integral!(u64);
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, messages::{deserialize_message, has_message, ReadCursor}};
+
+    use super::{ClientToServerHandshake, Message, PacketBuilder, ServerToClientHandshake, UnscheduledPacket};
+
+    fn assert_roundtrip_message(msg: &Message) {
+        let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
+        assert!(builder.try_add_message(msg), "Failed to add message {:#?}", msg);
+        let buf = builder.finalize();
+        let mut cursor = ReadCursor::new(buf);
+        assert!(has_message(&cursor), "No message in cursor");
+        let roundtripped_msg = deserialize_message(&mut cursor).expect("Failed to deserialize message");
+        assert_eq!(msg, &roundtripped_msg, "Original should equal deserilaized message");
+    }
+
+    #[test]
+    fn roundtrip_c2s_handshake() {
+        assert_roundtrip_message(&Message::ClientToServerHandshake(ClientToServerHandshake {
+            // make sure they're all long enough that endianness matters
+            protocol_version: 5502,
+            s2c_packet_length: 2277,
+            s2c_packet_interval_ns: 992828,
+        }));
+    }
+
+    #[test]
+    fn roundtrip_s2c_handshake() {
+        assert_roundtrip_message(&Message::ServerToClientHandshake(ServerToClientHandshake {
+            success: true,
+            protocol_version: 5502,
+        }));
+        assert_roundtrip_message(&Message::ServerToClientHandshake(ServerToClientHandshake {
+            success: false,
+            protocol_version: 5502,
+        }));
+    }
+
+    #[test]
+    fn roundtrip_unscheduled_packet() {
+        assert_roundtrip_message(&Message::UnscheduledPacket(UnscheduledPacket {
+            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
+        }));
+        let mut test_vec = Vec::new();
+        for i in 0..500 {
+            test_vec.push((i % 256).try_into().unwrap());
+        }
+        assert_roundtrip_message(&Message::UnscheduledPacket(UnscheduledPacket {
+            packet: IpPacketBuffer::new(test_vec.as_ref()),
+        }));
+    }
 }
