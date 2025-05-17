@@ -40,7 +40,10 @@ impl<T: Default + Copy, const COMPTIME_LENGTH: usize> ArrayArray<T, COMPTIME_LEN
     }
 
     pub(crate) fn shrink(&mut self, new_length: usize) {
-        assert!(new_length <= self.runtime_length, "shrink should only be used to actually shrink");
+        assert!(
+            new_length <= self.runtime_length,
+            "shrink should only be used to actually shrink"
+        );
         self.runtime_length = new_length;
     }
 
@@ -70,3 +73,19 @@ impl<T, const COMPTIME_LENGTH: usize> AsRef<[T]> for ArrayArray<T, COMPTIME_LENG
 }
 
 pub(crate) type IpPacketBuffer = ArrayArray<u8, MAX_IP_PACKET_LENGTH>;
+
+#[cfg(test)]
+mod test {
+    use super::ArrayArray;
+
+    #[test]
+    fn array_array() {
+        let buf = &[1, 2, 3, 4, 5];
+        let mut arr = ArrayArray::<u8, 100>::new(buf);
+        assert_eq!(arr.len(), 5);
+        assert_eq!(&arr[..], buf);
+        arr.shrink(3);
+        assert_eq!(arr.len(), 3);
+        assert_eq!(&arr[..], &buf[..3]);
+    }
+}

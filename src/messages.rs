@@ -1,5 +1,5 @@
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use serdes::{Serializable as _, Deserializable as _};
+use serdes::{Deserializable as _, Serializable as _};
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -21,7 +21,7 @@ impl PacketBuilder {
         }
     }
 
-    pub(crate) fn finalize(self) -> IpPacketBuffer {
+    pub(crate) fn into_inner(self) -> IpPacketBuffer {
         // Already initialized it to zero, so remaining bytes are padding
         self.write_cursor.into_inner()
     }
@@ -31,7 +31,7 @@ impl PacketBuilder {
         let mut length_serializer = serdes::LengthDeterminingSerializer::new();
         message.serialize(&mut length_serializer);
 
-        let length = length_serializer.finalize();
+        let length = length_serializer.into_inner();
         if length > self.write_cursor.num_bytes_left() {
             return false;
         }
@@ -100,7 +100,9 @@ impl serdes::Serializable for ClientToServerHandshake {
 }
 
 impl serdes::Deserializable for ClientToServerHandshake {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(
+        read_cursor: &mut ReadCursor<T>,
+    ) -> Result<Self, DeserializeMessageErr> {
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
             return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
@@ -111,7 +113,9 @@ impl serdes::Deserializable for ClientToServerHandshake {
         // not to clutter the limited space of available types.
         let serdes_version: u32 = read_cursor.read()?;
         if serdes_version != SERDES_VERSION {
-            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(serdes_version));
+            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(
+                serdes_version,
+            ));
         }
 
         Ok(ClientToServerHandshake {
@@ -145,7 +149,9 @@ impl serdes::Serializable for ServerToClientHandshake {
 }
 
 impl serdes::Deserializable for ServerToClientHandshake {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(
+        read_cursor: &mut ReadCursor<T>,
+    ) -> Result<Self, DeserializeMessageErr> {
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
             return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
@@ -154,7 +160,9 @@ impl serdes::Deserializable for ServerToClientHandshake {
         // TODO do we really need to check in this direction?
         let serdes_version: u32 = read_cursor.read()?;
         if serdes_version != SERDES_VERSION {
-            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(serdes_version));
+            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(
+                serdes_version,
+            ));
         }
 
         Ok(ServerToClientHandshake {
@@ -182,8 +190,12 @@ impl serdes::Serializable for UnscheduledPacket {
 }
 
 impl serdes::Deserializable for UnscheduledPacket {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
-        Ok(UnscheduledPacket { packet: read_cursor.read()? })
+    fn deserialize<T: AsRef<[u8]>>(
+        read_cursor: &mut ReadCursor<T>,
+    ) -> Result<Self, DeserializeMessageErr> {
+        Ok(UnscheduledPacket {
+            packet: read_cursor.read()?,
+        })
     }
 }
 
@@ -221,30 +233,38 @@ impl std::fmt::Display for DeserializeMessageErr {
     }
 }
 
-/// Read the next message from the cursor. Please check `has_message` first!
-fn deserialize_message<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Message, DeserializeMessageErr> {
-    let message_type = match read_cursor.read_exact_comptime::<1>() {
-        Some(message_type_bytes) => message_type_bytes[0],
-        None => return Err(DeserializeMessageErr::Truncated(None)),
-    };
-    assert!(message_type != 0, "Message type was 0, ie padding. Padding should be skipped in outer loop.");
-
-    macro_rules! deserialize_messages {
-        ($($msg:ident);+) => {
-            $(
-                if message_type == $msg::TYPE_BYTE {
-                    return Ok(Message::$msg($msg::deserialize(read_cursor)?));
-                }
-            )+
+impl serdes::Deserializable for Message {
+    fn deserialize<T: AsRef<[u8]>>(
+        read_cursor: &mut ReadCursor<T>,
+    ) -> Result<Self, DeserializeMessageErr> {
+        let message_type = match read_cursor.read_exact_comptime::<1>() {
+            Some(message_type_bytes) => message_type_bytes[0],
+            None => return Err(DeserializeMessageErr::Truncated(None)),
         };
+        assert!(
+            message_type != 0,
+            "Message type was 0, ie padding. Padding should be skipped in outer loop."
+        );
+
+        macro_rules! deserialize_messages {
+            ($($msg:ident);+) => {
+                $(
+                    if message_type == $msg::TYPE_BYTE {
+                        return Ok(Message::$msg($msg::deserialize(read_cursor)?));
+                    }
+                )+
+            };
+        }
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; UnscheduledPacket);
+        Err(DeserializeMessageErr::UnknownMessageType(message_type))
     }
-    deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; UnscheduledPacket);
-    Err(DeserializeMessageErr::UnknownMessageType(message_type))
 }
 
 /// Return whether there's another message to be read from this cursor. Does not move the cursor.
 fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
-    read_cursor.peek_exact_comptime::<1>().is_some_and(|x| x != [0])
+    read_cursor
+        .peek_exact_comptime::<1>()
+        .is_some_and(|x| x != [0])
 }
 
 //// CURSOR ////////////////////////////////////////////////////////////////////////////////////////
@@ -275,7 +295,7 @@ where
     fn peek_exact_comptime<const num: usize>(&self) -> Option<[u8; num]> {
         if self.num_bytes_left() >= num {
             Some(
-                self.underlying.as_ref()[self.position..self.position+num]
+                self.underlying.as_ref()[self.position..self.position + num]
                     .try_into()
                     .unwrap(),
             )
@@ -298,7 +318,7 @@ where
     fn read_exact_runtime(&mut self, len: usize) -> Option<&[u8]> {
         if self.num_bytes_left() >= len {
             self.position += len;
-            Some(&self.underlying.as_ref()[self.position-len..self.position])
+            Some(&self.underlying.as_ref()[self.position - len..self.position])
         } else {
             None
         }
@@ -309,7 +329,7 @@ where
             Some(read_bytes) => {
                 dest.copy_from_slice(read_bytes);
                 true
-            },
+            }
             None => false,
         }
     }
@@ -350,6 +370,10 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
         } else {
             false
         }
+    }
+
+    fn write<S: serdes::Serializable>(&mut self, thing: S) {
+        thing.serialize(self)
     }
 }
 
@@ -394,7 +418,7 @@ mod serdes {
             Self { length: 0 }
         }
 
-        pub(crate) fn finalize(self) -> usize {
+        pub(crate) fn into_inner(self) -> usize {
             self.length
         }
     }
@@ -414,21 +438,34 @@ mod serdes {
         }
     }
 
-    pub(crate) trait Deserializable where Self: Sized {
+    pub(crate) trait Deserializable
+    where
+        Self: Sized,
+    {
         // could theoretically make this more generic than just ReadCursor, just like how Serialize
         // is generic over Serializers, but let's not do it until we need it.
-        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr>;
+        fn deserialize<T: AsRef<[u8]>>(
+            read_cursor: &mut ReadCursor<T>,
+        ) -> Result<Self, DeserializeMessageErr>;
     }
 
     impl<const C: usize> Deserializable for ArrayArray<u8, C> {
-        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+        fn deserialize<T: AsRef<[u8]>>(
+            read_cursor: &mut ReadCursor<T>,
+        ) -> Result<Self, DeserializeMessageErr> {
             let len: SerializedArrayArrayLength = read_cursor.read()?;
-            Ok(Self::new(read_cursor.read_exact_runtime(len.into()).ok_or(DeserializeMessageErr::Truncated(None))?))
+            Ok(Self::new(
+                read_cursor
+                    .read_exact_runtime(len.into())
+                    .ok_or(DeserializeMessageErr::Truncated(None))?,
+            ))
         }
     }
 
     impl Deserializable for bool {
-        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self, DeserializeMessageErr> {
+        fn deserialize<T: AsRef<[u8]>>(
+            read_cursor: &mut ReadCursor<T>,
+        ) -> Result<Self, DeserializeMessageErr> {
             let byte: u8 = read_cursor.read()?;
             match byte {
                 0 => Ok(false),
@@ -447,10 +484,14 @@ mod serdes {
             }
 
             impl Deserializable for $integral_type {
-                fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<$integral_type, DeserializeMessageErr> {
+                fn deserialize<T: AsRef<[u8]>>(
+                    read_cursor: &mut ReadCursor<T>,
+                ) -> Result<$integral_type, DeserializeMessageErr> {
                     // I keep getting syntax errors trying to inline this into the <...> below
                     const SIZE: usize = size_of::<$integral_type>();
-                    let read_bytes = read_cursor.read_exact_comptime::<SIZE>().ok_or(DeserializeMessageErr::Truncated(None))?;
+                    let read_bytes = read_cursor
+                        .read_exact_comptime::<SIZE>()
+                        .ok_or(DeserializeMessageErr::Truncated(None))?;
                     Ok($integral_type::from_be_bytes(read_bytes))
                 }
             }
@@ -465,18 +506,37 @@ mod serdes {
 
 #[cfg(test)]
 mod test {
-    use crate::{array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, messages::{deserialize_message, has_message, ReadCursor}};
+    use crate::{
+        array_array::{ArrayArray, IpPacketBuffer},
+        constants::MAX_IP_PACKET_LENGTH,
+        messages::{
+            DeserializeMessageErr, MAGIC_VALUE, ReadCursor, SERDES_VERSION, WriteCursor,
+            has_message,
+        },
+    };
 
-    use super::{ClientToServerHandshake, Message, PacketBuilder, ServerToClientHandshake, UnscheduledPacket};
+    use super::{
+        ClientToServerHandshake, Message, PacketBuilder, ServerToClientHandshake, UnscheduledPacket,
+    };
 
     fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
-        assert!(builder.try_add_message(msg), "Failed to add message {:#?}", msg);
-        let buf = builder.finalize();
+        assert!(
+            builder.try_add_message(msg),
+            "Failed to add message {:#?}",
+            msg
+        );
+        let buf = builder.into_inner();
         let mut cursor = ReadCursor::new(buf);
-        assert!(has_message(&cursor), "No message in cursor");
-        let roundtripped_msg = deserialize_message(&mut cursor).expect("Failed to deserialize message");
-        assert_eq!(msg, &roundtripped_msg, "Original should equal deserilaized message");
+        assert!(
+            has_message(&cursor),
+            "Message should be available in cursor"
+        );
+        let roundtripped_msg = cursor.read().expect("Message should deserialize correctly");
+        assert_eq!(
+            msg, &roundtripped_msg,
+            "Original should equal deserilaized message"
+        );
     }
 
     #[test]
@@ -514,4 +574,53 @@ mod test {
             packet: IpPacketBuffer::new(test_vec.as_ref()),
         }));
     }
+
+    /// Ensure that s2c and c2s handshakes error out if the magic values or serdes versions are not
+    /// equal
+    #[test]
+    fn magic_value_error() {
+        let mut arr_arr = ArrayArray::<u8, 100>::new_empty(100);
+        let mut write_cursor = WriteCursor::new(arr_arr);
+        // TODO Test both handshakes
+        write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
+        write_cursor.write(MAGIC_VALUE + 1 as u32);
+        let buf = write_cursor.into_inner();
+
+        let mut read_cursor = ReadCursor::new(buf);
+        assert!(
+            has_message(&read_cursor),
+            "Should be a message to deserialize"
+        );
+        assert!(
+            read_cursor.read::<Message>()
+                == Err(DeserializeMessageErr::WrongMagicValue(MAGIC_VALUE + 1)),
+            "Magic values should not match"
+        );
+    }
+
+    #[test]
+    fn serdes_version_error() {
+        let mut arr_arr = ArrayArray::<u8, 100>::new_empty(100);
+        let mut write_cursor = WriteCursor::new(arr_arr);
+        // TODO Test both handshakes
+        write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
+        write_cursor.write(MAGIC_VALUE as u32);
+        write_cursor.write(SERDES_VERSION + 1 as u32);
+        let buf = write_cursor.into_inner();
+
+        let mut read_cursor = ReadCursor::new(buf);
+        assert!(
+            has_message(&read_cursor),
+            "Should be a message to deserialize"
+        );
+        assert!(
+            read_cursor.read::<Message>()
+                == Err(DeserializeMessageErr::UnsupportedSerdesVersion(
+                    SERDES_VERSION + 1
+                )),
+            "Serdes versions should not match"
+        );
+    }
+
+    // TODO: test packet builder actually returns false when a packet would overrun the buffer
 }
