@@ -112,8 +112,7 @@ fn client_command() -> Command {
 }
 
 fn server_command() -> Command {
-    Command::new("server")
-        .args(CommonConfiguration::to_args())
+    Command::new("server").args(CommonConfiguration::to_args())
 }
 
 fn main_command() -> Command {
