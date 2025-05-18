@@ -91,7 +91,9 @@ impl DTLSNegotiatingSession {
             match self.underlying.try_negotiate() {
                 Err(err) => return DTLSNegotiateResult::Err(DTLSNegotiateError::WolfError(err)),
                 // We don't use secure renegotiation, so this shouldn't happen!
-                Ok(wolfssl::Poll::AppData(_)) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData),
+                Ok(wolfssl::Poll::AppData(_)) => {
+                    return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData);
+                }
                 Ok(wolfssl::Poll::PendingWrite) => self.add_written_packet(&mut written_packets),
                 Ok(wolfssl::Poll::PendingRead) => {
                     self.add_written_packet(&mut written_packets);
@@ -130,10 +132,18 @@ impl DTLSNegotiatingSession {
         match self.underlying.dtls_has_timed_out() {
             wolfssl::Poll::Ready(false) => self.add_written_packet(&mut written_packets),
             wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
-            wolfssl::Poll::PendingRead => return DTLSNegotiateResult::Err(DTLSNegotiateError::PendingReadDuringDTLSTimeout),
-            wolfssl::Poll::AppData(_) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData),
+            wolfssl::Poll::PendingRead => {
+                return DTLSNegotiateResult::Err(DTLSNegotiateError::PendingReadDuringDTLSTimeout);
+            }
+            wolfssl::Poll::AppData(_) => {
+                return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData);
+            }
             // this means some wolfssl error, but the wolfssl-rs api won't tell us which :|
-            wolfssl::Poll::Ready(true) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnknownWolfErrorDuringDTLSTimeout),
+            wolfssl::Poll::Ready(true) => {
+                return DTLSNegotiateResult::Err(
+                    DTLSNegotiateError::UnknownWolfErrorDuringDTLSTimeout,
+                );
+            }
         }
 
         // this is a bit annoying, because we have to add the at-most-1 packet that was written
@@ -142,11 +152,11 @@ impl DTLSNegotiatingSession {
             DTLSNegotiateResult::Ready(new_session, later_written_packets) => {
                 written_packets.extend(later_written_packets);
                 DTLSNegotiateResult::Ready(new_session, written_packets)
-            },
+            }
             DTLSNegotiateResult::NeedRead(new_session, later_written_packets, timeout) => {
                 written_packets.extend(later_written_packets);
                 DTLSNegotiateResult::NeedRead(new_session, written_packets, timeout)
-            },
+            }
             err @ DTLSNegotiateResult::Err(_) => err,
         }
     }
@@ -387,9 +397,14 @@ mod test {
         }
     }
 
-    fn has_timed_out(session: DTLSNegotiatingSession, timestamp: u64) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64) {
+    fn has_timed_out(
+        session: DTLSNegotiatingSession,
+        timestamp: u64,
+    ) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64) {
         match session.has_timed_out(timestamp) {
-            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets, new_timeout) => (new_session, outgoing_packets, new_timeout),
+            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets, new_timeout) => {
+                (new_session, outgoing_packets, new_timeout)
+            }
             DTLSNegotiateResult::Ready(_, _) => panic!("Ready during timeout"),
             e => panic!("Negotiate error during timeout {:?}", e),
         }
