@@ -5,6 +5,16 @@
 /// a very simple and usable interface that abstracts over the "IO Callbacks" that wolfssl (and most
 /// other TLS libraries) like to think about: Simply `try_write(cleartext_packet) ->
 /// ciphertext_packet` or `try_read(ciphertext_packet) -> cleartext_packet`.
+///
+/// Not sure where to put this comment, so putting it here: wolfSSL internally has a function
+/// LowResTimer that it uses to get...the low resolution time. It's possible to configure this to a
+/// user-defined function at compile time, but we don't, since its default behavior is honestly good
+/// enough for us. This timer is used for things like checking certificat expiry, and, importantly,
+/// ensuring that DTLS doesn't retransmit more than once per second. This affects our tests because
+/// it means we can't test multiple packet drops from the same side of the connection. But since
+/// this is really the only complication, I'm fine not doing the work to change wolfSSL compile time
+/// to insert a custom time function. But I do think this is a design issue on their part, and that
+/// it should be part of the IO callbacks to simplify things for users.
 // TODO add logging and tests for DTLS timestamps
 use thiserror::Error;
 
@@ -38,8 +48,7 @@ impl DTLSNegotiatingSession {
             DTLSNegotiateResult::NeedRead(new_session, packets, next_timeout) => {
                 Ok((new_session, packets, next_timeout))
             }
-            DTLSNegotiateResult::UnexpectedAppData => Err(NewDTLSSessionError::UnexpectedAppData),
-            DTLSNegotiateResult::WolfSSLErr(e) => Err(NewDTLSSessionError::from(e)),
+            DTLSNegotiateResult::Err(e) => Err(NewDTLSSessionError::from(e)),
         }
     }
 
@@ -79,11 +88,10 @@ impl DTLSNegotiatingSession {
         let mut written_packets = Vec::new();
 
         loop {
-            println!("About to try negotiating");
             match self.underlying.try_negotiate() {
-                Err(err) => return DTLSNegotiateResult::WolfSSLErr(err),
+                Err(err) => return DTLSNegotiateResult::Err(DTLSNegotiateError::WolfError(err)),
                 // We don't use secure renegotiation, so this shouldn't happen!
-                Ok(wolfssl::Poll::AppData(_)) => return DTLSNegotiateResult::UnexpectedAppData,
+                Ok(wolfssl::Poll::AppData(_)) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData),
                 Ok(wolfssl::Poll::PendingWrite) => self.add_written_packet(&mut written_packets),
                 Ok(wolfssl::Poll::PendingRead) => {
                     self.add_written_packet(&mut written_packets);
@@ -113,21 +121,33 @@ impl DTLSNegotiatingSession {
     }
 
     /// Call if the timeout returned from the constructor or `make_progress` expires.
-    ///
-    /// The wolfssl-rs API is weird here and doesn't return the actual error -- just a success or
-    /// failure. I'm tired of fixing wolfssl-rs, so we just mirror their notion of binary success.
-    /// Returns packets to send, and the next timeout.
-    pub(crate) fn has_timed_out(&mut self, timestamp: u64) -> Option<(Vec<IpPacketBuffer>, u64)> {
+    pub(crate) fn has_timed_out(mut self, timestamp: u64) -> DTLSNegotiateResult {
+        // dtls_has_timed_out, if blocked by a PendingWrite, won't do anything the next time it's
+        // called -- you're supposed to enter back into a negotiation loop. So that's what we do!
+
         let mut written_packets = Vec::new();
 
-        loop {
-            match self.underlying.dtls_has_timed_out() {
-                wolfssl::Poll::Ready(false) => {
-                    return Some((written_packets, self.next_timeout(timestamp)));
-                }
-                wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
-                _ => return None,
-            }
+        match self.underlying.dtls_has_timed_out() {
+            wolfssl::Poll::Ready(false) => self.add_written_packet(&mut written_packets),
+            wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
+            wolfssl::Poll::PendingRead => return DTLSNegotiateResult::Err(DTLSNegotiateError::PendingReadDuringDTLSTimeout),
+            wolfssl::Poll::AppData(_) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnexpectedAppData),
+            // this means some wolfssl error, but the wolfssl-rs api won't tell us which :|
+            wolfssl::Poll::Ready(true) => return DTLSNegotiateResult::Err(DTLSNegotiateError::UnknownWolfErrorDuringDTLSTimeout),
+        }
+
+        // this is a bit annoying, because we have to add the at-most-1 packet that was written
+        // during timeout handling onto those returned by negotiation.
+        match self.inner_try_negotiate(None, timestamp) {
+            DTLSNegotiateResult::Ready(new_session, later_written_packets) => {
+                written_packets.extend(later_written_packets);
+                DTLSNegotiateResult::Ready(new_session, written_packets)
+            },
+            DTLSNegotiateResult::NeedRead(new_session, later_written_packets, timeout) => {
+                written_packets.extend(later_written_packets);
+                DTLSNegotiateResult::NeedRead(new_session, written_packets, timeout)
+            },
+            err @ DTLSNegotiateResult::Err(_) => err,
         }
     }
 }
@@ -139,12 +159,23 @@ pub(crate) enum NewDTLSSessionError {
     NewSessionError(#[from] wolfssl::NewSessionError),
     #[error("NewContextBuilderError {0:?}")]
     NewContextBuilderError(#[from] wolfssl::NewContextBuilderError),
-    #[error("WolfError {0:?}")]
-    WolfError(#[from] wolfssl::Error),
-    #[error("Client was ready immediately")]
+    #[error("NegotiateError {0:?}")]
+    NegotiateError(#[from] DTLSNegotiateError),
+    #[error("Negotiation was reported as complete immediately upon session creation??")]
     ReadyImmediately,
-    #[error("Unexpected AppData")]
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum DTLSNegotiateError {
+    // TODO also why do we need these error() messages? (see above)
+    #[error("wolfSSL error {0:?}")]
+    WolfError(#[from] wolfssl::Error),
+    #[error("Unexpected AppData during negotiation")]
     UnexpectedAppData,
+    #[error("wolfSSL error during DTLS timeout (no further details available)")]
+    UnknownWolfErrorDuringDTLSTimeout,
+    #[error("wolfSSL tried to read during DTLS timeout")]
+    PendingReadDuringDTLSTimeout,
 }
 
 #[derive(Debug)]
@@ -153,8 +184,7 @@ pub(crate) enum DTLSNegotiateResult {
     Ready(DTLSEstablishedSession, Vec<IpPacketBuffer>),
     /// Send these packets, then read more packets and get back to us. Last tuple element is the timeout timestamp.
     NeedRead(DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64),
-    WolfSSLErr(wolfssl::Error),
-    UnexpectedAppData, // an error, but we can't cleanly fit it into WolfSSLErr
+    Err(DTLSNegotiateError),
 }
 
 pub(crate) struct DTLSEstablishedSession {
@@ -305,12 +335,12 @@ mod test {
         timestamp: u64,
     ) -> DTLSNegotiateResult {
         let mut out_packets = Vec::new();
-        let mut new_timeout = 0;
+        let mut new_timeout = None;
         for packet in packets {
             match session.make_progress(&packet, timestamp) {
                 DTLSNegotiateResult::NeedRead(new_session, cur_out_packets, cur_new_timeout) => {
                     out_packets.extend(cur_out_packets);
-                    new_timeout = cur_new_timeout;
+                    new_timeout = Some(cur_new_timeout);
                     session = new_session;
                 }
                 DTLSNegotiateResult::Ready(new_session, cur_out_packets) => {
@@ -320,8 +350,11 @@ mod test {
                 e => panic!("Unexpected DTLSNegotiateResult: {:?}", e),
             }
         }
-        assert!(new_timeout != 0);
-        DTLSNegotiateResult::NeedRead(session, out_packets, new_timeout)
+        DTLSNegotiateResult::NeedRead(
+            session,
+            out_packets,
+            new_timeout.expect("`packets` should not be empty"),
+        )
     }
 
     /// Make handshake progress, asserting that the handshake is not complete.
@@ -354,9 +387,16 @@ mod test {
         }
     }
 
-    /// Test that we can negotiate and send a packet using our wolfssl wrapper
+    fn has_timed_out(session: DTLSNegotiatingSession, timestamp: u64) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64) {
+        match session.has_timed_out(timestamp) {
+            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets, new_timeout) => (new_session, outgoing_packets, new_timeout),
+            DTLSNegotiateResult::Ready(_, _) => panic!("Ready during timeout"),
+            e => panic!("Negotiate error during timeout {:?}", e),
+        }
+    }
+
     #[test]
-    fn wolfssl_wrapper() {
+    fn negotiate_and_roundtrip() {
         let psk = b"password";
 
         // I'm not sure why so many roundtrips are necessary. My understanding is there need to only
@@ -402,5 +442,57 @@ mod test {
             msg2,
             "Roundtripped should equal original msg (server->client)"
         );
+    }
+
+    #[test]
+    fn timeout_dropped_client_packet() {
+        let psk = b"password";
+
+        let server = DTLSNegotiatingSession::new_server(psk).unwrap();
+        // drop an initial handshake message
+        let (client, _, _) = DTLSNegotiatingSession::new_client(psk, 0).unwrap();
+        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        assert!(!c2s_packets.is_empty());
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        let (_, s2c_packets) = make_progress_final(server, &c2s_packets);
+        make_progress_final(client, &s2c_packets);
+    }
+
+    // this one requires us to sleep for a couple seconds in order to get past the rtx timer
+    // described at the top of this file.
+    #[test]
+    #[ignore]
+    fn timeout_more_dropped_packets() {
+        let psk = b"password";
+
+        let server = DTLSNegotiatingSession::new_server(psk).unwrap();
+        // drop an initial handshake message
+        let (client, _, _) = DTLSNegotiatingSession::new_client(psk, 0).unwrap();
+        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        assert!(!c2s_packets.is_empty());
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        // now drop a server message
+        let (server, _, _) = make_progress(server, &c2s_packets, 0);
+        // this first one will be empty because of some fast-timeout logic crap
+        let (server, _, _) = has_timed_out(server, 0);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        assert!(!s2c_packets.is_empty()); // usually two packets here, instead of the 3 that would have originally been sent.
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        assert!(c2s_packets.is_empty()); // honestly not sure why the client isn't able to respond just because there's 1 fewer s2c packet than usual.
+        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        assert!(!c2s_packets.is_empty());
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        assert!(s2c_packets.is_empty());
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        assert!(!s2c_packets.is_empty());
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        let (_, s2c_packets) = make_progress_final(server, &c2s_packets);
+        make_progress_final(client, &s2c_packets);
     }
 }

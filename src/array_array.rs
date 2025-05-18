@@ -2,10 +2,16 @@ use crate::constants::MAX_IP_PACKET_LENGTH;
 
 /// runtime-fixed length array inside a comptime-known fixed length array. Like a shitty
 /// ArrayVec, hence the name.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub(crate) struct ArrayArray<T, const COMPTIME_LENGTH: usize> {
     underlying: [T; COMPTIME_LENGTH],
     runtime_length: usize,
+}
+
+impl<T: std::fmt::Debug, const COMPTIME_LENGTH: usize> std::fmt::Debug for ArrayArray<T, COMPTIME_LENGTH> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ArrayArray {{runtime_length={}, data={:?}}}", self.runtime_length, &self.underlying[..self.runtime_length])
+    }
 }
 
 impl<T: Default + Copy, const COMPTIME_LENGTH: usize> ArrayArray<T, COMPTIME_LENGTH> {
