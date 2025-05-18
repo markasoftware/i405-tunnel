@@ -319,9 +319,9 @@ mod test {
 
     use super::{DTLSEstablishedSession, DTLSNegotiateResult, DTLSNegotiatingSession};
 
-    fn negotiate_multiple_packets(
+    fn negotiate_multiple_packets<'a>(
         mut session: DTLSNegotiatingSession,
-        packets: impl std::iter::IntoIterator<Item = IpPacketBuffer>,
+        packets: impl std::iter::IntoIterator<Item = &'a IpPacketBuffer>,
     ) -> DTLSNegotiateResult {
         let mut out_packets = Vec::new();
         for packet in packets {
@@ -340,79 +340,73 @@ mod test {
         DTLSNegotiateResult::NeedRead(session, out_packets)
     }
 
+    /// Make handshake progress, asserting that the handshake is not complete.
+    fn make_progress(
+        session: DTLSNegotiatingSession,
+        incoming_packets: &Vec<IpPacketBuffer>,
+    ) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>) {
+        match negotiate_multiple_packets(session, incoming_packets) {
+            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets) => {
+                (new_session, outgoing_packets)
+            }
+            DTLSNegotiateResult::Ready(_, _) => panic!("Ready too early"),
+            e => panic!("Unexpected result {:?}", e),
+        }
+    }
+
+    /// Make handshake progress, asserting that the handshake is complete at the end.
+    fn make_progress_final(
+        session: DTLSNegotiatingSession,
+        incoming_packets: &Vec<IpPacketBuffer>,
+    ) -> (DTLSEstablishedSession, Vec<IpPacketBuffer>) {
+        match negotiate_multiple_packets(session, incoming_packets) {
+            DTLSNegotiateResult::NeedRead(_, _) => panic!("Not ready in time"),
+            DTLSNegotiateResult::Ready(new_session, outgoing_packets) => {
+                (new_session, outgoing_packets)
+            }
+            e => panic!("Unexpected result {:?}", e),
+        }
+    }
+
     /// Test that we can negotiate and send a packet using our wolfssl wrapper
     #[test]
     fn wolfssl_wrapper() {
         let psk = b"password";
 
         //// FIRST ROUNDTRIP ////
-        let (mut client, c2s_packets_1) = DTLSNegotiatingSession::new_client(psk).unwrap();
-        let mut server = DTLSNegotiatingSession::new_server(psk).unwrap();
+        let (client, c2s_packets) = DTLSNegotiatingSession::new_client(psk).unwrap();
+        let server = DTLSNegotiatingSession::new_server(psk).unwrap();
 
-        for packet in &c2s_packets_1 {
-            println!("cs packet {}", packet.len());
-        }
+        let (server, s2c_packets) = make_progress(server, &c2s_packets);
+        let (client, c2s_packets) = make_progress(client, &s2c_packets);
+        let (server, s2c_packets) = make_progress(server, &c2s_packets);
+        let (client, c2s_packets) = make_progress(client, &s2c_packets);
+        let (mut server, s2c_packets) = make_progress_final(server, &c2s_packets);
+        let (mut client, c2s_packets) = make_progress_final(client, &s2c_packets);
 
-        let mut s2c_packets_1 = Vec::new();
-        match negotiate_multiple_packets(server, c2s_packets_1) {
-            DTLSNegotiateResult::NeedRead(new_server, cur_s2c_packets) => {
-                s2c_packets_1 = cur_s2c_packets;
-                server = new_server;
-            }
-            DTLSNegotiateResult::Ready(_, _) => panic!("Ready too early"),
-            e => panic!("Unexpected result {:?}", e),
-        }
-
-        for packet in &s2c_packets_1 {
-            println!("sc packet {}", packet.len());
-        }
-
-        //// SECOND ROUNDTRIP ////
-        let mut c2s_packets_2 = Vec::new();
-        match negotiate_multiple_packets(client, s2c_packets_1) {
-            DTLSNegotiateResult::NeedRead(new_client, cur_c2s_packets) => {
-                c2s_packets_2 = cur_c2s_packets;
-                client = new_client;
-            }
-            DTLSNegotiateResult::Ready(_, _) => panic!("Ready too early"),
-            e => panic!("Unexpected result {:?}", e),
-        }
-
-        for packet in &c2s_packets_2 {
-            println!("cs packet {}", packet.len());
-        }
-
-        let mut s2c_packets_2 = Vec::new();
-        let mut server_established = None;
-        match negotiate_multiple_packets(server, c2s_packets_2) {
-            DTLSNegotiateResult::NeedRead(_, _) => panic!("Wasn't ready in time"),
-            DTLSNegotiateResult::Ready(new_server, cur_s2c_packets) => {
-                s2c_packets_2 = cur_s2c_packets;
-                server_established = Some(new_server);
-            }
-            e => panic!("Unexpected result {:?}", e),
-        }
+        assert!(
+            c2s_packets.is_empty(),
+            "Client shouldn't send any packets to finish the connection"
+        );
 
         //// CLIENT -> SERVER APPLICATION DATA ////
-        // let msg = b"howdy howdy lil cutie";
-        // let c2s_packet = client.try_write(msg).unwrap();
-        // let roundtripped = server.try_read(&c2s_packet).unwrap();
-        // assert_eq!(
-        //     &roundtripped[..],
-        //     msg,
-        //     "Roundtripped should equal original msg (client->server)"
-        // );
+        let msg = b"howdy howdy lil cutie";
+        let c2s_packet = client.try_write(msg).unwrap();
+        let roundtripped = server.try_read(&c2s_packet).unwrap();
+        assert_eq!(
+            &roundtripped[..],
+            msg,
+            "Roundtripped should equal original msg (client->server)"
+        );
 
-        // //// SERVER -> CLIENT APPLICATION DATA ////
-        // let msg2 = b"im buying weed on the internet";
-        // let s2c_packet = server.try_write(msg2).unwrap();
-        // let roundtripped2 = client.try_read(&s2c_packet).unwrap();
-        // assert_eq!(
-        //     &roundtripped2[..],
-        //     msg2,
-        //     "Roundtripped should equal original msg (server->client)"
-        // );
-
-        // assert!(num_roundtrips == 2, "Should take 2 roundtrips to complete the handshake, not {}.", num_roundtrips);
+        //// SERVER -> CLIENT APPLICATION DATA ////
+        let msg2 = b"im buying weed on the internet";
+        let s2c_packet = server.try_write(msg2).unwrap();
+        let roundtripped2 = client.try_read(&s2c_packet).unwrap();
+        assert_eq!(
+            &roundtripped2[..],
+            msg2,
+            "Roundtripped should equal original msg (server->client)"
+        );
     }
 }
