@@ -2,6 +2,7 @@ mod array_array;
 mod config;
 mod constants;
 mod core;
+mod dtls;
 mod hardware;
 mod messages;
 
