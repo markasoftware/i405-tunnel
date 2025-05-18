@@ -462,35 +462,56 @@ mod test {
     }
 
     // this one requires us to sleep for a couple seconds in order to get past the rtx timer
-    // described at the top of this file.
+    // described at the top of this file. Honestly, I'm very confused about the exact details of the
+    // behavior wolfSSL exhibits in this test; I originally wanted only to drop one of the client
+    // initial handshake messages, then drop one of the server responses later, then continue the
+    // rest like usual. However, after the server drops, it only wants to send /2/ packets instead
+    // of 3 that it sent before the timeout, which isn't enough for the client to say anything back.
+    // Maybe because wolf doesn't think it's likely all 3 packets would be dropped at the same time,
+    // and is optimizing for a case where say only the first or second packet got dropped? Anyway,
+    // if we simulate everyone involved having timeouts and retransimtting stuff, it eventually
+    // works.
     #[test]
     #[ignore]
     fn timeout_more_dropped_packets() {
         let psk = b"password";
 
         let server = DTLSNegotiatingSession::new_server(psk).unwrap();
+
         // drop an initial handshake message
         let (client, _, _) = DTLSNegotiatingSession::new_client(psk, 0).unwrap();
         let (client, c2s_packets, _) = has_timed_out(client, 0);
         assert!(!c2s_packets.is_empty());
+
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+
         // now drop a server message
         let (server, _, _) = make_progress(server, &c2s_packets, 0);
-        // this first one will be empty because of some fast-timeout logic crap
-        let (server, _, _) = has_timed_out(server, 0);
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // this first one will be empty due to fast retry crap
         let (server, s2c_packets, _) = has_timed_out(server, 0);
-        assert!(!s2c_packets.is_empty()); // usually two packets here, instead of the 3 that would have originally been sent.
+        assert!(s2c_packets.is_empty());
+        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        // usually two packets here, instead of the 3 that would have originally been sent. REALLY
+        // not sure why that is.
+        assert!(!s2c_packets.is_empty());
+
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
-        assert!(c2s_packets.is_empty()); // honestly not sure why the client isn't able to respond just because there's 1 fewer s2c packet than usual.
+        // honestly not sure why the client isn't able to respond just because there's 1 fewer s2c
+        // packet than usual.
+        assert!(c2s_packets.is_empty());
         let (client, c2s_packets, _) = has_timed_out(client, 0);
         assert!(!c2s_packets.is_empty());
+
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
         assert!(s2c_packets.is_empty());
+        // the server already did some retransmitting not long ago, so we have to do this to get it
+        // to retransmit again.
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (server, s2c_packets, _) = has_timed_out(server, 0);
         assert!(!s2c_packets.is_empty());
+
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
         let (_, s2c_packets) = make_progress_final(server, &c2s_packets);
         make_progress_final(client, &s2c_packets);
