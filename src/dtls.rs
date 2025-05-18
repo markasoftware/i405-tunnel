@@ -5,7 +5,7 @@
 /// a very simple and usable interface that abstracts over the "IO Callbacks" that wolfssl (and most
 /// other TLS libraries) like to think about: Simply `try_write(cleartext_packet) ->
 /// ciphertext_packet` or `try_read(ciphertext_packet) -> cleartext_packet`.
-
+// TODO add logging and tests for DTLS timestamps
 use thiserror::Error;
 
 use crate::{array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH};
@@ -21,10 +21,11 @@ impl std::fmt::Debug for DTLSNegotiatingSession {
 }
 
 impl DTLSNegotiatingSession {
-    /// Construct a new client, and also returns the initial handshake packets that should be sent.
+    /// Construct a new client, and also returns the initial handshake packets that should be sent and the first timeout.
     pub(crate) fn new_client(
         pre_shared_key: &[u8],
-    ) -> Result<(Self, Vec<IpPacketBuffer>), NewDTLSSessionError> {
+        timestamp: u64,
+    ) -> Result<(Self, Vec<IpPacketBuffer>, u64), NewDTLSSessionError> {
         let wolf_session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsClientV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
@@ -32,9 +33,11 @@ impl DTLSNegotiatingSession {
         let session = DTLSNegotiatingSession {
             underlying: wolf_session,
         };
-        match session.inner_try_negotiate(None) {
+        match session.inner_try_negotiate(None, timestamp) {
             DTLSNegotiateResult::Ready(_, _) => Err(NewDTLSSessionError::ReadyImmediately),
-            DTLSNegotiateResult::NeedRead(new_session, packets) => Ok((new_session, packets)),
+            DTLSNegotiateResult::NeedRead(new_session, packets, next_timeout) => {
+                Ok((new_session, packets, next_timeout))
+            }
             DTLSNegotiateResult::UnexpectedAppData => Err(NewDTLSSessionError::UnexpectedAppData),
             DTLSNegotiateResult::WolfSSLErr(e) => Err(NewDTLSSessionError::from(e)),
         }
@@ -50,10 +53,21 @@ impl DTLSNegotiatingSession {
         })
     }
 
+    fn add_written_packet(&mut self, vec: &mut Vec<IpPacketBuffer>) {
+        match self.underlying.io_cb_mut().pop_last_sent_packet() {
+            Some(last_sent_packet) => vec.push(last_sent_packet),
+            None => (),
+        }
+    }
+
     /// Negotiate as far as we can. Pass in the most recently read packet off the network. If we
     /// need more packets, we'll tell you. If the return value indicates packets need to be sent,
     /// please send them.
-    fn inner_try_negotiate(mut self, read_packet: Option<&[u8]>) -> DTLSNegotiateResult {
+    fn inner_try_negotiate(
+        mut self,
+        read_packet: Option<&[u8]>,
+        timestamp: u64,
+    ) -> DTLSNegotiateResult {
         match read_packet {
             Some(packet) => self
                 .underlying
@@ -64,32 +78,20 @@ impl DTLSNegotiatingSession {
 
         let mut written_packets = Vec::new();
 
-        // TODO understand: If I capture `self` instead of taking it as an argument, then the borrow
-        // checker complains that add_written_packet has a mutable borrow of `self` for the rest of
-        // the function. Why is that the case? Why doesn't the mutable borrow of `self` simply occur
-        // when `add_written_packet` is called, rather than being persistent?
-        let mut add_written_packet = |session_obj: &mut Self| match session_obj
-            .underlying
-            .io_cb_mut()
-            .pop_last_sent_packet()
-        {
-            Some(last_sent_packet) => written_packets.push(last_sent_packet),
-            None => (),
-        };
-
         loop {
             println!("About to try negotiating");
             match self.underlying.try_negotiate() {
                 Err(err) => return DTLSNegotiateResult::WolfSSLErr(err),
                 // We don't use secure renegotiation, so this shouldn't happen!
                 Ok(wolfssl::Poll::AppData(_)) => return DTLSNegotiateResult::UnexpectedAppData,
-                Ok(wolfssl::Poll::PendingWrite) => add_written_packet(&mut self),
+                Ok(wolfssl::Poll::PendingWrite) => self.add_written_packet(&mut written_packets),
                 Ok(wolfssl::Poll::PendingRead) => {
-                    add_written_packet(&mut self);
-                    return DTLSNegotiateResult::NeedRead(self, written_packets);
+                    self.add_written_packet(&mut written_packets);
+                    let next_timeout = self.next_timeout(timestamp);
+                    return DTLSNegotiateResult::NeedRead(self, written_packets, next_timeout);
                 }
                 Ok(wolfssl::Poll::Ready(())) => {
-                    add_written_packet(&mut self);
+                    self.add_written_packet(&mut written_packets);
                     return DTLSNegotiateResult::Ready(
                         DTLSEstablishedSession {
                             underlying: self.underlying,
@@ -101,8 +103,32 @@ impl DTLSNegotiatingSession {
         }
     }
 
-    pub(crate) fn make_progress(self, read_packet: &[u8]) -> DTLSNegotiateResult {
-        self.inner_try_negotiate(Some(read_packet))
+    fn next_timeout(&mut self, current_timestamp: u64) -> u64 {
+        current_timestamp
+            + TryInto::<u64>::try_into(self.underlying.dtls_current_timeout().as_nanos()).unwrap()
+    }
+
+    pub(crate) fn make_progress(self, read_packet: &[u8], timestamp: u64) -> DTLSNegotiateResult {
+        self.inner_try_negotiate(Some(read_packet), timestamp)
+    }
+
+    /// Call if the timeout returned from the constructor or `make_progress` expires.
+    ///
+    /// The wolfssl-rs API is weird here and doesn't return the actual error -- just a success or
+    /// failure. I'm tired of fixing wolfssl-rs, so we just mirror their notion of binary success.
+    /// Returns packets to send, and the next timeout.
+    pub(crate) fn has_timed_out(&mut self, timestamp: u64) -> Option<(Vec<IpPacketBuffer>, u64)> {
+        let mut written_packets = Vec::new();
+
+        loop {
+            match self.underlying.dtls_has_timed_out() {
+                wolfssl::Poll::Ready(false) => {
+                    return Some((written_packets, self.next_timeout(timestamp)));
+                }
+                wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
+                _ => return None,
+            }
+        }
     }
 }
 
@@ -125,8 +151,8 @@ pub(crate) enum NewDTLSSessionError {
 pub(crate) enum DTLSNegotiateResult {
     /// Negotiation is completely done as soon as you send these packets!
     Ready(DTLSEstablishedSession, Vec<IpPacketBuffer>),
-    /// Send these packets, then read more packets and get back to us
-    NeedRead(DTLSNegotiatingSession, Vec<IpPacketBuffer>),
+    /// Send these packets, then read more packets and get back to us. Last tuple element is the timeout timestamp.
+    NeedRead(DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64),
     WolfSSLErr(wolfssl::Error),
     UnexpectedAppData, // an error, but we can't cleanly fit it into WolfSSLErr
 }
@@ -276,12 +302,15 @@ mod test {
     fn negotiate_multiple_packets<'a>(
         mut session: DTLSNegotiatingSession,
         packets: impl std::iter::IntoIterator<Item = &'a IpPacketBuffer>,
+        timestamp: u64,
     ) -> DTLSNegotiateResult {
         let mut out_packets = Vec::new();
+        let mut new_timeout = 0;
         for packet in packets {
-            match session.make_progress(&packet) {
-                DTLSNegotiateResult::NeedRead(new_session, cur_out_packets) => {
+            match session.make_progress(&packet, timestamp) {
+                DTLSNegotiateResult::NeedRead(new_session, cur_out_packets, cur_new_timeout) => {
                     out_packets.extend(cur_out_packets);
+                    new_timeout = cur_new_timeout;
                     session = new_session;
                 }
                 DTLSNegotiateResult::Ready(new_session, cur_out_packets) => {
@@ -291,17 +320,19 @@ mod test {
                 e => panic!("Unexpected DTLSNegotiateResult: {:?}", e),
             }
         }
-        DTLSNegotiateResult::NeedRead(session, out_packets)
+        assert!(new_timeout != 0);
+        DTLSNegotiateResult::NeedRead(session, out_packets, new_timeout)
     }
 
     /// Make handshake progress, asserting that the handshake is not complete.
     fn make_progress(
         session: DTLSNegotiatingSession,
         incoming_packets: &Vec<IpPacketBuffer>,
-    ) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>) {
-        match negotiate_multiple_packets(session, incoming_packets) {
-            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets) => {
-                (new_session, outgoing_packets)
+        timestamp: u64,
+    ) -> (DTLSNegotiatingSession, Vec<IpPacketBuffer>, u64) {
+        match negotiate_multiple_packets(session, incoming_packets, timestamp) {
+            DTLSNegotiateResult::NeedRead(new_session, outgoing_packets, new_timeout) => {
+                (new_session, outgoing_packets, new_timeout)
             }
             DTLSNegotiateResult::Ready(_, _) => panic!("Ready too early"),
             e => panic!("Unexpected result {:?}", e),
@@ -313,8 +344,9 @@ mod test {
         session: DTLSNegotiatingSession,
         incoming_packets: &Vec<IpPacketBuffer>,
     ) -> (DTLSEstablishedSession, Vec<IpPacketBuffer>) {
-        match negotiate_multiple_packets(session, incoming_packets) {
-            DTLSNegotiateResult::NeedRead(_, _) => panic!("Not ready in time"),
+        // timestamp doesn't matter here, since we're final
+        match negotiate_multiple_packets(session, incoming_packets, 0) {
+            DTLSNegotiateResult::NeedRead(_, _, _) => panic!("Not ready in time"),
             DTLSNegotiateResult::Ready(new_session, outgoing_packets) => {
                 (new_session, outgoing_packets)
             }
@@ -337,12 +369,12 @@ mod test {
         // have a branch where I changed the IO callbacks to have a buffer of 10 packets instead of
         // 1, and the behavior is the same.
         let server = DTLSNegotiatingSession::new_server(psk).unwrap();
-        let (client, c2s_packets) = DTLSNegotiatingSession::new_client(psk).unwrap();
+        let (client, c2s_packets, _) = DTLSNegotiatingSession::new_client(psk, 0).unwrap();
 
-        let (server, s2c_packets) = make_progress(server, &c2s_packets);
-        let (client, c2s_packets) = make_progress(client, &s2c_packets);
-        let (server, s2c_packets) = make_progress(server, &c2s_packets);
-        let (client, c2s_packets) = make_progress(client, &s2c_packets);
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
+        let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
+        let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
         let (mut server, s2c_packets) = make_progress_final(server, &c2s_packets);
         let (mut client, c2s_packets) = make_progress_final(client, &s2c_packets);
 
