@@ -1,8 +1,10 @@
-use enumflags2::{BitFlag, BitFlags, bitflags};
+mod ip_packet;
+
 use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use serdes::Serializable as _;
+use serdes::{Serializable as _, SerializableLength as _};
+pub(crate) use ip_packet::IpPacket;
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -26,11 +28,7 @@ impl PacketBuilder {
 
     /// If there's space to add the given message to the packet, do so.
     pub(crate) fn try_add_message(&mut self, message: &Message) -> bool {
-        let mut length_serializer = serdes::LengthDeterminingSerializer::new();
-        message.serialize(&mut length_serializer);
-
-        let length = length_serializer.into_inner();
-        if length > self.write_cursor.num_bytes_left() {
+        if message.serialized_length() > self.write_cursor.num_bytes_left() {
             return false;
         }
 
@@ -48,7 +46,7 @@ pub(crate) enum Message {
     IpPacket(IpPacket),
 }
 
-impl Message {
+impl serdes::Serializable for Message {
     /// Try to serialize into the given buffer (if we fit), returning how many bytes were written if
     /// we did fit. We avoid std::Write because it returns a whole-ass Result we don't need.
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
@@ -57,7 +55,6 @@ impl Message {
                 match self {
                     $(
                         Message::$enum_item(msg) => {
-                            $enum_item::TYPE_BYTE.serialize(serializer);
                             msg.serialize(serializer);
                         }
                     ),+
@@ -72,6 +69,16 @@ impl Message {
         );
     }
 }
+
+macro_rules! deserialize_type_byte {
+    ($read_cursor:ident) => {
+        let type_byte = $read_cursor.read()?;
+        if type_byte != Self::TYPE_BYTE {
+            return Err(DeserializeMessageErr::WrongTypeByte(type_byte, Self::TYPE_BYTE));
+        }
+    };
+}
+pub(crate) use deserialize_type_byte;
 
 //// INITIAL HANDSHAKE /////////////////////////////////////////////////////////////////////////////
 
@@ -89,6 +96,7 @@ impl ClientToServerHandshake {
 
 impl serdes::Serializable for ClientToServerHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
         MAGIC_VALUE.serialize(serializer);
         SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
@@ -101,6 +109,8 @@ impl serdes::Deserializable for ClientToServerHandshake {
     fn deserialize<T: AsRef<[u8]>>(
         read_cursor: &mut ReadCursor<T>,
     ) -> Result<Self, DeserializeMessageErr> {
+        deserialize_type_byte!(read_cursor);
+
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
             return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
@@ -139,6 +149,7 @@ impl ServerToClientHandshake {
 
 impl serdes::Serializable for ServerToClientHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
         MAGIC_VALUE.serialize(serializer);
         SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
@@ -150,6 +161,8 @@ impl serdes::Deserializable for ServerToClientHandshake {
     fn deserialize<T: AsRef<[u8]>>(
         read_cursor: &mut ReadCursor<T>,
     ) -> Result<Self, DeserializeMessageErr> {
+        deserialize_type_byte!(read_cursor);
+
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
             return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
@@ -172,89 +185,6 @@ impl serdes::Deserializable for ServerToClientHandshake {
 
 //// IP PACKET /////////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct IpPacket {
-    schedule: Option<u64>, // timestamp
-    fragmentation: Option<IpPacketFragmentation>,
-    packet: IpPacketBuffer,
-}
-
-impl IpPacket {
-    const TYPE_BYTE: u8 = 10;
-}
-
-/// despite the name, this is /our/ custom fragmentation implementation, we don't attempt to piggy
-/// back off actual IP fragmentation at all, in the name of not messing with the underlying IP
-/// packets at all.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct IpPacketFragmentation {
-    identification: u16,
-    offset: u16,
-}
-
-#[bitflags]
-#[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum IpPacketFlags {
-    Fragmented = 1 << 0,
-    Scheduled = 1 << 1,
-}
-
-impl serdes::Serializable for IpPacket {
-    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
-        let mut flags = IpPacketFlags::empty();
-        if self.fragmentation.is_some() {
-            flags |= IpPacketFlags::Fragmented;
-        }
-        if self.schedule.is_some() {
-            flags |= IpPacketFlags::Scheduled;
-        }
-        flags.bits().serialize(serializer);
-
-        if let Some(fragmentation) = self.fragmentation {
-            fragmentation.identification.serialize(serializer);
-            fragmentation.offset.serialize(serializer);
-        }
-
-        if let Some(schedule) = self.schedule {
-            schedule.serialize(serializer);
-        }
-
-        self.packet.serialize(serializer);
-    }
-}
-
-impl serdes::Deserializable for IpPacket {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
-        let flag_bits = read_cursor.read()?;
-        let flags: BitFlags<IpPacketFlags> = BitFlags::try_from(flag_bits)
-            .map_err(|_| DeserializeMessageErr::UnknownIPFlagBytes(flag_bits))?;
-
-        let fragmentation = if flags.contains(IpPacketFlags::Fragmented) {
-            Some(IpPacketFragmentation {
-                identification: read_cursor.read()?,
-                offset: read_cursor.read()?,
-            })
-        } else {
-            None
-        };
-
-        let schedule = if flags.contains(IpPacketFlags::Scheduled) {
-            Some(read_cursor.read()?)
-        } else {
-            None
-        };
-
-        Ok(IpPacket {
-            fragmentation,
-            schedule,
-            packet: read_cursor.read()?,
-        })
-    }
-}
-
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeserializeMessageErr {
     #[error("Unknown message type byte: {0}")]
@@ -265,6 +195,8 @@ pub(crate) enum DeserializeMessageErr {
     InvalidBool(u8),
     #[error("Unsupported serdes version; peer has {0}, but we have {serdes_version}", serdes_version = SERDES_VERSION)]
     UnsupportedSerdesVersion(u32),
+    #[error("Wrong type byte when deserializing a specific message variant: Got {0}, wanted {1}")]
+    WrongTypeByte(u8, u8),
     #[error("Wrong magic value; peer gave {0:#x}, but we want {magic_value:#x}", magic_value = MAGIC_VALUE)]
     WrongMagicValue(u32),
     #[error("Unknown IP packet flags. Got {0:#x}")]
@@ -275,7 +207,7 @@ impl serdes::Deserializable for Message {
     fn deserialize<T: AsRef<[u8]>>(
         read_cursor: &mut ReadCursor<T>,
     ) -> Result<Self, DeserializeMessageErr> {
-        let message_type = match read_cursor.read_exact_comptime::<1>() {
+        let message_type = match read_cursor.peek_exact_comptime::<1>() {
             Some(message_type_bytes) => message_type_bytes[0],
             None => return Err(DeserializeMessageErr::Truncated(None)),
         };
@@ -345,7 +277,7 @@ where
     fn read_exact_comptime<const num: usize>(&mut self) -> Option<[u8; num]> {
         let result = self.peek_exact_comptime::<num>();
         if result.is_some() {
-            self.position += num;
+            self.position = self.position.checked_add(num).unwrap();
         }
         result
     }
@@ -355,8 +287,9 @@ where
 
     fn read_exact_runtime(&mut self, len: usize) -> Option<&[u8]> {
         if self.num_bytes_left() >= len {
-            self.position += len;
-            Some(&self.underlying.as_ref()[self.position - len..self.position])
+            let start_position = self.position;
+            self.position = start_position.checked_add(len).unwrap();
+            Some(&self.underlying.as_ref()[start_position..self.position])
         } else {
             None
         }
@@ -402,7 +335,7 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 
     fn write_exact(&mut self, buf: &[u8]) -> bool {
         if self.num_bytes_left() >= buf.len() {
-            self.position += buf.len();
+            self.position = self.position.checked_add(buf.len()).unwrap();
             self.underlying[self.position - buf.len()..self.position].copy_from_slice(buf);
             true
         } else {
@@ -463,7 +396,19 @@ mod serdes {
 
     impl Serializer for LengthDeterminingSerializer {
         fn serialize(&mut self, data: &[u8]) {
-            self.length += data.len();
+            self.length = self.length.checked_add(data.len()).unwrap();
+        }
+    }
+
+    pub(crate) trait SerializableLength {
+        fn serialized_length(&self) -> usize;
+    }
+
+    impl<T: Serializable> SerializableLength for T {
+        fn serialized_length(&self) -> usize {
+            let mut length_serializer = LengthDeterminingSerializer::new();
+            self.serialize(&mut length_serializer);
+            length_serializer.into_inner()
         }
     }
 
@@ -545,20 +490,15 @@ mod serdes {
 #[cfg(test)]
 mod test {
     use crate::{
-        array_array::{ArrayArray, IpPacketBuffer},
+        array_array::ArrayArray,
         constants::MAX_IP_PACKET_LENGTH,
         messages::{
-            DeserializeMessageErr, MAGIC_VALUE, ReadCursor, SERDES_VERSION, WriteCursor,
-            has_message,
+            ClientToServerHandshake, DeserializeMessageErr, MAGIC_VALUE, Message, PacketBuilder,
+            ReadCursor, SERDES_VERSION, ServerToClientHandshake, WriteCursor, has_message,
         },
     };
 
-    use super::{
-        ClientToServerHandshake, IpPacket, IpPacketFragmentation, Message, PacketBuilder,
-        ServerToClientHandshake,
-    };
-
-    fn assert_roundtrip_message(msg: &Message) {
+    pub(crate) fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
         assert!(
             builder.try_add_message(msg),
@@ -597,37 +537,6 @@ mod test {
         assert_roundtrip_message(&Message::ServerToClientHandshake(ServerToClientHandshake {
             success: false,
             protocol_version: 5502,
-        }));
-    }
-
-    #[test]
-    fn roundtrip_ip_packet() {
-        assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
-            schedule: None,
-            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
-        }));
-        assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: Some(IpPacketFragmentation {
-                identification: 1234,
-                offset: 4321,
-            }),
-            schedule: Some(99),
-            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
-        }));
-        assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
-            schedule: Some(99),
-            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
-        }));
-        let mut test_vec = Vec::new();
-        for i in 0..500 {
-            test_vec.push((i % 256).try_into().unwrap());
-        }
-        assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
-            schedule: None,
-            packet: IpPacketBuffer::new(test_vec.as_ref()),
         }));
     }
 
