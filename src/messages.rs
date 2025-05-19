@@ -1,3 +1,4 @@
+use enumflags2::{BitFlag, BitFlags, bitflags};
 use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
@@ -5,11 +6,6 @@ use serdes::Serializable as _;
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IpPacket {
-    // TODO
-}
 
 pub(crate) struct PacketBuilder {
     write_cursor: WriteCursor<IpPacketBuffer>,
@@ -49,7 +45,7 @@ type MessageType = u8;
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
     ServerToClientHandshake(ServerToClientHandshake),
-    UnscheduledPacket(UnscheduledPacket),
+    IpPacket(IpPacket),
 }
 
 impl Message {
@@ -72,7 +68,7 @@ impl Message {
         serialize_variants!(
             ClientToServerHandshake;
             ServerToClientHandshake;
-            UnscheduledPacket
+            IpPacket
         );
     }
 }
@@ -174,28 +170,86 @@ impl serdes::Deserializable for ServerToClientHandshake {
     }
 }
 
-//// UNSCHEDULED PACKET ////////////////////////////////////////////////////////////////////////////
+//// IP PACKET /////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct UnscheduledPacket {
+pub(crate) struct IpPacket {
+    schedule: Option<u64>, // timestamp
+    fragmentation: Option<IpPacketFragmentation>,
     packet: IpPacketBuffer,
 }
 
-impl UnscheduledPacket {
+impl IpPacket {
     const TYPE_BYTE: u8 = 10;
 }
 
-impl serdes::Serializable for UnscheduledPacket {
+/// despite the name, this is /our/ custom fragmentation implementation, we don't attempt to piggy
+/// back off actual IP fragmentation at all, in the name of not messing with the underlying IP
+/// packets at all.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct IpPacketFragmentation {
+    identification: u16,
+    offset: u16,
+}
+
+#[bitflags]
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum IpPacketFlags {
+    Fragmented = 1 << 0,
+    Scheduled = 1 << 1,
+}
+
+impl serdes::Serializable for IpPacket {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        let mut flags = IpPacketFlags::empty();
+        if self.fragmentation.is_some() {
+            flags |= IpPacketFlags::Fragmented;
+        }
+        if self.schedule.is_some() {
+            flags |= IpPacketFlags::Scheduled;
+        }
+        flags.bits().serialize(serializer);
+
+        if let Some(fragmentation) = self.fragmentation {
+            fragmentation.identification.serialize(serializer);
+            fragmentation.offset.serialize(serializer);
+        }
+
+        if let Some(schedule) = self.schedule {
+            schedule.serialize(serializer);
+        }
+
         self.packet.serialize(serializer);
     }
 }
 
-impl serdes::Deserializable for UnscheduledPacket {
+impl serdes::Deserializable for IpPacket {
     fn deserialize<T: AsRef<[u8]>>(
         read_cursor: &mut ReadCursor<T>,
     ) -> Result<Self, DeserializeMessageErr> {
-        Ok(UnscheduledPacket {
+        let flag_bits = read_cursor.read()?;
+        let flags: BitFlags<IpPacketFlags> = BitFlags::try_from(flag_bits)
+            .map_err(|_| DeserializeMessageErr::UnknownIPFlagBytes(flag_bits))?;
+
+        let fragmentation = if flags.contains(IpPacketFlags::Fragmented) {
+            Some(IpPacketFragmentation {
+                identification: read_cursor.read()?,
+                offset: read_cursor.read()?,
+            })
+        } else {
+            None
+        };
+
+        let schedule = if flags.contains(IpPacketFlags::Scheduled) {
+            Some(read_cursor.read()?)
+        } else {
+            None
+        };
+
+        Ok(IpPacket {
+            fragmentation,
+            schedule,
             packet: read_cursor.read()?,
         })
     }
@@ -213,6 +267,8 @@ pub(crate) enum DeserializeMessageErr {
     UnsupportedSerdesVersion(u32),
     #[error("Wrong magic value; peer gave {0:#x}, but we want {magic_value:#x}", magic_value = MAGIC_VALUE)]
     WrongMagicValue(u32),
+    #[error("Unknown IP packet flags. Got {0:#x}")]
+    UnknownIPFlagBytes(u8),
 }
 
 impl serdes::Deserializable for Message {
@@ -237,7 +293,7 @@ impl serdes::Deserializable for Message {
                 )+
             };
         }
-        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; UnscheduledPacket);
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; IpPacket);
         Err(DeserializeMessageErr::UnknownMessageType(message_type))
     }
 }
@@ -498,7 +554,8 @@ mod test {
     };
 
     use super::{
-        ClientToServerHandshake, Message, PacketBuilder, ServerToClientHandshake, UnscheduledPacket,
+        ClientToServerHandshake, IpPacket, IpPacketFragmentation, Message, PacketBuilder,
+        ServerToClientHandshake,
     };
 
     fn assert_roundtrip_message(msg: &Message) {
@@ -544,15 +601,32 @@ mod test {
     }
 
     #[test]
-    fn roundtrip_unscheduled_packet() {
-        assert_roundtrip_message(&Message::UnscheduledPacket(UnscheduledPacket {
+    fn roundtrip_ip_packet() {
+        assert_roundtrip_message(&Message::IpPacket(IpPacket {
+            fragmentation: None,
+            schedule: None,
+            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
+        }));
+        assert_roundtrip_message(&Message::IpPacket(IpPacket {
+            fragmentation: Some(IpPacketFragmentation {
+                identification: 1234,
+                offset: 4321,
+            }),
+            schedule: Some(99),
+            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
+        }));
+        assert_roundtrip_message(&Message::IpPacket(IpPacket {
+            fragmentation: None,
+            schedule: Some(99),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         let mut test_vec = Vec::new();
         for i in 0..500 {
             test_vec.push((i % 256).try_into().unwrap());
         }
-        assert_roundtrip_message(&Message::UnscheduledPacket(UnscheduledPacket {
+        assert_roundtrip_message(&Message::IpPacket(IpPacket {
+            fragmentation: None,
+            schedule: None,
             packet: IpPacketBuffer::new(test_vec.as_ref()),
         }));
     }
