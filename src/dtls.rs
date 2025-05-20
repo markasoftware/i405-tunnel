@@ -410,6 +410,9 @@ mod test {
 
     #[test]
     fn negotiate_and_roundtrip() {
+        #[cfg(feature = "wolfssl-debug")]
+        wolfssl::enable_debugging(true);
+
         let psk = b"password";
 
         // I'm not sure why so many roundtrips are necessary. My understanding is there need to only
@@ -459,6 +462,9 @@ mod test {
 
     #[test]
     fn timeout_dropped_client_packet() {
+        #[cfg(feature = "wolfssl-debug")]
+        wolfssl::enable_debugging(true);
+
         let psk = b"password";
 
         let server = NegotiatingSession::new_server(psk).unwrap();
@@ -487,6 +493,9 @@ mod test {
     #[test]
     #[ignore]
     fn timeout_more_dropped_packets() {
+        #[cfg(feature = "wolfssl-debug")]
+        wolfssl::enable_debugging(true);
+
         let psk = b"password";
 
         let server = NegotiatingSession::new_server(psk).unwrap();
