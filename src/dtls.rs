@@ -123,7 +123,10 @@ impl NegotiatingSession {
     }
 
     /// Call if the timeout returned from the constructor or `make_progress` expires.
-    pub(crate) fn has_timed_out(mut self, timestamp: u64) -> NegotiateResult {
+    pub(crate) fn has_timed_out(
+        mut self,
+        timestamp: u64,
+    ) -> Result<(NegotiatingSession, Vec<IpPacketBuffer>, u64), NegotiateError> {
         // dtls_has_timed_out, if blocked by a PendingWrite, won't do anything the next time it's
         // called -- you're supposed to enter back into a negotiation loop. So that's what we do!
 
@@ -133,29 +136,27 @@ impl NegotiatingSession {
             wolfssl::Poll::Ready(false) => self.add_written_packet(&mut written_packets),
             wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
             wolfssl::Poll::PendingRead => {
-                return NegotiateResult::Err(NegotiateError::PendingReadDuringTimeout);
+                return Err(NegotiateError::PendingReadDuringTimeout);
             }
             wolfssl::Poll::AppData(_) => {
-                return NegotiateResult::Err(NegotiateError::UnexpectedAppData);
+                return Err(NegotiateError::UnexpectedAppData);
             }
             // this means some wolfssl error, but the wolfssl-rs api won't tell us which :|
             wolfssl::Poll::Ready(true) => {
-                return NegotiateResult::Err(NegotiateError::UnknownWolfErrorDuringTimeout);
+                return Err(NegotiateError::UnknownWolfErrorDuringTimeout);
             }
         }
 
         // this is a bit annoying, because we have to add the at-most-1 packet that was written
         // during timeout handling onto those returned by negotiation.
         match self.inner_try_negotiate(None, timestamp) {
-            NegotiateResult::Ready(new_session, later_written_packets) => {
-                written_packets.extend(later_written_packets);
-                NegotiateResult::Ready(new_session, written_packets)
-            }
+            // I believe this would be a state machine error:
+            NegotiateResult::Ready(_, _) => Err(NegotiateError::NegotiationReadyDuringTimeout),
             NegotiateResult::NeedRead(new_session, later_written_packets, timeout) => {
                 written_packets.extend(later_written_packets);
-                NegotiateResult::NeedRead(new_session, written_packets, timeout)
+                Ok((new_session, written_packets, timeout))
             }
-            err @ NegotiateResult::Err(_) => err,
+            NegotiateResult::Err(e) => Err(e),
         }
     }
 }
@@ -184,6 +185,8 @@ pub(crate) enum NegotiateError {
     UnknownWolfErrorDuringTimeout,
     #[error("wolfSSL tried to read during DTLS timeout")]
     PendingReadDuringTimeout,
+    #[error("Negotiation finished during timeout processing???")]
+    NegotiationReadyDuringTimeout,
 }
 
 #[derive(Debug)]
@@ -395,19 +398,6 @@ mod test {
         }
     }
 
-    fn has_timed_out(
-        session: NegotiatingSession,
-        timestamp: u64,
-    ) -> (NegotiatingSession, Vec<IpPacketBuffer>, u64) {
-        match session.has_timed_out(timestamp) {
-            NegotiateResult::NeedRead(new_session, outgoing_packets, new_timeout) => {
-                (new_session, outgoing_packets, new_timeout)
-            }
-            NegotiateResult::Ready(_, _) => panic!("Ready during timeout"),
-            e => panic!("Negotiate error during timeout {:?}", e),
-        }
-    }
-
     #[test]
     fn negotiate_and_roundtrip() {
         #[cfg(feature = "wolfssl-debug")]
@@ -470,7 +460,7 @@ mod test {
         let server = NegotiatingSession::new_server(psk).unwrap();
         // drop an initial handshake message
         let (client, _, _) = NegotiatingSession::new_client(psk, 0).unwrap();
-        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        let (client, c2s_packets, _) = client.has_timed_out(0).unwrap();
         assert!(!c2s_packets.is_empty());
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
@@ -502,7 +492,7 @@ mod test {
 
         // drop an initial handshake message
         let (client, _, _) = NegotiatingSession::new_client(psk, 0).unwrap();
-        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        let (client, c2s_packets, _) = client.has_timed_out(0).unwrap();
         assert!(!c2s_packets.is_empty());
 
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
@@ -512,9 +502,9 @@ mod test {
         // now drop a server message
         let (server, _, _) = make_progress(server, &c2s_packets, 0);
         // this first one will be empty due to fast retry crap
-        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        let (server, s2c_packets, _) = server.has_timed_out(0).unwrap();
         assert!(s2c_packets.is_empty());
-        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        let (server, s2c_packets, _) = server.has_timed_out(0).unwrap();
         // usually two packets here, instead of the 3 that would have originally been sent. REALLY
         // not sure why that is.
         assert!(!s2c_packets.is_empty());
@@ -523,7 +513,7 @@ mod test {
         // honestly not sure why the client isn't able to respond just because there's 1 fewer s2c
         // packet than usual.
         assert!(c2s_packets.is_empty());
-        let (client, c2s_packets, _) = has_timed_out(client, 0);
+        let (client, c2s_packets, _) = client.has_timed_out(0).unwrap();
         assert!(!c2s_packets.is_empty());
 
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
@@ -531,7 +521,7 @@ mod test {
         // the server already did some retransmitting not long ago, so we have to do this to get it
         // to retransmit again.
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let (server, s2c_packets, _) = has_timed_out(server, 0);
+        let (server, s2c_packets, _) = server.has_timed_out(0).unwrap();
         assert!(!s2c_packets.is_empty());
 
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
