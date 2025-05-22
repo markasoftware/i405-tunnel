@@ -5,6 +5,7 @@ mod core;
 mod dtls;
 mod hardware;
 mod messages;
+mod queued_ip_packet;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
