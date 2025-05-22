@@ -1,9 +1,10 @@
 mod ip_packet;
 
+use enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use serdes::{Serializable as _, SerializableLength as _};
+use serdes::{Serializable, SerializableLength as _, Deserializable};
 pub(crate) use ip_packet::IpPacket;
 
 const SERDES_VERSION: u32 = 0;
@@ -39,6 +40,7 @@ impl PacketBuilder {
 
 type MessageType = u8;
 
+#[enum_dispatch(Serializable)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
@@ -72,10 +74,8 @@ impl serdes::Serializable for Message {
 
 macro_rules! deserialize_type_byte {
     ($read_cursor:ident) => {
-        let type_byte = $read_cursor.read()?;
-        if type_byte != Self::TYPE_BYTE {
-            return Err(DeserializeMessageErr::WrongTypeByte(type_byte, Self::TYPE_BYTE));
-        }
+        let type_byte: u8 = $read_cursor.read()?;
+        assert!(type_byte == Self::TYPE_BYTE, "Wrong type byte in deserializer");
     };
 }
 pub(crate) use deserialize_type_byte;
@@ -85,13 +85,18 @@ pub(crate) use deserialize_type_byte;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ClientToServerHandshake {
     /// Need not be an exact match, it's more of a negotiation.
-    protocol_version: u32,
-    s2c_packet_length: u16,
-    s2c_packet_interval_ns: u64,
+    pub(crate) protocol_version: u32,
+    pub(crate) oldest_compatible_protocol_version: u32,
+    pub(crate) s2c_packet_length: u16,
+    pub(crate) s2c_packet_interval: u64,
 }
 
 impl ClientToServerHandshake {
-    const TYPE_BYTE: u8 = 1;
+    const TYPE_BYTE: u8 = 0x01;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
 }
 
 impl serdes::Serializable for ClientToServerHandshake {
@@ -100,8 +105,9 @@ impl serdes::Serializable for ClientToServerHandshake {
         MAGIC_VALUE.serialize(serializer);
         SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
+        self.oldest_compatible_protocol_version.serialize(serializer);
         self.s2c_packet_length.serialize(serializer);
-        self.s2c_packet_interval_ns.serialize(serializer);
+        self.s2c_packet_interval.serialize(serializer);
     }
 }
 
@@ -128,8 +134,9 @@ impl serdes::Deserializable for ClientToServerHandshake {
 
         Ok(ClientToServerHandshake {
             protocol_version: read_cursor.read()?,
+            oldest_compatible_protocol_version: read_cursor.read()?,
             s2c_packet_length: read_cursor.read()?,
-            s2c_packet_interval_ns: read_cursor.read()?,
+            s2c_packet_interval: read_cursor.read()?,
         })
     }
 }
@@ -138,13 +145,17 @@ impl serdes::Deserializable for ClientToServerHandshake {
 /// versions are incompatible.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ServerToClientHandshake {
-    protocol_version: u32,
+    pub(crate) protocol_version: u32,
     /// If false, the client should abandon the connection.
-    success: bool,
+    pub(crate) success: bool,
 }
 
 impl ServerToClientHandshake {
-    const TYPE_BYTE: u8 = 2;
+    const TYPE_BYTE: u8 = 0x02;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
 }
 
 impl serdes::Serializable for ServerToClientHandshake {
@@ -183,8 +194,6 @@ impl serdes::Deserializable for ServerToClientHandshake {
     }
 }
 
-//// IP PACKET /////////////////////////////////////////////////////////////////////////////////////
-
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeserializeMessageErr {
     #[error("Unknown message type byte: {0}")]
@@ -196,8 +205,6 @@ pub(crate) enum DeserializeMessageErr {
     #[error("Unsupported serdes version; peer has {0}, but we have {serdes_version}", serdes_version = SERDES_VERSION)]
     UnsupportedSerdesVersion(u32),
     #[error("Wrong type byte when deserializing a specific message variant: Got {0}, wanted {1}")]
-    WrongTypeByte(u8, u8),
-    #[error("Wrong magic value; peer gave {0:#x}, but we want {magic_value:#x}", magic_value = MAGIC_VALUE)]
     WrongMagicValue(u32),
     #[error("Unknown IP packet flags. Got {0:#x}")]
     UnknownIPFlagBytes(u8),
@@ -219,7 +226,7 @@ impl serdes::Deserializable for Message {
         macro_rules! deserialize_messages {
             ($($msg:ident);+) => {
                 $(
-                    if message_type == $msg::TYPE_BYTE {
+                    if $msg::does_type_byte_match(message_type) {
                         return Ok(Message::$msg($msg::deserialize(read_cursor)?));
                     }
                 )+
@@ -231,7 +238,7 @@ impl serdes::Deserializable for Message {
 }
 
 /// Return whether there's another message to be read from this cursor. Does not move the cursor.
-fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
+pub(crate) fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
     read_cursor
         .peek_exact_comptime::<1>()
         .is_some_and(|x| x != [0])
@@ -242,7 +249,7 @@ fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
 // Similar signature to std::io::Cursor but slightly nicer signatures, support for ArrayArray
 // writing, and no std::io::Result crap
 
-struct ReadCursor<T> {
+pub(crate) struct ReadCursor<T> {
     underlying: T,
     position: usize,
 }
@@ -251,7 +258,7 @@ impl<T> ReadCursor<T>
 where
     T: AsRef<[u8]>,
 {
-    fn new(underlying: T) -> ReadCursor<T> {
+    pub(crate) fn new(underlying: T) -> ReadCursor<T> {
         ReadCursor {
             underlying,
             position: 0,
@@ -305,7 +312,7 @@ where
         }
     }
 
-    fn read<D: serdes::Deserializable>(&mut self) -> Result<D, DeserializeMessageErr> {
+    pub(crate) fn read<D: serdes::Deserializable>(&mut self) -> Result<D, DeserializeMessageErr> {
         D::deserialize(self)
     }
 }
@@ -351,6 +358,8 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 //// SERDES ////////////////////////////////////////////////////////////////////////////////////////
 
 mod serdes {
+    use enum_dispatch::enum_dispatch;
+
     use crate::array_array::ArrayArray;
 
     use crate::messages::{DeserializeMessageErr, ReadCursor, WriteCursor};
@@ -421,6 +430,7 @@ mod serdes {
         }
     }
 
+    #[enum_dispatch]
     pub(crate) trait Deserializable
     where
         Self: Sized,
@@ -524,7 +534,7 @@ mod test {
             // make sure they're all long enough that endianness matters
             protocol_version: 5502,
             s2c_packet_length: 2277,
-            s2c_packet_interval_ns: 992828,
+            s2c_packet_interval: 992828,
         }));
     }
 

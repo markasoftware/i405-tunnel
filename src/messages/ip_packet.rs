@@ -1,129 +1,26 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
-use thiserror::Error;
 
 use crate::array_array::IpPacketBuffer;
-use crate::messages::serdes::SerializableLength as _;
 use crate::messages::{DeserializeMessageErr, ReadCursor, deserialize_type_byte, serdes};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct IpPacket {
     schedule: Option<u64>, // timestamp
-    fragmentation: Option<IpPacketFragmentation>,
+    fragmentation_id: Option<u16>,
     packet: IpPacketBuffer,
 }
 
+// Type bytes 0x10 through 0x1F are reserved for IP packet start. The low bit indicates whether the
+// packet shall be fragmented, and the second lowest bit indicates whether the packet is scheduled.
+// The next two bits shall not be set.
+
 impl IpPacket {
-    pub const TYPE_BYTE: u8 = 10;
+    const TYPE_BYTE_LOW: u8 = 0x10;
+    const TYPE_BYTE_HIGH: u8 = 0x1F;
 
-    pub(crate) fn new(packet: IpPacketBuffer, schedule: Option<u64>) -> IpPacket {
-        IpPacket {
-            schedule,
-            fragmentation: None,
-            packet,
-        }
+    pub(crate) fn does_type_byte_match(type_byte: u8) -> bool {
+        Self::TYPE_BYTE_LOW <= type_byte && type_byte <= Self::TYPE_BYTE_HIGH
     }
-
-    /// Take a (possibly already fragmented) packet and fragment it into one packet less than the
-    /// requested size, and then a "remainder" packet (which may be larger than the requested
-    /// fragment size and should be further fragmented if needed).
-    ///
-    /// next_identification is the identification of the next newly fragmented packet. When
-    /// fragmenting an already-fragmented message, the identification of the input message is used
-    /// instead of `next_identification`
-    fn fragment(
-        self,
-        fragment_length: usize,
-        mut next_identification: u16,
-    ) -> Result<Fragments, FragmentationError> {
-        // No need to fragment:
-        if self.serialized_length() <= fragment_length {
-            return Ok(Fragments {
-                first_fragment: self,
-                second_fragment: None,
-                next_identification,
-            });
-        }
-
-        // We need to fragment further. If we don't already have fragmentation info, add it.
-        let first_fragment_fragmentation = match self.fragmentation {
-            Some(fragmentation) => fragmentation,
-            None => {
-                let identification = next_identification;
-                next_identification = next_identification.wrapping_add(1);
-                IpPacketFragmentation {
-                    identification,
-                    offset: 0,
-                }
-            }
-        };
-
-        // Figure out the "base size" of the current IP packet, without any content. This makes the
-        // (currently true) assumption that there is no variable-length encoding of the content
-        // length or anything (ie, the only dependency of the overall message length on the inner
-        // packet length is the packet field itself).
-        let base_length = self.serialized_length() - self.packet.len();
-        let minimum_fragment_length = base_length.checked_add(1).unwrap();
-
-        if fragment_length < minimum_fragment_length {
-            return Err(FragmentationError::FragmentLengthTooSmall(
-                fragment_length,
-                minimum_fragment_length,
-            ));
-        }
-
-        let first_fragment_packet_length = fragment_length.checked_sub(base_length).unwrap();
-        let first_fragment = IpPacket {
-            packet: IpPacketBuffer::new(&self.packet[..first_fragment_packet_length]),
-            fragmentation: Some(first_fragment_fragmentation),
-            ..self
-        };
-
-        let second_fragment = IpPacket {
-            packet: IpPacketBuffer::new(&self.packet[first_fragment_packet_length..]),
-            fragmentation: Some(IpPacketFragmentation {
-                identification: first_fragment_fragmentation.identification,
-                offset: first_fragment_fragmentation
-                    .offset
-                    .checked_add(first_fragment_packet_length.try_into().unwrap())
-                    .unwrap(),
-            }),
-            ..self
-        };
-
-        Ok(Fragments {
-            first_fragment,
-            second_fragment: Some(second_fragment),
-            next_identification,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Fragments {
-    /// The start of the packet, fragmented to be less than or equal to the requested fragment size.
-    first_fragment: IpPacket,
-    /// The remainder of the packet, if the packet had to be fragmented further.
-    second_fragment: Option<IpPacket>,
-    /// Should be passed as `identification` to the next call of `fragment`, whether that's on this
-    /// packet or another one.
-    next_identification: u16,
-}
-
-#[derive(Error, Debug, PartialEq, Eq, Clone)]
-pub(crate) enum FragmentationError {
-    #[error(
-        "The requested fragment size {0} was too small for a useful fragment; needs to be at least {1}"
-    )]
-    FragmentLengthTooSmall(usize, usize),
-}
-
-/// despite the name, this is /our/ custom fragmentation implementation, we don't attempt to piggy
-/// back off actual IP fragmentation at all, in the name of not messing with the underlying IP
-/// packets at all.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) struct IpPacketFragmentation {
-    pub(crate) identification: u16,
-    pub(crate) offset: u16,
 }
 
 #[bitflags]
@@ -136,21 +33,15 @@ enum IpPacketFlags {
 
 impl serdes::Serializable for IpPacket {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
-        Self::TYPE_BYTE.serialize(serializer);
-
         let mut flags = IpPacketFlags::empty();
-        if self.fragmentation.is_some() {
+        if self.fragmentation_id.is_some() {
             flags |= IpPacketFlags::Fragmented;
         }
         if self.schedule.is_some() {
             flags |= IpPacketFlags::Scheduled;
         }
-        flags.bits().serialize(serializer);
-
-        if let Some(fragmentation) = self.fragmentation {
-            fragmentation.identification.serialize(serializer);
-            fragmentation.offset.serialize(serializer);
-        }
+        let type_byte = Self::TYPE_BYTE_LOW | flags.bits();
+        type_byte.serialize(serializer);
 
         if let Some(schedule) = self.schedule {
             schedule.serialize(serializer);
@@ -164,17 +55,15 @@ impl serdes::Deserializable for IpPacket {
     fn deserialize<T: AsRef<[u8]>>(
         read_cursor: &mut ReadCursor<T>,
     ) -> Result<Self, DeserializeMessageErr> {
-        deserialize_type_byte!(read_cursor);
+        let type_byte: u8 = read_cursor.read()?;
+        assert!(Self::TYPE_BYTE_LOW <= type_byte && type_byte <= Self::TYPE_BYTE_HIGH, "type byte out of range for IP packet");
 
-        let flag_bits = read_cursor.read()?;
+        let flag_bits = type_byte & (Self::TYPE_BYTE_LOW-1);
         let flags: BitFlags<IpPacketFlags> = BitFlags::try_from(flag_bits)
             .map_err(|_| DeserializeMessageErr::UnknownIPFlagBytes(flag_bits))?;
 
-        let fragmentation = if flags.contains(IpPacketFlags::Fragmented) {
-            Some(IpPacketFragmentation {
-                identification: read_cursor.read()?,
-                offset: read_cursor.read()?,
-            })
+        let fragmentation_id = if flags.contains(IpPacketFlags::Fragmented) {
+            Some(read_cursor.read()?)
         } else {
             None
         };
@@ -186,7 +75,7 @@ impl serdes::Deserializable for IpPacket {
         };
 
         Ok(IpPacket {
-            fragmentation,
+            fragmentation_id,
             schedule,
             packet: read_cursor.read()?,
         })
@@ -196,31 +85,27 @@ impl serdes::Deserializable for IpPacket {
 #[cfg(test)]
 mod test {
     use crate::array_array::IpPacketBuffer;
-    use crate::messages::ip_packet::{FragmentationError, Fragments};
     use crate::messages::serdes::SerializableLength as _;
     use crate::messages::{
         Message,
-        ip_packet::{IpPacket, IpPacketFragmentation},
+        ip_packet::IpPacket,
         test::assert_roundtrip_message,
     };
 
     #[test]
     fn roundtrip_ip_packet() {
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
+            fragmentation_id: None,
             schedule: None,
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: Some(IpPacketFragmentation {
-                identification: 1234,
-                offset: 4321,
-            }),
+            fragmentation_id: Some(258),
             schedule: Some(99),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
+            fragmentation_id: None,
             schedule: Some(99),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
@@ -229,7 +114,7 @@ mod test {
             test_vec.push((i % 256).try_into().unwrap());
         }
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
-            fragmentation: None,
+            fragmentation_id: None,
             schedule: None,
             packet: IpPacketBuffer::new(test_vec.as_ref()),
         }));
