@@ -14,6 +14,7 @@ thiserror = "2"
 tun-rs = "2.0"
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
+bitvec = "1"
 
 [features]
 wolfssl-debug = ["wolfssl/debug"]

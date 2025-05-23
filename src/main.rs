@@ -2,8 +2,10 @@ mod array_array;
 mod config;
 mod constants;
 mod core;
+mod defragger;
 mod dtls;
 mod hardware;
+mod logical_ip_packet;
 mod messages;
 mod queued_ip_packet;
 
