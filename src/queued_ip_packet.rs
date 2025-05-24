@@ -57,18 +57,18 @@ impl QueuedIpPacket {
                     messages::IpPacket::base_length(self.schedule, Some(unused_fragmentation_id));
                 let one_packet_length = base_length.checked_add(self.packet.len()).unwrap();
                 if one_packet_length <= max_length {
-                    FragmentResult::Done(messages::Message::IpPacket(messages::IpPacket::new(
-                        self.schedule,
-                        None,
-                        &self.packet[..],
-                    )))
+                    FragmentResult::Done(messages::Message::IpPacket(messages::IpPacket {
+                        schedule: self.schedule,
+                        fragmentation_id: None,
+                        packet: self.packet.clone(),
+                    }))
                 } else {
                     let fragment_inner_packet_length = max_length.checked_sub(base_length).unwrap();
-                    let message = messages::Message::IpPacket(messages::IpPacket::new(
-                        self.schedule,
-                        Some(unused_fragmentation_id),
-                        &self.packet[..fragment_inner_packet_length],
-                    ));
+                    let message = messages::Message::IpPacket(messages::IpPacket {
+                        schedule: self.schedule,
+                        fragmentation_id: Some(unused_fragmentation_id),
+                        packet: IpPacketBuffer::new(&self.packet[..fragment_inner_packet_length]),
+                    });
                     FragmentResult::Partial(
                         message,
                         Self {
@@ -98,22 +98,26 @@ impl QueuedIpPacket {
                     .unwrap();
                 if one_packet_length <= max_length {
                     FragmentResult::Done(messages::Message::IpPacketFragment(
-                        messages::IpPacketFragment::new(
-                            true,
+                        messages::IpPacketFragment {
+                            is_last: true,
                             fragmentation_id,
-                            num_bytes_sent.try_into().unwrap(),
-                            &self.packet[num_bytes_sent..],
-                        ),
+                            offset: num_bytes_sent.try_into().unwrap(),
+                            fragment: IpPacketBuffer::new(&self.packet[num_bytes_sent..]),
+                        },
                     ))
                 } else {
                     let fragment_inner_packet_length = max_length.checked_sub(base_length).unwrap();
-                    let message =
-                        messages::Message::IpPacketFragment(messages::IpPacketFragment::new(
-                            false,
-                            fragmentation_id,
-                            num_bytes_sent.try_into().unwrap(),
-                            &self.packet[num_bytes_sent..num_bytes_sent + one_packet_length],
-                        ));
+                    let fragment_past_end = num_bytes_sent
+                        .checked_add(fragment_inner_packet_length)
+                        .unwrap();
+                    let message = messages::Message::IpPacketFragment(messages::IpPacketFragment {
+                        is_last: false,
+                        fragmentation_id,
+                        offset: num_bytes_sent.try_into().unwrap(),
+                        fragment: IpPacketBuffer::new(
+                            &self.packet[num_bytes_sent..fragment_past_end],
+                        ),
+                    });
                     FragmentResult::Partial(
                         message,
                         Self {

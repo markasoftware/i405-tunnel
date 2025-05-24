@@ -18,10 +18,22 @@ pub(crate) trait Hardware {
     /// requested timestamp.
     fn read_outgoing_packet(no_earlier_than: Option<u64>);
     /// Write an IP packet to the physical network interface at the given time. Should be called only shortly before the given time.
-    fn send_outgoing_packet(&mut self, packet: &[u8], destination: std::net::SocketAddr, timestamp: Option<u64>) -> std::io::Result<()>;
+    fn send_outgoing_packet(
+        &mut self,
+        packet: &[u8],
+        destination: std::net::SocketAddr,
+        timestamp: Option<u64>,
+    ) -> std::io::Result<()>;
 
-    fn read_incoming_packet(&mut self, packet: &mut [u8]) -> std::io::Result<(usize, std::net::SocketAddr)>;
-    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<(), Self::Err>;
+    fn read_incoming_packet(
+        &mut self,
+        packet: &mut [u8],
+    ) -> std::io::Result<(usize, std::net::SocketAddr)>;
+    fn send_incoming_packet(
+        &mut self,
+        packet: &[u8],
+        timestamp: Option<u64>,
+    ) -> Result<(), Self::Err>;
 
     /// Filter out future traffic from addrs other than the one specified.
     fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> std::io::Result<()>;

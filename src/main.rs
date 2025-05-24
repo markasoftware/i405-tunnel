@@ -1,7 +1,7 @@
 mod array_array;
 mod config;
 mod constants;
-mod core;
+//mod core;
 mod defragger;
 mod dtls;
 mod hardware;

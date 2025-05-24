@@ -8,9 +8,16 @@ pub(crate) struct ArrayArray<T, const COMPTIME_LENGTH: usize> {
     runtime_length: usize,
 }
 
-impl<T: std::fmt::Debug, const COMPTIME_LENGTH: usize> std::fmt::Debug for ArrayArray<T, COMPTIME_LENGTH> {
+impl<T: std::fmt::Debug, const COMPTIME_LENGTH: usize> std::fmt::Debug
+    for ArrayArray<T, COMPTIME_LENGTH>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ArrayArray {{runtime_length={}, data={:?}}}", self.runtime_length, &self.underlying[..self.runtime_length])
+        write!(
+            f,
+            "ArrayArray {{runtime_length={}, data={:?}}}",
+            self.runtime_length,
+            &self.underlying[..self.runtime_length]
+        )
     }
 }
 

@@ -4,8 +4,8 @@ use enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use serdes::{Serializable, SerializableLength as _, Deserializable};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
+use serdes::{Deserializable, Serializable, SerializableLength as _};
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -77,7 +77,10 @@ impl serdes::Serializable for Message {
 macro_rules! deserialize_type_byte {
     ($read_cursor:ident) => {
         let type_byte: u8 = $read_cursor.read()?;
-        assert!(type_byte == Self::TYPE_BYTE, "Wrong type byte in deserializer");
+        assert!(
+            type_byte == Self::TYPE_BYTE,
+            "Wrong type byte in deserializer"
+        );
     };
 }
 pub(crate) use deserialize_type_byte;
@@ -107,7 +110,8 @@ impl serdes::Serializable for ClientToServerHandshake {
         MAGIC_VALUE.serialize(serializer);
         SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
-        self.oldest_compatible_protocol_version.serialize(serializer);
+        self.oldest_compatible_protocol_version
+            .serialize(serializer);
         self.s2c_packet_length.serialize(serializer);
         self.s2c_packet_interval.serialize(serializer);
     }
@@ -206,7 +210,7 @@ pub(crate) enum DeserializeMessageErr {
     InvalidBool(u8),
     #[error("Unsupported serdes version; peer has {0}, but we have {serdes_version}", serdes_version = SERDES_VERSION)]
     UnsupportedSerdesVersion(u32),
-    #[error("Wrong type byte when deserializing a specific message variant: Got {0}, wanted {1}")]
+    #[error("Wrong magic value in handshake message: Got {0}, wanted {magic_value}", magic_value = MAGIC_VALUE)]
     WrongMagicValue(u32),
     #[error("Unknown IP packet flags. Got {0:#x}")]
     UnknownIPFlagBytes(u8),
@@ -536,6 +540,7 @@ mod test {
         assert_roundtrip_message(&Message::ClientToServerHandshake(ClientToServerHandshake {
             // make sure they're all long enough that endianness matters
             protocol_version: 5502,
+            oldest_compatible_protocol_version: 8322,
             s2c_packet_length: 2277,
             s2c_packet_interval: 992828,
         }));

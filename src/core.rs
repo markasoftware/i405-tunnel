@@ -338,7 +338,7 @@ mod server {
     use enum_dispatch::enum_dispatch;
     use thiserror::Error;
 
-    use crate::{array_array::IpPacketbuffer, dtls, hardware::Hardware, messages};
+    use crate::{array_array::IpPacketBuffer, dtls, hardware::Hardware, messages};
 
     use super::{OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 

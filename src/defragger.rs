@@ -262,3 +262,29 @@ impl DefragPacket {
             })
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::Defragger;
+    use crate::array_array::IpPacketBuffer;
+    use crate::logical_ip_packet::LogicalIpPacket;
+    use crate::messages::{IpPacket, IpPacketFragment};
+
+    #[test]
+    fn defrag_non_fragmented_packet() {
+        let mut defragger = Defragger::new();
+        let message = IpPacket {
+            schedule: Some(999),
+            fragmentation_id: None,
+            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
+        };
+        let defrag_result = defragger.handle_ip_packet(&message);
+        assert_eq!(
+            defrag_result,
+            Some(LogicalIpPacket {
+                packet: message.packet,
+                schedule: Some(999)
+            })
+        );
+    }
+}

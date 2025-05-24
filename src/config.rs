@@ -11,7 +11,7 @@ trait EzClap {
 pub struct WireConfiguration {
     pub up_speed_bytes_per_second: u64,
     pub down_speed_bytes_per_second: u64,
-    pub packet_size_bytes: Option<u32>,
+    pub packet_size_bytes: Option<u16>,
 }
 
 impl EzClap for WireConfiguration {
@@ -32,7 +32,7 @@ impl EzClap for WireConfiguration {
 	    Arg::new("packet_size_bytes")
 		.long("packet-size-bytes")
 		.visible_alias("packet-size")
-		.value_parser(value_parser!(u64))
+		.value_parser(value_parser!(u16))
 		.help(
 		    "Fixed packet size. In TCP mode, we do not have direct control over the packet size, so this option simply controls the size of the buffer handed to `write` at regular intervals. the kernel controls when packets are actually sent out, but should send packets immediately when possible. The kernel may send longer or shorter packets as it sees fit. In TUN mode, packets will be exactly the specified size."
 		),
@@ -49,7 +49,7 @@ impl EzClap for WireConfiguration {
                 .get_one::<u64>("down_speed_bytes_per_second")
                 .unwrap()
                 .clone(),
-            packet_size_bytes: matches.get_one::<u32>("packet_size_bytes").cloned(),
+            packet_size_bytes: matches.get_one::<u16>("packet_size_bytes").cloned(),
         }
     }
 }

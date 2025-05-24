@@ -17,5 +17,5 @@ wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 bitvec = "1"
 
 [features]
-wolfssl_debug = ["wolfssl/debug"]
-jumbo_packets = []
+wolfssl-debug = ["wolfssl/debug"]
+jumbo-packets = []
