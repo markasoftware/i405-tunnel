@@ -123,6 +123,7 @@ impl Defragger {
 
     fn next_counter(&mut self) -> u64 {
         self.counter += 1;
+        self.remove_expired_defrag_packets();
         self.counter
     }
 
@@ -133,6 +134,8 @@ impl Defragger {
             Some(fragmentation_id) => fragmentation_id,
             // the packet is not fragmented
             None => {
+                // this ensures that we kick out old fragments
+                self.next_counter();
                 return Some(LogicalIpPacket {
                     packet: message.packet.clone(),
                     schedule: message.schedule,
@@ -261,7 +264,7 @@ impl DefragPacket {
 
 #[cfg(test)]
 mod test {
-    use super::Defragger;
+    use super::{Defragger, MAX_FRAGMENTATION_ID_AGE};
     use crate::array_array::IpPacketBuffer;
     use crate::logical_ip_packet::LogicalIpPacket;
     use crate::messages::{IpPacket, IpPacketFragment};
@@ -313,12 +316,14 @@ mod test {
         };
 
         // hacky way to do all permutations
+        let mut num_permutations = 0;
         for i in 0..3 {
             for j in 0..3 {
                 // this last loop is pretty stupid because we can just calculate k...oh well
                 for k in 0..3 {
                     if i != j && i != k && j != k {
                         eprintln!("Starting case: {} {} {}", i, j, k);
+                        num_permutations += 1;
                         assert_eq!(handle_message(i), None);
                         assert_eq!(handle_message(j), None);
                         assert_eq!(
@@ -332,5 +337,70 @@ mod test {
                 }
             }
         }
+        assert_eq!(num_permutations, 6);
+    }
+
+    // When there are more than MAX_ACTIVE_FRAGMENTATION_IDs many fragments, the oldest one gets
+    // dropped.
+    #[test]
+    fn defrag_many_active_fragments() {}
+
+    // When a fragment is at least MAX_FRAGMENTATION_ID_AGE old, it should be dropped. TODO add a
+    // test case with one fewer fid so that we can test that it doesn't get dropped prematurely.
+    #[test]
+    fn defrag_drop_old_fragment() {
+        let mut defragger = Defragger::new();
+
+        // first, insert the start of the packet we'll allow to get old.
+        let old_fid = 8;
+        let old_start = IpPacket {
+            schedule: Some(992),
+            fragmentation_id: Some(old_fid),
+            packet: IpPacketBuffer::new(&[8]),
+        };
+        defragger.handle_ip_packet(&old_start);
+
+        for _ in 0..MAX_FRAGMENTATION_ID_AGE - 5 {
+            // push through unfragmented packets
+            let buf = IpPacketBuffer::new(&[2, 9]);
+            let defragged = defragger.handle_ip_packet(&IpPacket {
+                schedule: Some(992),
+                fragmentation_id: None,
+                packet: buf.clone(),
+            });
+            // we don't care that much about the result but why not check
+            assert_eq!(
+                defragged,
+                Some(LogicalIpPacket {
+                    packet: buf,
+                    schedule: Some(992)
+                })
+            );
+        }
+        for new_fid in 990..995 {
+            // push through fragmented packets. The idea here is we want to check that both
+            // fragmented and unfragmented packets increase the counter
+            defragger.handle_ip_packet(&IpPacket {
+                schedule: Some(828),
+                fragmentation_id: Some(new_fid),
+                packet: IpPacketBuffer::new(&[1, 2]),
+            });
+            defragger.handle_ip_packet_fragment(&IpPacketFragment {
+                is_last: true,
+                fragmentation_id: new_fid,
+                offset: 2,
+                fragment: IpPacketBuffer::new(&[3, 4]),
+            });
+        }
+
+        assert_eq!(
+            defragger.handle_ip_packet_fragment(&IpPacketFragment {
+                is_last: true,
+                fragmentation_id: old_fid,
+                offset: 1,
+                fragment: IpPacketBuffer::new(&[9])
+            }),
+            None
+        );
     }
 }
