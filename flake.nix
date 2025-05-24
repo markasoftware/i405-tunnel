@@ -14,7 +14,7 @@
 
       devShells = eachSupportedSystem (system: pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.rust-analyzer ];
+          packages = [ pkgs.rust-analyzer pkgs.clippy ];
           inputsFrom = [ self.packages.${system}.default ];
         };
       });

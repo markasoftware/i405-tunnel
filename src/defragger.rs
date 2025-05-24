@@ -161,6 +161,7 @@ impl Defragger {
             schedule: message.schedule,
         });
         defrag_packet.written_bytes[..message.packet.len()].fill(true);
+        defrag_packet.packet_so_far[..message.packet.len()].copy_from_slice(&message.packet[..]);
 
         match defrag_packet.try_complete() {
             Some(logical_packet) => {
@@ -204,8 +205,11 @@ impl Defragger {
 
         if message.is_last {
             defrag_packet.unfragmented_length = Some(message_offset_past_end.try_into().unwrap());
+            defrag_packet.packet_so_far.shrink(message_offset_past_end);
         }
         defrag_packet.written_bytes[message.offset.into()..message_offset_past_end].fill(true);
+        defrag_packet.packet_so_far[message.offset.into()..message_offset_past_end]
+            .copy_from_slice(&message.fragment[..]);
 
         // TODO we could be a bit more type-safe here, instead of getting an &mut to the
         // defrag_packet and then having to remember to delete it when doing try_complete, we could
@@ -253,14 +257,6 @@ impl DefragPacket {
             _ => None,
         }
     }
-
-    fn is_complete(&self) -> bool {
-        // you could ask, do we /really/ need to check self.details.is_some(), if we're already checking that every byte has been written? Apart from the fact that, yes, we do,
-        self.details.is_some()
-            && self.unfragmented_length.is_some_and(|unfragmented_length| {
-                self.written_bytes[..unfragmented_length.into()].all()
-            })
-    }
 }
 
 #[cfg(test)]
@@ -286,5 +282,55 @@ mod test {
                 schedule: Some(999)
             })
         );
+    }
+
+    #[test]
+    fn defrag_three_packets_all_orders() {
+        let mut defragger = Defragger::new();
+        let message_0 = IpPacket {
+            schedule: Some(999),
+            fragmentation_id: Some(42),
+            packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
+        };
+        let message_1 = IpPacketFragment {
+            is_last: false,
+            fragmentation_id: 42,
+            offset: 4,
+            fragment: IpPacketBuffer::new(&[5, 6]),
+        };
+        let message_2 = IpPacketFragment {
+            is_last: true,
+            fragmentation_id: 42,
+            offset: 6,
+            fragment: IpPacketBuffer::new(&[7, 8, 9]),
+        };
+
+        let mut handle_message = |which| match which {
+            0 => defragger.handle_ip_packet(&message_0),
+            1 => defragger.handle_ip_packet_fragment(&message_1),
+            2 => defragger.handle_ip_packet_fragment(&message_2),
+            _ => panic!("Bad which"),
+        };
+
+        // hacky way to do all permutations
+        for i in 0..3 {
+            for j in 0..3 {
+                // this last loop is pretty stupid because we can just calculate k...oh well
+                for k in 0..3 {
+                    if i != j && i != k && j != k {
+                        eprintln!("Starting case: {} {} {}", i, j, k);
+                        assert_eq!(handle_message(i), None);
+                        assert_eq!(handle_message(j), None);
+                        assert_eq!(
+                            handle_message(k),
+                            Some(LogicalIpPacket {
+                                packet: IpPacketBuffer::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]),
+                                schedule: Some(999)
+                            })
+                        );
+                    }
+                }
+            }
+        }
     }
 }
