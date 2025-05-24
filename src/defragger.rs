@@ -264,7 +264,7 @@ impl DefragPacket {
 
 #[cfg(test)]
 mod test {
-    use super::{Defragger, MAX_FRAGMENTATION_ID_AGE};
+    use super::{Defragger, MAX_ACTIVE_FRAGMENTATION_IDS, MAX_FRAGMENTATION_ID_AGE};
     use crate::array_array::IpPacketBuffer;
     use crate::logical_ip_packet::LogicalIpPacket;
     use crate::messages::{IpPacket, IpPacketFragment};
@@ -343,10 +343,42 @@ mod test {
     // When there are more than MAX_ACTIVE_FRAGMENTATION_IDs many fragments, the oldest one gets
     // dropped.
     #[test]
-    fn defrag_many_active_fragments() {}
+    fn defrag_many_active_fragments() {
+        let mut defragger = Defragger::new();
+        for fid in 0..u16::try_from(MAX_ACTIVE_FRAGMENTATION_IDS).unwrap() + 1 {
+            defragger.handle_ip_packet(&IpPacket {
+                schedule: Some(2828),
+                fragmentation_id: Some(fid),
+                packet: IpPacketBuffer::new(&[8, 9, 0]),
+            });
+        }
+        // it's important to test this one first; if we test fid 0 first, then it'll have to
+        // reallocate space for it and kick out 1.
+        assert!(
+            defragger
+                .handle_ip_packet_fragment(&IpPacketFragment {
+                    is_last: true,
+                    fragmentation_id: 1,
+                    offset: 3,
+                    fragment: IpPacketBuffer::new(&[1]),
+                })
+                .is_some()
+        );
+        assert!(
+            defragger
+                .handle_ip_packet_fragment(&IpPacketFragment {
+                    is_last: true,
+                    fragmentation_id: 0,
+                    offset: 3,
+                    fragment: IpPacketBuffer::new(&[1]),
+                })
+                .is_none()
+        );
+    }
 
     // When a fragment is at least MAX_FRAGMENTATION_ID_AGE old, it should be dropped. TODO add a
     // test case with one fewer fid so that we can test that it doesn't get dropped prematurely.
+    // (have already checked this manually)
     #[test]
     fn defrag_drop_old_fragment() {
         let mut defragger = Defragger::new();
@@ -359,6 +391,14 @@ mod test {
             packet: IpPacketBuffer::new(&[8]),
         };
         defragger.handle_ip_packet(&old_start);
+
+        let old_fid_2 = 9;
+        let old_start_2 = IpPacket {
+            schedule: Some(993),
+            fragmentation_id: Some(old_fid_2),
+            packet: IpPacketBuffer::new(&[8]),
+        };
+        defragger.handle_ip_packet(&old_start_2);
 
         for _ in 0..MAX_FRAGMENTATION_ID_AGE - 5 {
             // push through unfragmented packets
@@ -391,16 +431,30 @@ mod test {
                 offset: 2,
                 fragment: IpPacketBuffer::new(&[3, 4]),
             });
+            // second-to-last: Ensure it hasn't been kicked out yet.
+            if new_fid == 993 {
+                assert!(
+                    defragger
+                        .handle_ip_packet_fragment(&IpPacketFragment {
+                            is_last: true,
+                            fragmentation_id: old_fid_2,
+                            offset: 1,
+                            fragment: IpPacketBuffer::new(&[10]),
+                        })
+                        .is_some()
+                );
+            }
         }
 
-        assert_eq!(
-            defragger.handle_ip_packet_fragment(&IpPacketFragment {
-                is_last: true,
-                fragmentation_id: old_fid,
-                offset: 1,
-                fragment: IpPacketBuffer::new(&[9])
-            }),
-            None
+        assert!(
+            defragger
+                .handle_ip_packet_fragment(&IpPacketFragment {
+                    is_last: true,
+                    fragmentation_id: old_fid,
+                    offset: 1,
+                    fragment: IpPacketBuffer::new(&[9])
+                })
+                .is_none()
         );
     }
 }
