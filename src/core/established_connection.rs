@@ -269,7 +269,7 @@ fn next_outgoing_timestamp(wire_config: &WireConfig, timestamp: u64) -> u64 {
         .unwrap()
         .checked_div(wire_config.packet_interval)
         .unwrap()
-        .checked_add(wire_config.packet_interval)
+        .checked_add(wire_config.packet_interval_offset)
         .unwrap()
         .checked_sub(wire_config.packet_interval)
         .unwrap();
