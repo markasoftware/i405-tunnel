@@ -3,7 +3,7 @@ use crate::{array_array::IpPacketBuffer, logical_ip_packet::LogicalIpPacket, mes
 /// A logical IP packet that we are trying to send out, but haven't completely sent over the wire
 /// yet.
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct QueuedIpPacket {
+pub(crate) struct QueuedIpPacket {
     packet: IpPacketBuffer,
     schedule: Option<u64>,
     fragmentation: Option<Fragmentation>,
@@ -32,7 +32,7 @@ impl From<LogicalIpPacket> for QueuedIpPacket {
 }
 
 impl QueuedIpPacket {
-    fn new(packet: &[u8], schedule: Option<u64>) -> QueuedIpPacket {
+    pub(crate) fn new(packet: &[u8], schedule: Option<u64>) -> QueuedIpPacket {
         QueuedIpPacket {
             packet: IpPacketBuffer::new(packet),
             schedule,
@@ -45,7 +45,11 @@ impl QueuedIpPacket {
     /// that hasn't been used frequently as the fragment id anywhere else -- we just use a wrapping
     /// counter that we increment every time we call `fragment`. Hence our fragment IDs aren't
     /// consecutive, but that doesn't matter.
-    fn fragment(self, max_length: usize, unused_fragmentation_id: u16) -> FragmentResult {
+    pub(crate) fn fragment(
+        self,
+        max_length: usize,
+        unused_fragmentation_id: u16,
+    ) -> FragmentResult {
         match self.fragmentation {
             // Haven't sent any messages for this packet yet, send the initial IpPacket
             None => {
@@ -147,7 +151,7 @@ impl QueuedIpPacket {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum FragmentResult {
+pub(crate) enum FragmentResult {
     /// The remaining packet fit into a single message, contained within
     Done(messages::Message),
     /// The remaining packet did not fit into a single message. Here's the next message, and the

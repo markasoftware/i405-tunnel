@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
-use serdes::{Deserializable, Serializable, SerializableLength as _};
+pub(crate) use serdes::{Deserializable, Serializable, SerializableLength as _};
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -324,26 +324,26 @@ where
     }
 }
 
-struct WriteCursor<T> {
+pub(crate) struct WriteCursor<T> {
     underlying: T,
     position: usize,
 }
 
 impl<T> WriteCursor<T> {
-    fn new(underlying: T) -> WriteCursor<T> {
+    pub(crate) fn new(underlying: T) -> WriteCursor<T> {
         WriteCursor {
             underlying,
             position: 0,
         }
     }
 
-    fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> T {
         self.underlying
     }
 }
 
 impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
-    fn num_bytes_left(&self) -> usize {
+    pub(crate) fn num_bytes_left(&self) -> usize {
         self.underlying.len() - self.position
     }
 
