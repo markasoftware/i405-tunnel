@@ -1,6 +1,6 @@
 mod client;
-mod server;
 mod established_connection;
+mod server;
 
 const PROTOCOL_VERSION: u32 = 0;
 const OLDEST_COMPATIBLE_PROTOCOL_VERSION: u32 = 0;

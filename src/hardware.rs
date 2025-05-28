@@ -33,15 +33,8 @@ pub(crate) trait Hardware {
         timestamp: Option<u64>,
     ) -> Result<()>;
 
-    fn read_incoming_packet(
-        &mut self,
-        packet: &mut [u8],
-    ) -> Result<(usize, std::net::SocketAddr)>;
-    fn send_incoming_packet(
-        &mut self,
-        packet: &[u8],
-        timestamp: Option<u64>,
-    ) -> Result<()>;
+    fn read_incoming_packet(&mut self, packet: &mut [u8]) -> Result<(usize, std::net::SocketAddr)>;
+    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()>;
 
     /// Filter out future traffic from addrs other than the one specified.
     fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()>;

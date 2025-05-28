@@ -16,7 +16,7 @@ pub(crate) struct ServerCore {
 type Result<T> = std::result::Result<T, ConnectionStateError>;
 
 #[derive(Error, Debug)]
-struct ConnectionStateError {}
+enum ConnectionStateError {}
 
 #[enum_dispatch(ConnectionStateTrait)]
 enum ConnectionState {
