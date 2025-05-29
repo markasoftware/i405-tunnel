@@ -161,13 +161,14 @@ impl EstablishedConnection {
     ) -> Result<()> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
-        let outgoing_packet = std::mem::replace(
+        let outgoing_cleartext_packet = std::mem::replace(
             &mut self.partial_outgoing_packet,
             messages::WriteCursor::new(IpPacketBuffer::new_empty(
                 self.outgoing_wire_config.packet_length.into(),
             )),
         )
         .into_inner();
+        let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
         hardware.send_outgoing_packet(
             outgoing_packet.as_ref(),
             self.peer,
@@ -200,7 +201,7 @@ impl EstablishedConnection {
         hardware: &mut H,
         packet: &[u8],
     ) -> Result<()> {
-        let cleartext_packet = self.session.try_read(packet)?;
+        let cleartext_packet = self.session.decrypt_datagram(packet)?;
         self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)
     }
 
@@ -209,7 +210,7 @@ impl EstablishedConnection {
         hardware: &mut H,
         packet: &[u8],
     ) -> Result<()> {
-        let mut cursor = messages::ReadCursor::new(self.session.try_read(packet)?);
+        let mut cursor = messages::ReadCursor::new(self.session.decrypt_datagram(packet)?);
         while messages::has_message(&cursor) {
             let msg = cursor.read()?;
             match msg {
@@ -249,13 +250,13 @@ impl EstablishedConnection {
 #[derive(Error, Debug)]
 pub(crate) enum Error {
     #[error("Error deserializing message: {0:?}")]
-    DeserializeMessageErr(#[from] DeserializeMessageErr),
+    DeserializeMessage(#[from] DeserializeMessageErr),
     #[error("std::io::Error {0:?}")]
-    IOErr(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
     #[error("wolfssl error {0:?}")]
-    WolfErr(#[from] wolfssl::Error),
+    Wolf(#[from] wolfssl::Error),
     #[error("hardware error: {0:?}")]
-    HardwareErr(#[from] hardware::Error),
+    Hardware(#[from] hardware::Error),
 }
 
 /// Return the next packet send time strictly after `timestamp`
@@ -269,11 +270,10 @@ fn next_outgoing_timestamp(wire_config: &WireConfig, timestamp: u64) -> u64 {
         .unwrap()
         .checked_sub(wire_config.packet_interval_offset)
         .unwrap();
-    return x
-        .checked_sub(x.checked_rem(wire_config.packet_interval).unwrap())
+    x.checked_sub(x.checked_rem(wire_config.packet_interval).unwrap())
         .unwrap()
         .checked_add(wire_config.packet_interval_offset)
-        .unwrap();
+        .unwrap()
 }
 
 #[cfg(test)]

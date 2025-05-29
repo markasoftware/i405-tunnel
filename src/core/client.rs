@@ -41,7 +41,7 @@ enum ConnectionStateError {
     #[error("The server sent an empty packet when it should have sent an S2C handshake")]
     S2CHandshakeEmpty,
     #[error("The server sent a different message instead of S2C handshake: {0:?}")]
-    S2CHandshakeWasnt(messages::Message),
+    S2CHandshakeWasnt(Box<messages::Message>),
     #[error("There were other messages in the packet with the S2C handshake")]
     S2CHandshakeNotAlone,
     #[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
@@ -80,7 +80,7 @@ impl NoConnection {
         packets_to_send: &Vec<IpPacketBuffer>,
         timeout: u64,
     ) -> Result<NoConnection> {
-        send_packets(config, hardware, &packets_to_send)?;
+        send_packets(config, hardware, packets_to_send)?;
         hardware.set_timer(timeout);
         Ok(NoConnection {
             negotiation: session,
@@ -195,7 +195,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         // we timed out :|
-        self.send_one_handshake(config, hardware);
+        self.send_one_handshake(config, hardware)?;
         if self.num_timeouts_happened >= C2S_MAX_RETRANSMITS {
             // time to go back to the stone age
             log::warn!(
@@ -277,7 +277,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
                     ),
                 ))
             }
-            other_msg => Err(ConnectionStateError::S2CHandshakeWasnt(other_msg)),
+            other_msg => Err(ConnectionStateError::S2CHandshakeWasnt(Box::new(other_msg))),
         }
     }
 }

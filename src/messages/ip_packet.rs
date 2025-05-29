@@ -1,9 +1,9 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
-use crate::messages::{DeserializeMessageErr, ReadCursor, deserialize_type_byte, serdes};
+use crate::messages::{DeserializeMessageErr, ReadCursor, serdes};
 
-use super::serdes::SerializableLength;
+use super::serdes::SerializableLength as _;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct IpPacket {
@@ -32,7 +32,7 @@ impl IpPacket {
     }
 
     pub(crate) fn does_type_byte_match(type_byte: u8) -> bool {
-        Self::TYPE_BYTE_LOW <= type_byte && type_byte <= Self::TYPE_BYTE_HIGH
+        (Self::TYPE_BYTE_LOW..=Self::TYPE_BYTE_HIGH).contains(&type_byte)
     }
 }
 
@@ -73,7 +73,7 @@ impl serdes::Deserializable for IpPacket {
     ) -> Result<Self, DeserializeMessageErr> {
         let type_byte: u8 = read_cursor.read()?;
         assert!(
-            Self::TYPE_BYTE_LOW <= type_byte && type_byte <= Self::TYPE_BYTE_HIGH,
+            (Self::TYPE_BYTE_LOW..=Self::TYPE_BYTE_HIGH).contains(&type_byte),
             "type byte out of range for IP packet"
         );
 

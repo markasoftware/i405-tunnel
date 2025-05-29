@@ -81,7 +81,7 @@ impl<T, const COMPTIME_LENGTH: usize> std::ops::DerefMut for ArrayArray<T, COMPT
 
 impl<T, const COMPTIME_LENGTH: usize> AsRef<[T]> for ArrayArray<T, COMPTIME_LENGTH> {
     fn as_ref(&self) -> &[T] {
-        &*self
+        self
     }
 }
 

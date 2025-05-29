@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
-pub(crate) use serdes::{Deserializable, Serializable, SerializableLength as _};
+pub(crate) use serdes::{Serializable, SerializableLength as _};
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -276,10 +276,10 @@ where
         self.underlying.as_ref().len() - self.position
     }
 
-    fn peek_exact_comptime<const num: usize>(&self) -> Option<[u8; num]> {
-        if self.num_bytes_left() >= num {
+    fn peek_exact_comptime<const NUM: usize>(&self) -> Option<[u8; NUM]> {
+        if self.num_bytes_left() >= NUM {
             Some(
-                self.underlying.as_ref()[self.position..self.position + num]
+                self.underlying.as_ref()[self.position..self.position + NUM]
                     .try_into()
                     .unwrap(),
             )
@@ -288,10 +288,10 @@ where
         }
     }
 
-    fn read_exact_comptime<const num: usize>(&mut self) -> Option<[u8; num]> {
-        let result = self.peek_exact_comptime::<num>();
+    fn read_exact_comptime<const NUM: usize>(&mut self) -> Option<[u8; NUM]> {
+        let result = self.peek_exact_comptime::<NUM>();
         if result.is_some() {
-            self.position = self.position.checked_add(num).unwrap();
+            self.position = self.position.checked_add(NUM).unwrap();
         }
         result
     }

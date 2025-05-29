@@ -1,7 +1,5 @@
 // mod simulated;
 
-use crate::messages::IpPacket;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]

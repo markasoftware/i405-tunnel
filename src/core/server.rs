@@ -1,11 +1,16 @@
 use enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
-use crate::{array_array::IpPacketBuffer, core::WireConfig, dtls, hardware::Hardware, messages};
+use crate::{
+    core::WireConfig,
+    dtls,
+    hardware::{self, Hardware},
+    messages,
+};
 
 use super::{
-    OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    established_connection::EstablishedConnection,
+    PROTOCOL_VERSION,
+    established_connection::{self, EstablishedConnection},
 };
 
 pub(crate) struct ServerCore {
@@ -15,8 +20,42 @@ pub(crate) struct ServerCore {
 
 type Result<T> = std::result::Result<T, ConnectionStateError>;
 
+// To keep the code here relatively simple, the different server connection states emit errors, but
+// these never actually cause the process to exit. Instead, they all just cause the server to revert
+// to the NoConnection state. Truly fatal errors should simply panic.
+
 #[derive(Error, Debug)]
-enum ConnectionStateError {}
+enum ConnectionStateError {
+    #[error("IO error: {0:?}")]
+    IOErr(#[from] std::io::Error),
+    #[error("wolfSSL error: {0:?}")]
+    WolfErr(#[from] wolfssl::Error),
+    #[error("hardware error: {0:?}")]
+    HardwareErr(#[from] hardware::Error),
+    #[error("established connection error: {0:?}")]
+    EstablishedConnectionErr(#[from] established_connection::Error),
+    #[error("deserialize error: {0:?}")]
+    DeserializeMessageErr(#[from] messages::DeserializeMessageErr),
+    #[error(
+        "Client with protocol version {0} wanted protocol version at least {1}, but we have {2}"
+    )]
+    IncompatibleProtocolVersions(u32, u32, u32),
+    #[error(
+        "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
+    )]
+    PacketsTooShortForS2CHandshake,
+    #[error("Client sent packet without messages during C2S handshake")]
+    EmptyC2SHandshake,
+    #[error(
+        "Got multiple C2S handshakes and they weren't the same: First time {0:?}, second time {1:?}"
+    )]
+    DifferentC2SHandshakes(
+        Box<messages::ClientToServerHandshake>,
+        Box<messages::ClientToServerHandshake>,
+    ),
+    #[error("Got a non-handshake message before the C2S handshake")]
+    OtherMessageBeforeC2SHandshake(Box<messages::Message>),
+}
 
 #[enum_dispatch(ConnectionStateTrait)]
 enum ConnectionState {
@@ -67,8 +106,16 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
                     Some(negotiation)
                 } else {
                     match negotiation.session.has_timed_out(now) {
-                        Ok((new_session, to_send, new_timeout)) => {
-                            // TODO send to_send
+                        Ok((new_session, to_send, new_timeout)) => 'timeout_success: {
+                            for packet in to_send {
+                                match hardware.send_outgoing_packet(&packet, negotiation.peer, None) {
+                                    Ok(()) => (),
+                                    Err(err) => {
+                                        log::error!("Error sending packet to {} during DTLS handshake timeout: {:?}", negotiation.peer, err);
+                                        break 'timeout_success None;
+                                    }
+                                }
+                            }
                             Some(Negotiation {
                                 peer: negotiation.peer,
                                 session: new_session,
@@ -116,18 +163,43 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
                     .make_progress(packet, hardware.timestamp())
                 {
                     dtls::NegotiateResult::Ready(new_session, to_send) => {
-                        // TODO send to_send
+                        // at this very line of code, the handshake is complete, and the peer has
+                        // been selected, so it's reasonable to actually return an error if we have
+                        // an issue sending the packets. (the idea is we just log and retry from
+                        // within the connection state if we haven't chosen a peer yet, so that ie
+                        // some rando trying the wrong passwords doesn't make it impossible to
+                        // connect with the right password).
+                        for packet in to_send {
+                            hardware.send_outgoing_packet(&packet, peer, None)?;
+                        }
                         return Ok(ConnectionState::InProtocolHandshake(
                             InProtocolHandshake::new(new_session, peer),
                         ));
                     }
                     dtls::NegotiateResult::NeedRead(new_session, to_send, next_timeout) => {
-                        // TODO send to_send
-                        new_negotiations.push(Negotiation {
-                            peer,
-                            session: new_session,
-                            timeout: next_timeout,
-                        });
+                        // The peer doesn't necessarily have the right password yet, so we want to
+                        // make sure to just drop the connection on error, not reset the entire
+                        // connection state.
+                        'need_read: {
+                            for packet in to_send {
+                                match hardware.send_outgoing_packet(&packet, peer, None) {
+                                    Ok(()) => (),
+                                    Err(err) => {
+                                        log::error!(
+                                            "Error sending packet during DTLS handshake with {}: {:?}",
+                                            peer,
+                                            err
+                                        );
+                                        break 'need_read;
+                                    }
+                                }
+                            }
+                            new_negotiations.push(Negotiation {
+                                peer,
+                                session: new_session,
+                                timeout: next_timeout,
+                            });
+                        }
                     }
                     dtls::NegotiateResult::Err(err) => {
                         log::error!(
@@ -164,10 +236,10 @@ impl InProtocolHandshake {
     }
 
     fn send_s2c_handshake<H: Hardware>(
-        &self,
+        &mut self,
         hardware: &mut H,
         c2s_handshake: &messages::ClientToServerHandshake,
-    ) -> std::result::Result<(), InProtocolHandshakeError> {
+    ) -> Result<()> {
         let mut send_response = |success| {
             let response = messages::ServerToClientHandshake {
                 protocol_version: PROTOCOL_VERSION,
@@ -177,10 +249,11 @@ impl InProtocolHandshake {
             let did_add =
                 builder.try_add_message(&messages::Message::ServerToClientHandshake(response));
             if !did_add {
-                return Err(InProtocolHandshakeError::PacketsTooShortForS2CHandshake);
+                return Err(ConnectionStateError::PacketsTooShortForS2CHandshake);
             }
-            let packet = builder.into_inner();
-            hardware.send_outgoing_packet(&packet[..], self.peer, None);
+            let cleartext_packet = builder.into_inner();
+            let ciphertext_packet = self.session.encrypt_datagram(&cleartext_packet)?;
+            hardware.send_outgoing_packet(&ciphertext_packet, self.peer, None)?;
             Ok(())
         };
 
@@ -190,15 +263,15 @@ impl InProtocolHandshake {
             .is_some_and(|old_c2s_handshake| old_c2s_handshake != c2s_handshake)
         {
             send_response(false)?;
-            return Err(InProtocolHandshakeError::DifferentC2SHandshakes(
-                self.c2s_handshake.clone().unwrap(),
-                c2s_handshake.clone(),
+            return Err(ConnectionStateError::DifferentC2SHandshakes(
+                Box::new(self.c2s_handshake.clone().unwrap()),
+                Box::new(c2s_handshake.clone()),
             ));
         }
 
         if PROTOCOL_VERSION < c2s_handshake.oldest_compatible_protocol_version {
             send_response(false)?;
-            return Err(InProtocolHandshakeError::IncompatibleProtocolVersions(
+            return Err(ConnectionStateError::IncompatibleProtocolVersions(
                 c2s_handshake.protocol_version,
                 c2s_handshake.oldest_compatible_protocol_version,
                 PROTOCOL_VERSION,
@@ -207,27 +280,6 @@ impl InProtocolHandshake {
 
         send_response(true)
     }
-}
-
-#[derive(Error, Debug)]
-enum InProtocolHandshakeError {
-    #[error("IO error: {0:?}")]
-    IOError(#[from] std::io::Error),
-    #[error(
-        "Client with protocol version {0} wanted protocol version at least {1}, but we have {2}"
-    )]
-    IncompatibleProtocolVersions(u32, u32, u32),
-    #[error(
-        "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
-    )]
-    PacketsTooShortForS2CHandshake,
-    #[error(
-        "Got multiple C2S handshakes and they weren't the same: First time {0:?}, second time {1:?}"
-    )]
-    DifferentC2SHandshakes(
-        messages::ClientToServerHandshake,
-        messages::ClientToServerHandshake,
-    ),
 }
 
 impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
@@ -259,89 +311,40 @@ impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
     ) -> Result<ConnectionState> {
         assert!(peer == self.peer, "handshake peer was not as expected");
 
-        let cleartext_packet = match self.session.try_read(packet) {
-            Ok(cleartext_packet) => cleartext_packet,
-            Err(err) => {
-                log::error!(
-                    "wolfSSL error reading incoming packet during handshake, aborting connection: {:?}",
-                    err
-                );
-                return Ok(ConnectionState::NoConnection(NoConnection::new()));
-            }
-        };
+        let cleartext_packet = self.session.decrypt_datagram(packet)?;
 
         let mut read_cursor = messages::ReadCursor::new(cleartext_packet.clone());
         if !messages::has_message(&read_cursor) {
-            log::error!("Empty packet from {}, aborting connection", self.peer);
-            return Ok(ConnectionState::NoConnection(NoConnection::new()));
+            return Err(ConnectionStateError::EmptyC2SHandshake);
         }
 
-        let message = read_cursor.read();
+        let message = read_cursor.read()?;
         match message {
-            Ok(messages::Message::ClientToServerHandshake(c2s_handshake)) => {
-                match self.send_s2c_handshake(hardware, &c2s_handshake) {
-                    Ok(()) => Ok(ConnectionState::InProtocolHandshake(InProtocolHandshake {
-                        session: self.session,
-                        peer: self.peer,
-                        c2s_handshake: Some(c2s_handshake),
-                    })),
-                    Err(err) => {
-                        log::error!(
-                            "Error processing C2S handshake from {}, aborting connection: {:?}",
-                            self.peer,
-                            err
-                        );
-                        Ok(ConnectionState::NoConnection(NoConnection::new()))
-                    }
-                }
+            messages::Message::ClientToServerHandshake(c2s_handshake) => {
+                self.send_s2c_handshake(hardware, &c2s_handshake)?;
+                Ok(ConnectionState::InProtocolHandshake(InProtocolHandshake {
+                    session: self.session,
+                    peer: self.peer,
+                    c2s_handshake: Some(c2s_handshake),
+                }))
             }
-            Ok(other_message) => {
-                match self.c2s_handshake {
-                    Some(c2s_handshake) => {
-                        let s2c_wire_config = WireConfig {
-                            packet_length: c2s_handshake.s2c_packet_length,
-                            packet_interval: c2s_handshake.s2c_packet_interval,
-                            // TODO randomize?
-                            packet_interval_offset: 123,
-                        };
-                        let mut established_connection =
-                            EstablishedConnection::new(self.session, peer, s2c_wire_config);
-                        match established_connection
-                            .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)
-                        {
-                            Ok(()) => (),
-                            Err(err) => {
-                                log::warn!(
-                                    "Error reading incoming first round of real messages from peer {}, aborting connection: {:?}",
-                                    self.peer,
-                                    err
-                                );
-                                return Ok(ConnectionState::NoConnection(NoConnection::new()));
-                            }
-                        }
-                        // connection established! TODO construct an EstablishedSession and then
-                        // process the messages in the packet.
-                        Ok(ConnectionState::EstablishedConnection(
-                            established_connection,
-                        ))
-                    }
-                    None => {
-                        log::error!(
-                            "Got a non-handshake message before getting a C2S handshake from {}, aborting connection: {:?}",
-                            self.peer,
-                            other_message
-                        );
-                        Ok(ConnectionState::NoConnection(NoConnection::new()))
-                    }
-                }
-            }
-            Err(err) => {
-                log::error!(
-                    "Error deserializing handshake message from {}, aborting connection: {:?}",
-                    self.peer,
-                    err
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new()))
+            other_message => {
+                let c2s_handshake = self.c2s_handshake.ok_or(
+                    ConnectionStateError::OtherMessageBeforeC2SHandshake(Box::new(other_message)),
+                )?;
+                let s2c_wire_config = WireConfig {
+                    packet_length: c2s_handshake.s2c_packet_length,
+                    packet_interval: c2s_handshake.s2c_packet_interval,
+                    // TODO randomize?
+                    packet_interval_offset: 123,
+                };
+                let mut established_connection =
+                    EstablishedConnection::new(self.session, peer, s2c_wire_config);
+                established_connection
+                    .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
+                Ok(ConnectionState::EstablishedConnection(
+                    established_connection,
+                ))
             }
         }
     }
@@ -354,17 +357,8 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
         hardware: &mut H,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
-        match EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp) {
-            Ok(()) => Ok(ConnectionState::EstablishedConnection(self)),
-            Err(err) => {
-                log::error!(
-                    "EstablishedConnection error with peer {}, aborting connection: {:?}",
-                    self.peer(),
-                    err
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new()))
-            }
-        }
+        EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
+        Ok(ConnectionState::EstablishedConnection(self))
     }
 
     fn on_read_outgoing_packet(
@@ -391,17 +385,8 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
             self.peer(),
             "should only be receiving from the correct peer once established"
         );
-        match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet) {
-            Ok(()) => Ok(ConnectionState::EstablishedConnection(self)),
-            Err(err) => {
-                log::error!(
-                    "EstablishedConnection error with peer {}, aborting connection: {:?}",
-                    self.peer(),
-                    err
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new()))
-            }
-        }
+        EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
+        Ok(ConnectionState::EstablishedConnection(self))
     }
 }
 

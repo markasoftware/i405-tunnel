@@ -3,8 +3,8 @@
 /// a DTLSNegotiatingSession that you should construct first. Then, call `make_progress` on this
 /// negotiating session until it turns into a DTLSEstablishedSession. The DTLSEstablishedSession has
 /// a very simple and usable interface that abstracts over the "IO Callbacks" that wolfssl (and most
-/// other TLS libraries) like to think about: Simply `try_write(cleartext_packet) ->
-/// ciphertext_packet` or `try_read(ciphertext_packet) -> cleartext_packet`.
+/// other TLS libraries) like to think about: Simply `encrypt_datagram(cleartext_packet) ->
+/// ciphertext_packet` or `decrypt_datagram(ciphertext_packet) -> cleartext_packet`.
 ///
 /// Not sure where to put this comment, so putting it here: wolfSSL internally has a function
 /// LowResTimer that it uses to get...the low resolution time. It's possible to configure this to a
@@ -63,9 +63,8 @@ impl NegotiatingSession {
     }
 
     fn add_written_packet(&mut self, vec: &mut Vec<IpPacketBuffer>) {
-        match self.underlying.io_cb_mut().pop_last_sent_packet() {
-            Some(last_sent_packet) => vec.push(last_sent_packet),
-            None => (),
+        if let Some(last_sent_packet) = self.underlying.io_cb_mut().pop_last_sent_packet() {
+            vec.push(last_sent_packet);
         }
     }
 
@@ -77,12 +76,10 @@ impl NegotiatingSession {
         read_packet: Option<&[u8]>,
         timestamp: u64,
     ) -> NegotiateResult {
-        match read_packet {
-            Some(packet) => self
-                .underlying
+        if let Some(packet) = read_packet {
+            self.underlying
                 .io_cb_mut()
-                .set_next_packet_to_receive(packet),
-            None => (),
+                .set_next_packet_to_receive(packet);
         }
 
         let mut written_packets = Vec::new();
@@ -165,9 +162,9 @@ impl NegotiatingSession {
 pub(crate) enum NewSessionError {
     // TODO why do we need these error() messages? The docs make it seem like you don't when you have #[from]
     #[error("NewSessionError {0:?}")]
-    NewSessionError(#[from] wolfssl::NewSessionError),
+    WolfNewSessionError(#[from] wolfssl::NewSessionError),
     #[error("NewContextBuilderError {0:?}")]
-    NewContextBuilderError(#[from] wolfssl::NewContextBuilderError),
+    WolfNewContextBuilderError(#[from] wolfssl::NewContextBuilderError),
     #[error("NegotiateError {0:?}")]
     NegotiateError(#[from] NegotiateError),
     #[error("Negotiation was reported as complete immediately upon session creation??")]
@@ -210,7 +207,7 @@ impl std::fmt::Debug for EstablishedSession {
 
 impl EstablishedSession {
     /// Call try_write on the underlying session, and return the encrypted bytes.
-    pub(crate) fn try_write(
+    pub(crate) fn encrypt_datagram(
         &mut self,
         cleartext_packet: &[u8],
     ) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
@@ -253,7 +250,7 @@ impl EstablishedSession {
     // message/packet
 
     /// Call try_read on the underlying session, and return the cleartext bytes.
-    pub(crate) fn try_read(
+    pub(crate) fn decrypt_datagram(
         &mut self,
         ciphertext_packet: &[u8],
     ) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
@@ -431,8 +428,8 @@ mod test {
 
         //// CLIENT -> SERVER APPLICATION DATA ////
         let msg = b"howdy howdy lil cutie";
-        let c2s_packet = client.try_write(msg).unwrap();
-        let roundtripped = server.try_read(&c2s_packet).unwrap();
+        let c2s_packet = client.encrypt_datagram(msg).unwrap();
+        let roundtripped = server.decrypt_datagram(&c2s_packet).unwrap();
         assert_eq!(
             &roundtripped[..],
             msg,
@@ -441,8 +438,8 @@ mod test {
 
         //// SERVER -> CLIENT APPLICATION DATA ////
         let msg2 = b"im buying weed on the internet";
-        let s2c_packet = server.try_write(msg2).unwrap();
-        let roundtripped2 = client.try_read(&s2c_packet).unwrap();
+        let s2c_packet = server.encrypt_datagram(msg2).unwrap();
+        let roundtripped2 = client.decrypt_datagram(&s2c_packet).unwrap();
         assert_eq!(
             &roundtripped2[..],
             msg2,
