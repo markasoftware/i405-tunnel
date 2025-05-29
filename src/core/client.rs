@@ -26,18 +26,20 @@ enum ConnectionState {
 #[derive(Error, Debug)]
 enum ConnectionStateError {
     #[error("DTLS Negotiation error: {0:?}")]
-    NegotiateErr(#[from] dtls::NegotiateError),
+    Negotiate(#[from] dtls::NegotiateError),
     #[error("Hardware error: {0:?}")]
-    HardwareErr(#[from] hardware::Error),
+    Hardware(#[from] hardware::Error),
     #[error("DTLS new session error: {0:?}")]
-    NewSessionErr(#[from] dtls::NewSessionError),
+    NewSession(#[from] dtls::NewSessionError),
     #[error("Error deserializing a message: {0:?}")]
-    DeserializeMessageErr(#[from] messages::DeserializeMessageErr),
+    DeserializeMessage(#[from] messages::DeserializeMessageErr),
     // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
     #[error("Established connection error: {0:?}")]
-    EstablishedConnectionErr(#[from] established_connection::Error),
+    EstablishedConnection(#[from] established_connection::Error),
+    #[error("wolfSSL error: {0:?}")]
+    Wolf(#[from] wolfssl::Error),
     #[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-    S2CHandshakeErr(u32),
+    S2CHandshakeServer(u32),
     #[error("The server sent an empty packet when it should have sent an S2C handshake")]
     S2CHandshakeEmpty,
     #[error("The server sent a different message instead of S2C handshake: {0:?}")]
@@ -135,7 +137,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
                 Self::from_triple(config, hardware, session, &to_send, timeout)
                     .map(ConnectionState::NoConnection)
             }
-            dtls::NegotiateResult::Err(err) => Err(ConnectionStateError::NegotiateErr(err)),
+            dtls::NegotiateResult::Err(err) => Err(ConnectionStateError::Negotiate(err)),
         }
     }
 }
@@ -181,8 +183,9 @@ impl C2SHandshakeSent {
             did_add,
             "Wasn't able to fit the C2S handshake in a single packet -- this will never work. Try increasing client-to-server packet size."
         );
-        let buf = builder.into_inner();
-        hardware.send_outgoing_packet(&buf[..], config.peer_address, None)?;
+        let cleartext_packet = builder.into_inner();
+        let packet = self.session.encrypt_datagram(&cleartext_packet)?;
+        hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
         Ok(())
     }
 }
@@ -231,15 +234,16 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
     }
 
     fn on_read_incoming_packet(
-        self,
+        mut self,
         config: &Config,
         _hardware: &mut H,
         packet: &[u8],
     ) -> Result<ConnectionState> {
+        let cleartext_packet = self.session.decrypt_datagram(&packet)?;
         // It really should be an S2C handshake. The server shouldn't send us anything but an
         // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
         // so we can't get anything out-of-order here.
-        let mut read_cursor = messages::ReadCursor::new(packet);
+        let mut read_cursor = messages::ReadCursor::new(&cleartext_packet);
         // TODO I'm not totally happy that we have to do `has_message` rather than being able to
         // use `read`
         if !messages::has_message(&read_cursor) {
@@ -255,7 +259,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
                 }
 
                 if !s2c_handshake.success {
-                    return Err(ConnectionStateError::S2CHandshakeErr(
+                    return Err(ConnectionStateError::S2CHandshakeServer(
                         s2c_handshake.protocol_version,
                     ));
                 }
