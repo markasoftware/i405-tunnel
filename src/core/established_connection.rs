@@ -261,17 +261,18 @@ pub(crate) enum Error {
 /// Return the next packet send time strictly after `timestamp`
 fn next_outgoing_timestamp(wire_config: &WireConfig, timestamp: u64) -> u64 {
     assert!(wire_config.packet_interval > wire_config.packet_interval_offset);
-    // lmao there's got to be a better way to do this.
-    return timestamp
+    // for those of you who can't read checked_ math as quickly as real math:
+    // let x = timestamp + packet_interval - packet_interval_offset
+    // return x - (x%packet_interval) + packet_interval_offset
+    let x = timestamp
         .checked_add(wire_config.packet_interval)
         .unwrap()
         .checked_sub(wire_config.packet_interval_offset)
-        .unwrap()
-        .checked_div(wire_config.packet_interval)
+        .unwrap();
+    return x
+        .checked_sub(x.checked_rem(wire_config.packet_interval).unwrap())
         .unwrap()
         .checked_add(wire_config.packet_interval_offset)
-        .unwrap()
-        .checked_sub(wire_config.packet_interval)
         .unwrap();
 }
 
