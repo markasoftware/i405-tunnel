@@ -1,4 +1,6 @@
-use enum_dispatch::enum_dispatch;
+use std::net::SocketAddr;
+
+use declarative_enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::array_array::IpPacketBuffer;
@@ -11,54 +13,131 @@ use crate::{dtls, messages};
 use super::established_connection;
 use super::{C2S_MAX_RETRANSMITS, C2S_MAX_TIMEOUT, established_connection::EstablishedConnection};
 
-pub(crate) struct ClientCore {
+#[derive(Debug)]
+pub(crate) struct Core {
     config: Config,
-    state: ConnectionState,
+    // this option should never really be empty; we just need to be able to std::mem::take out of it
+    // temporarily.
+    state: Option<ConnectionState>,
 }
 
-#[enum_dispatch(ClientConnectionStateTrait)]
+impl Core {
+    pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
+        Ok(Self {
+            state: Some(ConnectionState::NoConnection(NoConnection::new(
+                &config, hardware,
+            )?)),
+            config,
+        })
+    }
+}
+
+fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionState>>(
+    state: &mut Option<ConnectionState>,
+    f: F,
+) {
+    match f(std::mem::take(state).unwrap()) {
+        Ok(new_state) => std::mem::replace(state, Some(new_state)),
+        Err(err) => {
+            // TODO don't panic, instead use the config to decide whether to quit or retry.
+            panic!("Connection state error! {:?}", err);
+        }
+    };
+}
+
+impl super::Core for Core {
+    fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_timer(&self.config, hardware, timer_timestamp)
+        });
+    }
+
+    fn on_read_outgoing_packet(
+        &mut self,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+        recv_timestamp: u64,
+    ) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_read_outgoing_packet(&self.config, hardware, packet, recv_timestamp)
+        });
+    }
+
+    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_read_incoming_packet(&self.config, hardware, packet)
+        });
+    }
+}
+
+enum_dispatch! {
+    trait ConnectionStateTrait {
+        fn on_timer(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            timer_timestamp: u64,
+        ) -> Result<ConnectionState>;
+        fn on_read_outgoing_packet(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            packet: &[u8],
+        recv_timestamp: u64,
+    ) -> Result<ConnectionState>;
+    fn on_read_incoming_packet(
+        self,
+        config: &Config,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+    ) -> Result<ConnectionState>;
+}
+
+#[derive(Debug)]
 enum ConnectionState {
     NoConnection(NoConnection),
     C2SHandshakeSent(C2SHandshakeSent),
     EstablishedConnection(EstablishedConnection),
 }
+}
 
 #[derive(Error, Debug)]
 enum ConnectionStateError {
-    #[error("DTLS Negotiation error: {0:?}")]
-    Negotiate(#[from] dtls::NegotiateError),
-    #[error("Hardware error: {0:?}")]
-    Hardware(#[from] hardware::Error),
-    #[error("DTLS new session error: {0:?}")]
-    NewSession(#[from] dtls::NewSessionError),
-    #[error("Error deserializing a message: {0:?}")]
-    DeserializeMessage(#[from] messages::DeserializeMessageErr),
-    // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
-    #[error("Established connection error: {0:?}")]
-    EstablishedConnection(#[from] established_connection::Error),
-    #[error("wolfSSL error: {0:?}")]
-    Wolf(#[from] wolfssl::Error),
-    #[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-    S2CHandshakeServer(u32),
-    #[error("The server sent an empty packet when it should have sent an S2C handshake")]
-    S2CHandshakeEmpty,
-    #[error("The server sent a different message instead of S2C handshake: {0:?}")]
-    S2CHandshakeWasnt(Box<messages::Message>),
-    #[error("There were other messages in the packet with the S2C handshake")]
-    S2CHandshakeNotAlone,
-    #[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-    S2CHandshakeIncompatibleProtocolVersion(u32),
+#[error("DTLS Negotiation error: {0:?}")]
+Negotiate(#[from] dtls::NegotiateError),
+#[error("Hardware error: {0:?}")]
+Hardware(#[from] hardware::Error),
+#[error("DTLS new session error: {0:?}")]
+NewSession(#[from] dtls::NewSessionError),
+#[error("Error deserializing a message: {0:?}")]
+DeserializeMessage(#[from] messages::DeserializeMessageErr),
+// TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
+#[error("Established connection error: {0:?}")]
+EstablishedConnection(#[from] established_connection::Error),
+#[error("wolfSSL error: {0:?}")]
+Wolf(#[from] wolfssl::Error),
+#[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
+S2CHandshakeServer(u32),
+#[error("The server sent an empty packet when it should have sent an S2C handshake")]
+S2CHandshakeEmpty,
+#[error("The server sent a different message instead of S2C handshake: {0:?}")]
+S2CHandshakeWasnt(Box<messages::Message>),
+#[error("There were other messages in the packet with the S2C handshake")]
+S2CHandshakeNotAlone,
+#[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
+S2CHandshakeIncompatibleProtocolVersion(u32),
 }
 
 type Result<T> = std::result::Result<T, ConnectionStateError>;
 
+#[derive(Debug)]
 struct NoConnection {
-    negotiation: dtls::NegotiatingSession,
+negotiation: dtls::NegotiatingSession,
 }
 
-fn send_packets<H: Hardware>(
+fn send_packets(
     config: &Config,
-    hardware: &mut H,
+    hardware: &mut impl Hardware,
     packets_to_send: &Vec<IpPacketBuffer>,
 ) -> Result<()> {
     for packet in packets_to_send {
@@ -68,16 +147,16 @@ fn send_packets<H: Hardware>(
 }
 
 impl NoConnection {
-    fn new<H: Hardware>(config: &Config, hardware: &mut H) -> Result<NoConnection> {
+    fn new(config: &Config, hardware: &mut impl Hardware) -> Result<NoConnection> {
         hardware.clear_event_listeners();
         let (new_session, initial_packets, timeout) =
             dtls::NegotiatingSession::new_client(&config.pre_shared_key, hardware.timestamp())?;
         Self::from_triple(config, hardware, new_session, &initial_packets, timeout)
     }
 
-    fn from_triple<H: Hardware>(
+    fn from_triple(
         config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         session: dtls::NegotiatingSession,
         packets_to_send: &Vec<IpPacketBuffer>,
         timeout: u64,
@@ -90,11 +169,11 @@ impl NoConnection {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
+impl ConnectionStateTrait for NoConnection {
     fn on_timer(
         self,
         config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         let (new_negotiation, packets_to_send, next_timeout) =
@@ -112,7 +191,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -124,7 +203,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     fn on_read_incoming_packet(
         self,
         config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
         match self.negotiation.make_progress(packet, hardware.timestamp()) {
@@ -142,6 +221,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     }
 }
 
+#[derive(Debug)]
 struct C2SHandshakeSent {
     session: dtls::EstablishedSession,
     next_timeout_instant: u64,
@@ -152,9 +232,9 @@ struct C2SHandshakeSent {
 }
 
 impl C2SHandshakeSent {
-    fn new<H: Hardware>(
+    fn new(
         config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         session: dtls::EstablishedSession,
     ) -> Result<C2SHandshakeSent> {
         hardware.clear_event_listeners();
@@ -168,7 +248,7 @@ impl C2SHandshakeSent {
         Ok(result)
     }
 
-    fn send_one_handshake<H: Hardware>(&mut self, config: &Config, hardware: &mut H) -> Result<()> {
+    fn send_one_handshake(&mut self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
         let mut builder = messages::PacketBuilder::new(config.c2s_wire_config.packet_length.into());
         let c2s_handshake = messages::ClientToServerHandshake {
             protocol_version: PROTOCOL_VERSION,
@@ -190,11 +270,11 @@ impl C2SHandshakeSent {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
+impl ConnectionStateTrait for C2SHandshakeSent {
     fn on_timer(
         mut self,
         config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         // we timed out :|
@@ -226,7 +306,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -236,7 +316,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
         let cleartext_packet = self.session.decrypt_datagram(&packet)?;
@@ -286,11 +366,11 @@ impl<H: Hardware> ConnectionStateTrait<H> for C2SHandshakeSent {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
+impl ConnectionStateTrait for EstablishedConnection {
     fn on_timer(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
@@ -300,7 +380,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     fn on_read_outgoing_packet(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
         recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -311,7 +391,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     fn on_read_incoming_packet(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
         EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
@@ -319,32 +399,10 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     }
 }
 
-#[enum_dispatch]
-trait ConnectionStateTrait<H: Hardware> {
-    fn on_timer(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        timer_timestamp: u64,
-    ) -> Result<ConnectionState>;
-    fn on_read_outgoing_packet(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) -> Result<ConnectionState>;
-    fn on_read_incoming_packet(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        packet: &[u8],
-    ) -> Result<ConnectionState>;
-}
-
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Config {
     c2s_wire_config: WireConfig,
     s2c_wire_config: WireConfig,
-    peer_address: std::net::SocketAddr,
+    peer_address: SocketAddr,
     pre_shared_key: Vec<u8>,
 }

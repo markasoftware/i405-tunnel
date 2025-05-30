@@ -1,6 +1,5 @@
 mod ip_packet;
 
-use enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
@@ -40,7 +39,6 @@ impl PacketBuilder {
 
 type MessageType = u8;
 
-#[enum_dispatch(Serializable)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
@@ -49,6 +47,9 @@ pub(crate) enum Message {
     IpPacketFragment(IpPacketFragment),
 }
 
+// You can do this implementation using enum_dispatch, but its complete breakage of many IDE
+// features is too much for me. And the fact that we're splitting it over modules means we can't use
+// declarative_enum_dispatch either. Maybe we should just get rid of the serdes modules...
 impl serdes::Serializable for Message {
     /// Try to serialize into the given buffer (if we fit), returning how many bytes were written if
     /// we did fit. We avoid std::Write because it returns a whole-ass Result we don't need.
@@ -229,7 +230,6 @@ impl serdes::Deserializable for Message {
             "Message type was 0, ie padding. Padding should be skipped in outer loop."
         );
 
-        // TODO we can make a new trait and do this entirely with enum_dispatch instead:
         macro_rules! deserialize_messages {
             ($($msg:ident);+) => {
                 $(
@@ -324,6 +324,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct WriteCursor<T> {
     underlying: T,
     position: usize,
@@ -365,8 +366,6 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 //// SERDES ////////////////////////////////////////////////////////////////////////////////////////
 
 mod serdes {
-    use enum_dispatch::enum_dispatch;
-
     use crate::array_array::ArrayArray;
 
     use crate::messages::{DeserializeMessageErr, ReadCursor, WriteCursor};
@@ -437,7 +436,6 @@ mod serdes {
         }
     }
 
-    #[enum_dispatch]
     pub(crate) trait Deserializable
     where
         Self: Sized,

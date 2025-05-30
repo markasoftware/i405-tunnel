@@ -22,6 +22,7 @@ const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 100_000;
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug)]
 pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
     peer: std::net::SocketAddr,
@@ -32,6 +33,7 @@ pub(crate) struct EstablishedConnection {
 }
 
 /// The OutgoingConnection is responsible for reading outgoing packets.
+#[derive(Debug)]
 enum OutgoingConnection {
     Unscheduled {
         queued_packet: Box<Option<QueuedIpPacket>>,

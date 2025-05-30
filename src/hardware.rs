@@ -1,11 +1,11 @@
-// mod simulated;
+mod simulated;
 
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub(crate) enum Error {
     #[error(transparent)]
-    IOErr(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -31,7 +31,6 @@ pub(crate) trait Hardware {
         timestamp: Option<u64>,
     ) -> Result<()>;
 
-    fn read_incoming_packet(&mut self, packet: &mut [u8]) -> Result<(usize, std::net::SocketAddr)>;
     fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()>;
 
     /// Filter out future traffic from addrs other than the one specified.
@@ -41,10 +40,4 @@ pub(crate) trait Hardware {
 
     /// delete any timers and read_outgoing_
     fn clear_event_listeners(&mut self);
-}
-
-/// Basically std::net::UdpSocket
-pub(crate) trait Socket {
-    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, std::net::SocketAddr)>;
-    fn send_to(&self, buf: &[u8], addr: &std::net::SocketAddr) -> std::io::Result<usize>;
 }

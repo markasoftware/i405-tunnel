@@ -1,6 +1,10 @@
-mod client;
+use std::net::SocketAddr;
+
+use crate::hardware::Hardware;
+
+pub(crate) mod client;
 mod established_connection;
-mod server;
+pub(crate) mod server;
 
 const PROTOCOL_VERSION: u32 = 0;
 const OLDEST_COMPATIBLE_PROTOCOL_VERSION: u32 = 0;
@@ -20,7 +24,13 @@ pub(crate) struct WireConfig {
     packet_interval_offset: u64,
 }
 
-pub(crate) enum Core {
-    ClientCore(client::ClientCore),
-    ServerCore(server::ServerCore),
+pub(crate) trait Core {
+    fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);
+    fn on_read_outgoing_packet(
+        &mut self,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+        recv_timestamp: u64,
+    );
+    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr);
 }

@@ -18,12 +18,14 @@ const MAX_ACTIVE_FRAGMENTATION_IDS: usize = 8;
 /// packets are acceptable occasionally).
 const MAX_FRAGMENTATION_ID_AGE: u64 = 100;
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Defragger {
     defrag_packets: Vec<DefragPacket>,
     counter: u64,
 }
 
 /// A partially defragmented packet
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct DefragPacket {
     fragmentation_id: u16,
     packet_so_far: IpPacketBuffer,
@@ -44,6 +46,7 @@ struct DefragPacket {
     counter: u64,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct PacketDetails {
     schedule: Option<u64>,
 }

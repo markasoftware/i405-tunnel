@@ -1,4 +1,6 @@
-use enum_dispatch::enum_dispatch;
+use std::net::SocketAddr;
+
+use declarative_enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::{
@@ -13,9 +15,57 @@ use super::{
     established_connection::{self, EstablishedConnection},
 };
 
-pub(crate) struct ServerCore {
+#[derive(Debug)]
+pub(crate) struct Core {
     config: Config,
-    state: ConnectionState,
+    state: Option<ConnectionState>,
+}
+
+impl Core {
+    pub(crate) fn new(config: Config) -> Result<Self> {
+        Ok(Self {
+            state: Some(ConnectionState::NoConnection(NoConnection::new())),
+            config,
+        })
+    }
+}
+
+fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionState>>(
+    state: &mut Option<ConnectionState>,
+    f: F,
+) {
+    match f(std::mem::take(state).unwrap()) {
+        Ok(new_state) => std::mem::replace(state, Some(new_state)),
+        Err(err) => {
+            // TODO don't panic, instead use the config to decide whether to quit or retry.
+            panic!("Connection state error! {:?}", err);
+        }
+    };
+}
+
+impl super::Core for Core {
+    fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_timer(&self.config, hardware, timer_timestamp)
+        });
+    }
+
+    fn on_read_outgoing_packet(
+        &mut self,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+        recv_timestamp: u64,
+    ) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_read_outgoing_packet(&self.config, hardware, packet, recv_timestamp)
+        });
+    }
+
+    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr) {
+        replace_state_with_result(&mut self.state, |state| {
+            state.on_read_incoming_packet(&self.config, hardware, packet, peer)
+        });
+    }
 }
 
 type Result<T> = std::result::Result<T, ConnectionStateError>;
@@ -57,21 +107,48 @@ enum ConnectionStateError {
     OtherMessageBeforeC2SHandshake(Box<messages::Message>),
 }
 
-#[enum_dispatch(ConnectionStateTrait)]
-enum ConnectionState {
-    NoConnection(NoConnection),
-    /// The DTLS connection has been established, now we just keep responding to C2S handshakes
-    /// until we get the first message after a C2S handshake, which indicates ready.
-    InProtocolHandshake(InProtocolHandshake),
-    EstablishedConnection(EstablishedConnection),
+enum_dispatch! {
+    trait ServerConnectionStateTrait {
+        fn on_timer(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            timer_timestamp: u64,
+        ) -> Result<ConnectionState>;
+        fn on_read_outgoing_packet(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            packet: &[u8],
+            recv_timestamp: u64,
+        ) -> Result<ConnectionState>;
+        fn on_read_incoming_packet(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            packet: &[u8],
+            peer: SocketAddr,
+        ) -> Result<ConnectionState>;
+    }
+
+    #[derive(Debug)]
+    enum ConnectionState {
+        NoConnection(NoConnection),
+        /// The DTLS connection has been established, now we just keep responding to C2S handshakes
+        /// until we get the first message after a C2S handshake, which indicates ready.
+        InProtocolHandshake(InProtocolHandshake),
+        EstablishedConnection(EstablishedConnection),
+    }
 }
 
+#[derive(Debug)]
 struct NoConnection {
     negotiations: Vec<Negotiation>,
 }
 
+#[derive(Debug)]
 struct Negotiation {
-    peer: std::net::SocketAddr,
+    peer: SocketAddr,
     session: dtls::NegotiatingSession,
     timeout: u64,
     // TODO info so we can remove inactive negotiations.
@@ -85,11 +162,11 @@ impl NoConnection {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
+impl ServerConnectionStateTrait for NoConnection {
     fn on_timer(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         // to simplify the Hardware struct, it only supports one timer. However, we may have
@@ -140,7 +217,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -151,9 +228,9 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     fn on_read_incoming_packet(
         self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
-        peer: std::net::SocketAddr,
+        peer: SocketAddr,
     ) -> Result<ConnectionState> {
         let mut new_negotiations = Vec::with_capacity(self.negotiations.len());
         for negotiation in self.negotiations {
@@ -220,14 +297,15 @@ impl<H: Hardware> ConnectionStateTrait<H> for NoConnection {
     }
 }
 
+#[derive(Debug)]
 struct InProtocolHandshake {
     session: dtls::EstablishedSession,
-    peer: std::net::SocketAddr,
+    peer: SocketAddr,
     c2s_handshake: Option<messages::ClientToServerHandshake>,
 }
 
 impl InProtocolHandshake {
-    fn new(session: dtls::EstablishedSession, peer: std::net::SocketAddr) -> InProtocolHandshake {
+    fn new(session: dtls::EstablishedSession, peer: SocketAddr) -> InProtocolHandshake {
         InProtocolHandshake {
             session,
             peer,
@@ -235,9 +313,9 @@ impl InProtocolHandshake {
         }
     }
 
-    fn send_s2c_handshake<H: Hardware>(
+    fn send_s2c_handshake(
         &mut self,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         c2s_handshake: &messages::ClientToServerHandshake,
     ) -> Result<()> {
         let mut send_response = |success| {
@@ -282,11 +360,11 @@ impl InProtocolHandshake {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
+impl ServerConnectionStateTrait for InProtocolHandshake {
     fn on_timer(
         self,
         _config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         panic!("No timers set but we got on_timer'd!");
@@ -295,7 +373,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut H,
+        _hardware: &mut impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -305,9 +383,9 @@ impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
     fn on_read_incoming_packet(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
-        peer: std::net::SocketAddr,
+        peer: SocketAddr,
     ) -> Result<ConnectionState> {
         assert!(peer == self.peer, "handshake peer was not as expected");
 
@@ -350,11 +428,11 @@ impl<H: Hardware> ConnectionStateTrait<H> for InProtocolHandshake {
     }
 }
 
-impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
+impl ServerConnectionStateTrait for EstablishedConnection {
     fn on_timer(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
@@ -364,7 +442,7 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     fn on_read_outgoing_packet(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
         recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -375,9 +453,9 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     fn on_read_incoming_packet(
         mut self,
         _config: &Config,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         packet: &[u8],
-        peer: std::net::SocketAddr,
+        peer: SocketAddr,
     ) -> Result<ConnectionState> {
         // TODO actually call .connect or whatever on the hardware
         assert_eq!(
@@ -390,30 +468,8 @@ impl<H: Hardware> ConnectionStateTrait<H> for EstablishedConnection {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Config {
-    allowed_peers: Vec<std::net::SocketAddr>,
+    allowed_peers: Vec<SocketAddr>,
 }
 
-#[enum_dispatch]
-trait ConnectionStateTrait<H: Hardware> {
-    fn on_timer(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        timer_timestamp: u64,
-    ) -> Result<ConnectionState>;
-    fn on_read_outgoing_packet(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) -> Result<ConnectionState>;
-    fn on_read_incoming_packet(
-        self,
-        config: &Config,
-        hardware: &mut H,
-        packet: &[u8],
-        peer: std::net::SocketAddr,
-    ) -> Result<ConnectionState>;
-}
