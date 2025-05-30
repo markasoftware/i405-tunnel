@@ -59,11 +59,11 @@ fn default_simulated_pair() -> (SimulatedHardware, BTreeMap<SocketAddr, core::Co
     )
 }
 
-/// a packet of length 1200
-fn packet_1200() -> IpPacketBuffer {
+/// a packet of given length
+fn long_packet(length: usize) -> IpPacketBuffer {
     let mut packet_vec = Vec::new();
-    for i in 0u32..1200 {
-        packet_vec.push((i % u32::from(u8::MAX)).try_into().unwrap());
+    for i in 0..length {
+        packet_vec.push((i % usize::from(u8::MAX)).try_into().unwrap());
     }
     IpPacketBuffer::new(&packet_vec)
 }
@@ -122,7 +122,7 @@ fn fragmentation() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair();
 
-    let packet = packet_1200();
+    let packet = long_packet(1200);
 
     simulated_hardware.run_until(&mut cores, 1000);
     simulated_hardware.make_outgoing_packet(&server_addr(), &packet);
@@ -144,7 +144,7 @@ fn fragmentation() {
 
 /// Test that packets over the WAN are actually the correct size
 #[test]
-fn wan_packet_size() {
+fn wan_packet_length() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair();
 
@@ -184,7 +184,7 @@ fn wan_packet_size() {
     );
 
     // now send an actual, large packet and make sure the size is the same
-    simulated_hardware.make_outgoing_packet(&client_addr(), &packet_1200());
+    simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(1200));
     simulated_hardware.run_until(&mut cores, 3000);
     let full_packets = simulated_hardware.all_wan_packets();
     assert_eq!(num_empty_packets + 2, full_packets.len());
@@ -202,5 +202,69 @@ fn wan_packet_size() {
 #[test]
 fn packing() {
     setup_logging();
-    // TODO
+
+    // type byte and length only
+    const MESSAGE_HEADER_LENGTH: usize = 1 + 2;
+    // I really need to stop doing the checked arithmetic, don't I?
+    let first_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH).checked_div(2).unwrap();
+    let second_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH)
+        .checked_sub(MESSAGE_HEADER_LENGTH.checked_mul(2).unwrap())
+        .unwrap()
+        .checked_sub(first_message_length)
+        .unwrap();
+
+    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+    simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
+    simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(second_message_length));
+
+    simulated_hardware.run_until(&mut cores, 1);
+    assert!(
+        simulated_hardware
+            .incoming_packets(&server_addr())
+            .is_empty()
+    );
+    // this is just FUD to make sure it somehow doesn't send multiple packets TODO consider adding
+    // some global thing so if in /any/ of our tests it sends packets when it shouldn't, or of the
+    // wrong size, it errors out, rather than needing to check on a test-by-test basis.
+    let num_handshake_wan_packets = simulated_hardware.all_wan_packets().len();
+    simulated_hardware.run_until(&mut cores, 2000);
+    assert_eq!(
+        simulated_hardware.all_wan_packets().len(),
+        num_handshake_wan_packets.checked_add(2).unwrap()
+    );
+    // we'll verify the actual contents later
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
+
+    // now test that it /doesn't/ work when we make it one larger
+    simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
+    simulated_hardware.make_outgoing_packet(
+        &client_addr(),
+        &long_packet(second_message_length.checked_add(1).unwrap()),
+    );
+    simulated_hardware.run_until(&mut cores, 4000);
+    // just fud because I don't fully trust the SimulatedHardware yet
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 3);
+    simulated_hardware.run_until(&mut cores, 5000);
+
+    assert_eq!(
+        simulated_hardware.incoming_packets(&server_addr()),
+        &vec![
+            LocalPacket {
+                buffer: long_packet(first_message_length),
+                timestamp: 1423,
+            },
+            LocalPacket {
+                buffer: long_packet(second_message_length),
+                timestamp: 1423,
+            },
+            LocalPacket {
+                buffer: long_packet(first_message_length),
+                timestamp: 2846,
+            },
+            LocalPacket {
+                buffer: long_packet(second_message_length + 1),
+                timestamp: 4269,
+            },
+        ]
+    );
 }
