@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 
+use declarative_enum_dispatch::enum_dispatch;
+
 use crate::hardware::Hardware;
 
 pub(crate) mod client;
@@ -24,13 +26,22 @@ pub(crate) struct WireConfig {
     packet_interval_offset: u64,
 }
 
-pub(crate) trait Core {
-    fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);
-    fn on_read_outgoing_packet(
-        &mut self,
-        hardware: &mut impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    );
-    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr);
+// TODO eliminate enum_dispatch. We only need it because declarative enum dispatch doesn't support
+// making the trait generic, which means we can't do a dyn Core for testing.
+enum_dispatch! {
+    pub(crate) trait Core {
+        fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);
+        fn on_read_outgoing_packet(
+            &mut self,
+            hardware: &mut impl Hardware,
+            packet: &[u8],
+            recv_timestamp: u64,
+        );
+        fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr);
+    }
+
+    pub(crate) enum ConcreteCore {
+        Client(client::Core),
+        Server(server::Core),
+    }
 }

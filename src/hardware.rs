@@ -1,3 +1,4 @@
+#[cfg(test)]
 mod simulated;
 
 use thiserror::Error;
