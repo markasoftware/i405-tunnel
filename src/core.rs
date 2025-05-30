@@ -7,6 +7,8 @@ use crate::hardware::Hardware;
 pub(crate) mod client;
 mod established_connection;
 pub(crate) mod server;
+#[cfg(test)]
+mod test;
 
 const PROTOCOL_VERSION: u32 = 0;
 const OLDEST_COMPATIBLE_PROTOCOL_VERSION: u32 = 0;

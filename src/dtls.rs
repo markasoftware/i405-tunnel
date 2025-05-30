@@ -52,6 +52,7 @@ impl NegotiatingSession {
         }
     }
 
+    /// There's no initial timeout for the server, since it's just waiting for a client.
     pub(crate) fn new_server(pre_shared_key: &[u8]) -> Result<Self, NewSessionError> {
         let session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsServerV1_3)?
             .with_pre_shared_key(pre_shared_key)

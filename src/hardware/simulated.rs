@@ -50,9 +50,9 @@ struct WanPacket {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct LocalPacket {
-    buffer: IpPacketBuffer,
-    timestamp: u64,
+pub(crate) struct LocalPacket {
+    pub(crate) buffer: IpPacketBuffer,
+    pub(crate) timestamp: u64,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -73,7 +73,7 @@ pub(crate) struct SimulatedHardware {
 }
 
 impl SimulatedHardware {
-    fn new(peer_addrs: Vec<SocketAddr>) -> Self {
+    pub(crate) fn new(peer_addrs: Vec<SocketAddr>) -> Self {
         Self {
             peers: BTreeMap::from_iter(
                 peer_addrs
@@ -85,16 +85,28 @@ impl SimulatedHardware {
         }
     }
 
-    fn hardware<'a>(&'a mut self, addr: SocketAddr) -> OneSideHardware<'a> {
+    pub(crate) fn hardware<'a>(&'a mut self, addr: SocketAddr) -> OneSideHardware<'a> {
         OneSideHardware {
             simulated: self,
             our_addr: addr,
         }
     }
 
+    pub(crate) fn make_outgoing_packet(&mut self, addr: &SocketAddr, packet: &[u8]) {
+        self.peers
+            .get_mut(addr)
+            .expect("Non-existent `addr` to make_outgoing_packet")
+            .unread_outgoing_packets
+            .push_back(IpPacketBuffer::new(packet));
+    }
+
+    pub(crate) fn incoming_packets(&self, addr: &SocketAddr) -> &Vec<LocalPacket> {
+        &self.peers[addr].sent_incoming_packets
+    }
+
     /// Read as "run until, but not including, stop_timestamp." Upon exit, the timestamp field will
     /// be equal to stop_timestamp, but no events at that timestamp will have been processed.
-    fn run_until(
+    pub(crate) fn run_until(
         &mut self,
         cores: &mut BTreeMap<SocketAddr, core::ConcreteCore>,
         stop_timestamp: u64,
@@ -120,6 +132,7 @@ impl SimulatedHardware {
                         timestamp
                     );
                     if timer == timestamp {
+                        log::debug!("Timer triggered for {} at {}ns", addr, timestamp);
                         core.on_timer(&mut self.hardware(addr), timestamp);
                         // the continue serves two purposes: (1) ensure that if handling one event
                         // causes other events to happen at the same timestamp, we don't advance the
@@ -139,6 +152,11 @@ impl SimulatedHardware {
                         if scheduled_time <= timestamp {
                             if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front()
                             {
+                                log::debug!(
+                                    "Reading outgoing packet on {} at {}ns",
+                                    addr,
+                                    timestamp
+                                );
                                 core.on_read_outgoing_packet(
                                     &mut self.hardware(addr),
                                     &outgoing_packet,
@@ -153,6 +171,7 @@ impl SimulatedHardware {
                     MaybeTime::Immediate => {
                         // this is copy pasted from above, maybe should dedupe
                         if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front() {
+                            log::debug!("Reading outgoing packet on {} at {}ns", addr, timestamp);
                             core.on_read_outgoing_packet(
                                 &mut self.hardware(addr),
                                 &outgoing_packet,
@@ -165,7 +184,18 @@ impl SimulatedHardware {
                 }
 
                 // read incoming
-                if let Some(incoming_packet) = peer.unread_incoming_packets.pop_front() {
+                if peer
+                    .unread_incoming_packets
+                    .front()
+                    .is_some_and(|incoming_packet| incoming_packet.timestamp >= timestamp)
+                {
+                    let incoming_packet = peer.unread_incoming_packets.pop_front().unwrap();
+                    log::debug!(
+                        "Reading incoming packet on {}, from {}, at {}ns",
+                        addr,
+                        incoming_packet.source,
+                        timestamp
+                    );
                     assert_eq!(incoming_packet.dest, addr);
                     core.on_read_incoming_packet(
                         &mut self.hardware(addr),
@@ -177,12 +207,17 @@ impl SimulatedHardware {
             }
 
             // If there's nothing to do immediately, then wait until the next time we'll be able to do something!
+            log::debug!(
+                "No action to do at current timestamp {}ns; advancing to {}ns",
+                timestamp,
+                next_event_timestamp
+            );
             self.timestamp = next_event_timestamp;
         }
     }
 }
 
-struct OneSideHardware<'a> {
+pub(crate) struct OneSideHardware<'a> {
     simulated: &'a mut SimulatedHardware,
     our_addr: SocketAddr,
 }
@@ -215,6 +250,13 @@ impl<'a> Hardware for OneSideHardware<'a> {
         destination: SocketAddr,
         timestamp: Option<u64>,
     ) -> super::Result<()> {
+        log::debug!(
+            "Sending packet from {} to {} of size {} at {:?}ns",
+            self.our_addr,
+            destination,
+            packet.len(),
+            timestamp
+        );
         // temporary restriction?
         assert!(
             self.our_side()

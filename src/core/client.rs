@@ -40,7 +40,7 @@ fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionStat
         Ok(new_state) => std::mem::replace(state, Some(new_state)),
         Err(err) => {
             // TODO don't panic, instead use the config to decide whether to quit or retry.
-            panic!("Connection state error! {:?}", err);
+            panic!("Connection state error! {}", err);
         }
     };
 }
@@ -107,19 +107,19 @@ enum ConnectionState {
 }
 
 #[derive(Error, Debug)]
-enum ConnectionStateError {
-    #[error("DTLS Negotiation error: {0:?}")]
+pub(crate) enum ConnectionStateError {
+    #[error("DTLS Negotiation error: {0}")]
     Negotiate(#[from] dtls::NegotiateError),
-    #[error("Hardware error: {0:?}")]
+    #[error("Hardware error: {0}")]
     Hardware(#[from] hardware::Error),
-    #[error("DTLS new session error: {0:?}")]
+    #[error("DTLS new session error: {0}")]
     NewSession(#[from] dtls::NewSessionError),
-    #[error("Error deserializing a message: {0:?}")]
+    #[error("Error deserializing a message: {0}")]
     DeserializeMessage(#[from] messages::DeserializeMessageErr),
     // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
-    #[error("Established connection error: {0:?}")]
+    #[error("Established connection error: {0}")]
     EstablishedConnection(#[from] established_connection::Error),
-    #[error("wolfSSL error: {0:?}")]
+    #[error("wolfSSL error: {0}")]
     Wolf(#[from] wolfssl::Error),
     #[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
     S2CHandshakeServer(u32),
@@ -213,6 +213,7 @@ impl ConnectionStateTrait for NoConnection {
     ) -> Result<ConnectionState> {
         match self.negotiation.make_progress(packet, hardware.timestamp()) {
             dtls::NegotiateResult::Ready(session, to_send) => {
+                log::info!("DTLS handshake complete, proceeding to in-protocol handshake");
                 send_packets(config, hardware, &to_send)?;
                 C2SHandshakeSent::new(config, hardware, session)
                     .map(ConnectionState::C2SHandshakeSent)
@@ -282,7 +283,11 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
-        // we timed out :|
+        // TODO log seconds instea of ns
+        log::warn!(
+            "In-protocol handshake timeout; we sent C2S handshake {}ns ago and received no response, trying again.",
+            self.current_timeout_interval
+        );
         self.send_one_handshake(config, hardware)?;
         if self.num_timeouts_happened >= C2S_MAX_RETRANSMITS {
             // time to go back to the stone age
@@ -301,10 +306,12 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             .checked_mul(2)
             .unwrap()
             .clamp(0, C2S_MAX_TIMEOUT);
+        // TODO do we actually need this as a field? can a local variable do?
         self.next_timeout_instant = hardware
             .timestamp()
             .checked_add(self.current_timeout_interval)
             .unwrap();
+        hardware.set_timer(self.next_timeout_instant);
         Ok(ConnectionState::C2SHandshakeSent(self))
     }
 
@@ -321,7 +328,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
-        _hardware: &mut impl Hardware,
+        hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
         let cleartext_packet = self.session.decrypt_datagram(&packet)?;
@@ -357,13 +364,19 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                     );
                 }
 
+                log::info!(
+                    "In-protocol handshake complete, remote protocol version {}, proceeding to established connection",
+                    s2c_handshake.protocol_version
+                );
+
                 // maybe one day will pass in the server's protocol version here?
                 Ok(ConnectionState::EstablishedConnection(
                     EstablishedConnection::new(
+                        hardware,
                         self.session,
                         config.peer_address,
                         config.c2s_wire_config.clone(),
-                    ),
+                    )?,
                 ))
             }
             other_msg => Err(ConnectionStateError::S2CHandshakeWasnt(Box::new(other_msg))),
@@ -405,9 +418,9 @@ impl ConnectionStateTrait for EstablishedConnection {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Config {
-    c2s_wire_config: WireConfig,
-    s2c_wire_config: WireConfig,
-    peer_address: SocketAddr,
-    pre_shared_key: Vec<u8>,
+pub(crate) struct Config {
+    pub(crate) c2s_wire_config: WireConfig,
+    pub(crate) s2c_wire_config: WireConfig,
+    pub(crate) peer_address: SocketAddr,
+    pub(crate) pre_shared_key: Vec<u8>,
 }

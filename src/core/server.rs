@@ -38,7 +38,7 @@ fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionStat
         Ok(new_state) => std::mem::replace(state, Some(new_state)),
         Err(err) => {
             // TODO don't panic, instead use the config to decide whether to quit or retry.
-            panic!("Connection state error! {:?}", err);
+            panic!("Connection state error! {}", err);
         }
     };
 }
@@ -80,16 +80,18 @@ type Result<T> = std::result::Result<T, ConnectionStateError>;
 // to the NoConnection state. Truly fatal errors should simply panic.
 
 #[derive(Error, Debug)]
-enum ConnectionStateError {
-    #[error("IO error: {0:?}")]
+pub(crate) enum ConnectionStateError {
+    #[error("IO error: {0}")]
     IOErr(#[from] std::io::Error),
-    #[error("wolfSSL error: {0:?}")]
+    #[error("New session DTLS error: {0}")]
+    NewSessionErr(#[from] dtls::NewSessionError),
+    #[error("wolfSSL error: {0}")]
     WolfErr(#[from] wolfssl::Error),
-    #[error("hardware error: {0:?}")]
+    #[error("hardware error: {0}")]
     HardwareErr(#[from] hardware::Error),
-    #[error("established connection error: {0:?}")]
+    #[error("established connection error: {0}")]
     EstablishedConnectionErr(#[from] established_connection::Error),
-    #[error("deserialize error: {0:?}")]
+    #[error("deserialize error: {0}")]
     DeserializeMessageErr(#[from] messages::DeserializeMessageErr),
     #[error(
         "Client with protocol version {0} wanted protocol version at least {1}, but we have {2}"
@@ -99,8 +101,6 @@ enum ConnectionStateError {
         "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
     )]
     PacketsTooShortForS2CHandshake,
-    #[error("Client sent packet without messages during C2S handshake")]
-    EmptyC2SHandshake,
     #[error(
         "Got multiple C2S handshakes and they weren't the same: First time {0:?}, second time {1:?}"
     )]
@@ -109,7 +109,8 @@ enum ConnectionStateError {
         Box<messages::ClientToServerHandshake>,
     ),
     #[error("Got a non-handshake message before the C2S handshake")]
-    OtherMessageBeforeC2SHandshake(Box<messages::Message>),
+    // i don't care that the option is inside the box, don't @ me
+    OtherMessageBeforeC2SHandshake(Box<Option<messages::Message>>),
 }
 
 enum_dispatch! {
@@ -231,12 +232,27 @@ impl ServerConnectionStateTrait for NoConnection {
     }
 
     fn on_read_incoming_packet(
-        self,
-        _config: &Config,
+        mut self,
+        config: &Config,
         hardware: &mut impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
+        if self
+            .negotiations
+            .iter()
+            .find(|negotiation| negotiation.peer == peer)
+            .is_none()
+        {
+            // start a negotiation
+            log::info!("New DTLS handshake started with {}", peer);
+            self.negotiations.push(Negotiation {
+                peer,
+                session: dtls::NegotiatingSession::new_server(&config.pre_shared_key)?,
+                timeout: u64::MAX,
+            });
+        }
+
         let mut new_negotiations = Vec::with_capacity(self.negotiations.len());
         for negotiation in self.negotiations {
             if negotiation.peer == peer {
@@ -251,6 +267,10 @@ impl ServerConnectionStateTrait for NoConnection {
                         // within the connection state if we haven't chosen a peer yet, so that ie
                         // some rando trying the wrong passwords doesn't make it impossible to
                         // connect with the right password).
+                        log::info!(
+                            "DTLS handshake complete with {}, proceeding to in-protocol handshake",
+                            peer
+                        );
                         for packet in to_send {
                             hardware.send_outgoing_packet(&packet, peer, None)?;
                         }
@@ -397,13 +417,15 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
         let cleartext_packet = self.session.decrypt_datagram(packet)?;
 
         let mut read_cursor = messages::ReadCursor::new(cleartext_packet.clone());
-        if !messages::has_message(&read_cursor) {
-            return Err(ConnectionStateError::EmptyC2SHandshake);
-        }
 
-        let message = read_cursor.read()?;
+        let message = if messages::has_message(&read_cursor) {
+            Some(read_cursor.read()?)
+        } else {
+            None
+        };
         match message {
-            messages::Message::ClientToServerHandshake(c2s_handshake) => {
+            Some(messages::Message::ClientToServerHandshake(c2s_handshake)) => {
+                log::debug!("Got C2S handshake, as expected. Sending S2C handshake.");
                 self.send_s2c_handshake(hardware, &c2s_handshake)?;
                 Ok(ConnectionState::InProtocolHandshake(InProtocolHandshake {
                     session: self.session,
@@ -411,18 +433,23 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     c2s_handshake: Some(c2s_handshake),
                 }))
             }
-            other_message => {
+            other => {
                 let c2s_handshake = self.c2s_handshake.ok_or(
-                    ConnectionStateError::OtherMessageBeforeC2SHandshake(Box::new(other_message)),
+                    ConnectionStateError::OtherMessageBeforeC2SHandshake(Box::new(other)),
                 )?;
                 let s2c_wire_config = WireConfig {
                     packet_length: c2s_handshake.s2c_packet_length,
                     packet_interval: c2s_handshake.s2c_packet_interval,
-                    // TODO randomize?
+                    // TODO randomize or specify in C2S handshake?
                     packet_interval_offset: 123,
                 };
+                log::info!(
+                    "Handshake complete with {}, proceeding to established connection with {:?}",
+                    peer,
+                    s2c_wire_config
+                );
                 let mut established_connection =
-                    EstablishedConnection::new(self.session, peer, s2c_wire_config);
+                    EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
                 established_connection
                     .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
                 Ok(ConnectionState::EstablishedConnection(
@@ -474,6 +501,8 @@ impl ServerConnectionStateTrait for EstablishedConnection {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Config {
-    allowed_peers: Vec<SocketAddr>,
+pub(crate) struct Config {
+    pub(crate) pre_shared_key: Vec<u8>,
+    // TODO
+    // allowed_peers: Vec<SocketAddr>,
 }

@@ -50,7 +50,10 @@ enum OutgoingConnection {
 }
 
 impl OutgoingConnection {
-    fn new_unscheduled() -> Self {
+    fn new_unscheduled(hardware: &mut impl Hardware) -> Self {
+        // unless we have a queued packet (which we don't yet), we want the hardware to always know
+        // we are ready to read an outgoing packet.
+        hardware.read_outgoing_packet(None);
         Self::Unscheduled {
             queued_packet: Box::new(None),
             fragmentation_id: 0,
@@ -63,9 +66,9 @@ impl OutgoingConnection {
 
     /// When a new send outgoing packet is created, call this so that any internal queued packets
     /// can be flushed into the new buffer.
-    fn try_to_dequeue<H: Hardware>(
+    fn try_to_dequeue(
         &mut self,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
     ) {
         match self {
@@ -136,29 +139,34 @@ impl OutgoingConnection {
 
 impl EstablishedConnection {
     pub(crate) fn new(
+        hardware: &mut impl Hardware,
         session: dtls::EstablishedSession,
         peer: std::net::SocketAddr,
         outgoing_wire_config: WireConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        hardware.clear_event_listeners();
+        let mut result = Self {
             session,
             peer,
-            outgoing_connection: OutgoingConnection::new_unscheduled(),
+            outgoing_connection: OutgoingConnection::new_unscheduled(hardware),
             partial_outgoing_packet: messages::WriteCursor::new(IpPacketBuffer::new_empty(
                 outgoing_wire_config.packet_length.into(),
             )),
             defragger: Defragger::new(),
             outgoing_wire_config,
-        }
+        };
+        // simulate a timer immediately
+        result.on_timer(hardware, hardware.timestamp())?;
+        Ok(result)
     }
 
     pub(crate) fn peer(&self) -> std::net::SocketAddr {
         self.peer
     }
 
-    pub(crate) fn on_timer<H: Hardware>(
+    pub(crate) fn on_timer(
         &mut self,
-        hardware: &mut H,
+        hardware: &mut impl Hardware,
         timer_timestamp: u64,
     ) -> Result<()> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
@@ -181,6 +189,8 @@ impl EstablishedConnection {
         )?;
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
+        // TODO include the packet_interval_offset? To handle the first roundtrip properly.
+        hardware.set_timer(timer_timestamp + self.outgoing_wire_config.packet_interval);
         Ok(())
     }
 
@@ -212,7 +222,7 @@ impl EstablishedConnection {
         hardware: &mut H,
         packet: &[u8],
     ) -> Result<()> {
-        let mut cursor = messages::ReadCursor::new(self.session.decrypt_datagram(packet)?);
+        let mut cursor = messages::ReadCursor::new(packet);
         while messages::has_message(&cursor) {
             let msg = cursor.read()?;
             match msg {

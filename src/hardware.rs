@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod simulated;
+pub(crate) mod simulated;
 
 use thiserror::Error;
 
