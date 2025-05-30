@@ -2,3 +2,11 @@
 pub(crate) const MAX_IP_PACKET_LENGTH: usize = 1472; // TODO may want to remove this to support jumbo frames?
 #[cfg(feature = "jumbo-packets")]
 pub(crate) const MAX_IP_PACKET_LENGTH: usize = 8972;
+
+// how many extra bytes a DTLS header adds to a normal application data message
+pub(crate) const DTLS_HEADER_LENGTH: usize = 22;
+pub(crate) const UDP_HEADER_LENGTH: usize = 8;
+// this can be wrong if IP options are used, but that's very rare these days, and only really on
+// private networks.
+pub(crate) const IPV4_HEADER_LENGTH: usize = 20;
+pub(crate) const IPV6_HEADER_LENGTH: usize = 40;

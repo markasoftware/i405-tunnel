@@ -42,11 +42,11 @@ impl OneSideInfo {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct WanPacket {
-    buffer: IpPacketBuffer,
-    source: SocketAddr,
-    dest: SocketAddr,
-    timestamp: u64,
+pub(crate) struct WanPacket {
+    pub(crate) buffer: IpPacketBuffer,
+    pub(crate) source: SocketAddr,
+    pub(crate) dest: SocketAddr,
+    pub(crate) timestamp: u64,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -102,6 +102,10 @@ impl SimulatedHardware {
 
     pub(crate) fn incoming_packets(&self, addr: &SocketAddr) -> &Vec<LocalPacket> {
         &self.peers[addr].sent_incoming_packets
+    }
+
+    pub(crate) fn all_wan_packets(&self) -> &Vec<WanPacket> {
+        &self.all_wan_packets
     }
 
     /// Read as "run until, but not including, stop_timestamp." Upon exit, the timestamp field will
@@ -251,11 +255,11 @@ impl<'a> Hardware for OneSideHardware<'a> {
         timestamp: Option<u64>,
     ) -> super::Result<()> {
         log::debug!(
-            "Sending packet from {} to {} of size {} at {:?}ns",
+            "Sending packet from {} to {} of size {} at {}ns",
             self.our_addr,
             destination,
             packet.len(),
-            timestamp
+            timestamp.unwrap_or(self.timestamp()),
         );
         // temporary restriction?
         assert!(

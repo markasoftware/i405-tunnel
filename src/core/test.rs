@@ -1,4 +1,5 @@
 use crate::array_array::IpPacketBuffer;
+use crate::constants::DTLS_HEADER_LENGTH;
 use crate::core;
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware};
 
@@ -41,6 +42,32 @@ fn simulated_pair(
     (simulated_hardware, cores)
 }
 
+const DEFAULT_PACKET_LENGTH: u16 = 1000;
+
+fn default_simulated_pair() -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
+    simulated_pair(
+        core::WireConfig {
+            packet_length: DEFAULT_PACKET_LENGTH,
+            packet_interval: 1423,
+            packet_interval_offset: 0,
+        },
+        core::WireConfig {
+            packet_length: DEFAULT_PACKET_LENGTH,
+            packet_interval: 1411,
+            packet_interval_offset: 0,
+        },
+    )
+}
+
+/// a packet of length 1200
+fn packet_1200() -> IpPacketBuffer {
+    let mut packet_vec = Vec::new();
+    for i in 0u32..1200 {
+        packet_vec.push((i % u32::from(u8::MAX)).try_into().unwrap());
+    }
+    IpPacketBuffer::new(&packet_vec)
+}
+
 fn setup_logging() {
     // this is a bit hacky because it initializes it for other tests that may run after ours, even
     // if it causes undue overhead. But logging shouldn't ever be that slow anyway.
@@ -50,20 +77,9 @@ fn setup_logging() {
 /// Test a simple connection (which, to be honest, still isn't very simple): DTLS handshake, I405
 /// handshake, and then a few packets each way.
 #[test]
-fn test_simple() {
+fn simple() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = simulated_pair(
-        core::WireConfig {
-            packet_length: 1000,
-            packet_interval: 1423,
-            packet_interval_offset: 0,
-        },
-        core::WireConfig {
-            packet_length: 1000,
-            packet_interval: 1411,
-            packet_interval_offset: 0,
-        },
-    );
+    let (mut simulated_hardware, mut cores) = default_simulated_pair();
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[4, 3, 2, 1]);
@@ -102,26 +118,11 @@ fn test_simple() {
 }
 
 #[test]
-fn test_fragmentation() {
+fn fragmentation() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = simulated_pair(
-        core::WireConfig {
-            packet_length: 1000,
-            packet_interval: 1423,
-            packet_interval_offset: 0,
-        },
-        core::WireConfig {
-            packet_length: 1000,
-            packet_interval: 1411,
-            packet_interval_offset: 0,
-        },
-    );
+    let (mut simulated_hardware, mut cores) = default_simulated_pair();
 
-    let mut packet_vec = Vec::new();
-    for i in 0u32..1200 {
-        packet_vec.push((i % u32::from(u8::MAX)).try_into().unwrap());
-    }
-    let packet = IpPacketBuffer::new(&packet_vec);
+    let packet = packet_1200();
 
     simulated_hardware.run_until(&mut cores, 1000);
     simulated_hardware.make_outgoing_packet(&server_addr(), &packet);
@@ -139,4 +140,67 @@ fn test_fragmentation() {
             timestamp: 2822,
         }]
     );
+}
+
+/// Test that packets over the WAN are actually the correct size
+#[test]
+fn wan_packet_size() {
+    setup_logging();
+    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+
+    let wan_packet_length: usize = DTLS_HEADER_LENGTH
+        .checked_add(DEFAULT_PACKET_LENGTH.into())
+        .unwrap();
+
+    simulated_hardware.run_until(&mut cores, 1);
+    let handshake = simulated_hardware.all_wan_packets();
+    let num_handshake_packets = handshake.len();
+    // for sanity, check that the first packet is smaller than we requested, because it should just
+    // be a ClientHello.
+    assert!(handshake[0].buffer.len() < wan_packet_length);
+    // the last two should be handshakes, and of the correct size
+    assert_eq!(
+        handshake[handshake.len() - 1].buffer.len(),
+        wan_packet_length
+    );
+    assert_eq!(
+        handshake[handshake.len() - 2].buffer.len(),
+        wan_packet_length
+    );
+
+    simulated_hardware.run_until(&mut cores, 2000);
+    let empty_packets = simulated_hardware.all_wan_packets();
+    let num_empty_packets = empty_packets.len();
+    // just so this test doesn't get stale if others change
+    assert_eq!(num_handshake_packets + 2, num_empty_packets);
+    // make sure actual data packets
+    assert_eq!(
+        empty_packets[empty_packets.len() - 1].buffer.len(),
+        wan_packet_length
+    );
+    assert_eq!(
+        empty_packets[empty_packets.len() - 2].buffer.len(),
+        wan_packet_length
+    );
+
+    // now send an actual, large packet and make sure the size is the same
+    simulated_hardware.make_outgoing_packet(&client_addr(), &packet_1200());
+    simulated_hardware.run_until(&mut cores, 3000);
+    let full_packets = simulated_hardware.all_wan_packets();
+    assert_eq!(num_empty_packets + 2, full_packets.len());
+    assert_eq!(
+        full_packets[full_packets.len() - 1].buffer.len(),
+        wan_packet_length
+    );
+    assert_eq!(
+        full_packets[full_packets.len() - 2].buffer.len(),
+        wan_packet_length
+    );
+}
+
+/// Test that we can pack multiple packets into the same network packet when they fit.
+#[test]
+fn packing() {
+    setup_logging();
+    // TODO
 }

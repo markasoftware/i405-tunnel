@@ -18,7 +18,10 @@
 // TODO add logging and tests for DTLS timestamps
 use thiserror::Error;
 
-use crate::{array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH};
+use crate::{
+    array_array::IpPacketBuffer,
+    constants::{DTLS_HEADER_LENGTH, MAX_IP_PACKET_LENGTH},
+};
 
 pub(crate) struct NegotiatingSession {
     underlying: wolfssl::Session<IOCallbacks>,
@@ -230,10 +233,11 @@ impl EstablishedSession {
                 // checks all around that only packets of the correct size can get passed through to
                 // here.
                 assert!(
-                    result.len() > len,
-                    "Ciphertext length {} is shorter than cleartext {}, probably means it would have been too large for MTU!",
+                    result.len() == len.checked_add(DTLS_HEADER_LENGTH).unwrap(),
+                    "Ciphertext length {} is not {}+(dtls header length: {})",
+                    result.len(),
                     len,
-                    result.len()
+                    DTLS_HEADER_LENGTH,
                 );
                 Ok(result)
             }
