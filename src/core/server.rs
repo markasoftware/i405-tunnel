@@ -61,7 +61,12 @@ impl super::Core for Core {
         });
     }
 
-    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr) {
+    fn on_read_incoming_packet(
+        &mut self,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+        peer: SocketAddr,
+    ) {
         replace_state_with_result(&mut self.state, |state| {
             state.on_read_incoming_packet(&self.config, hardware, packet, peer)
         });
@@ -472,4 +477,3 @@ impl ServerConnectionStateTrait for EstablishedConnection {
 struct Config {
     allowed_peers: Vec<SocketAddr>,
 }
-

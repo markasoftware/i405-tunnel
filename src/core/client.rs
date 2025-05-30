@@ -63,7 +63,12 @@ impl super::Core for Core {
         });
     }
 
-    fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr) {
+    fn on_read_incoming_packet(
+        &mut self,
+        hardware: &mut impl Hardware,
+        packet: &[u8],
+        peer: SocketAddr,
+    ) {
         replace_state_with_result(&mut self.state, |state| {
             state.on_read_incoming_packet(&self.config, hardware, packet)
         });
@@ -103,36 +108,36 @@ enum ConnectionState {
 
 #[derive(Error, Debug)]
 enum ConnectionStateError {
-#[error("DTLS Negotiation error: {0:?}")]
-Negotiate(#[from] dtls::NegotiateError),
-#[error("Hardware error: {0:?}")]
-Hardware(#[from] hardware::Error),
-#[error("DTLS new session error: {0:?}")]
-NewSession(#[from] dtls::NewSessionError),
-#[error("Error deserializing a message: {0:?}")]
-DeserializeMessage(#[from] messages::DeserializeMessageErr),
-// TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
-#[error("Established connection error: {0:?}")]
-EstablishedConnection(#[from] established_connection::Error),
-#[error("wolfSSL error: {0:?}")]
-Wolf(#[from] wolfssl::Error),
-#[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-S2CHandshakeServer(u32),
-#[error("The server sent an empty packet when it should have sent an S2C handshake")]
-S2CHandshakeEmpty,
-#[error("The server sent a different message instead of S2C handshake: {0:?}")]
-S2CHandshakeWasnt(Box<messages::Message>),
-#[error("There were other messages in the packet with the S2C handshake")]
-S2CHandshakeNotAlone,
-#[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-S2CHandshakeIncompatibleProtocolVersion(u32),
+    #[error("DTLS Negotiation error: {0:?}")]
+    Negotiate(#[from] dtls::NegotiateError),
+    #[error("Hardware error: {0:?}")]
+    Hardware(#[from] hardware::Error),
+    #[error("DTLS new session error: {0:?}")]
+    NewSession(#[from] dtls::NewSessionError),
+    #[error("Error deserializing a message: {0:?}")]
+    DeserializeMessage(#[from] messages::DeserializeMessageErr),
+    // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
+    #[error("Established connection error: {0:?}")]
+    EstablishedConnection(#[from] established_connection::Error),
+    #[error("wolfSSL error: {0:?}")]
+    Wolf(#[from] wolfssl::Error),
+    #[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
+    S2CHandshakeServer(u32),
+    #[error("The server sent an empty packet when it should have sent an S2C handshake")]
+    S2CHandshakeEmpty,
+    #[error("The server sent a different message instead of S2C handshake: {0:?}")]
+    S2CHandshakeWasnt(Box<messages::Message>),
+    #[error("There were other messages in the packet with the S2C handshake")]
+    S2CHandshakeNotAlone,
+    #[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
+    S2CHandshakeIncompatibleProtocolVersion(u32),
 }
 
 type Result<T> = std::result::Result<T, ConnectionStateError>;
 
 #[derive(Debug)]
 struct NoConnection {
-negotiation: dtls::NegotiatingSession,
+    negotiation: dtls::NegotiatingSession,
 }
 
 fn send_packets(
