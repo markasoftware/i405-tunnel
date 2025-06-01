@@ -434,6 +434,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 }))
             }
             other => {
+                // TODO this shouldn't be an error, but let's write a test for it before fixing:
                 let c2s_handshake = self.c2s_handshake.ok_or(
                     ConnectionStateError::OtherMessageBeforeC2SHandshake(Box::new(other)),
                 )?;

@@ -1,3 +1,6 @@
+/// The bulk of "integration"-style tests go here. We use a "simulated" Hardware so everything's
+/// super fast and reproducible. We also have some true integration tests that set up Linux network
+/// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
 use crate::constants::DTLS_HEADER_LENGTH;
 use crate::core;
@@ -20,7 +23,7 @@ fn simulated_pair(
     c2s_wire_config: core::WireConfig,
     s2c_wire_config: core::WireConfig,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
-    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()]);
+    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
     let server_core = core::server::Core::new(core::server::Config {
         pre_shared_key: PSK.into(),
     })
@@ -268,3 +271,17 @@ fn packing() {
         ]
     );
 }
+
+// TODO more tests:
+// + Multiple clients doing DTLS handshakes simultaneously, whoever finishes first gets the prize
+// + DTLS handshake from a client when another client already has an established connection
+// + Packet drops and timeouts, esp. during in-protocol handshake (could theoretically abstract the in-protocol handshake even more in order to make it more openssl-like and then test it more isolated-ly, but it's simpler not to for now)
+// + Packet finalization time (ie, submitted to hardware with the right buffer before they /need/ to be sent)
+// + SSL Alerts
+// + Packet retransmissions and reorderings, esp. between stages of the state machine. Specifically:
+//   - DTLS handshake messages during in-protocol and established, and in-protocol handshake messages during established.
+//   - After server disconnect/reconnect, messages from the previous connection. These should fail DTLS decryption.
+//   - C2S post-handshake messages arriving before handshake (shouldn't actually crash it)
+// + Server disconnecting and reconnecting to a new client.
+// + Differing protocol versions
+// + Deserialization failures
