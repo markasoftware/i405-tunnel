@@ -442,7 +442,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     packet_length: c2s_handshake.s2c_packet_length,
                     packet_interval: c2s_handshake.s2c_packet_interval,
                     // TODO randomize or specify in C2S handshake?
-                    packet_interval_offset: 123,
+                    packet_interval_offset: 0,
                 };
                 log::info!(
                     "Handshake complete with {}, proceeding to established connection with {:?}",
@@ -490,7 +490,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
-        // TODO actually call .connect or whatever on the hardware
+        // TODO actually call .connect on the hardware
         assert_eq!(
             peer,
             self.peer(),

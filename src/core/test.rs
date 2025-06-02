@@ -8,8 +8,23 @@ use crate::hardware::simulated::{LocalPacket, SimulatedHardware};
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 const PSK: &[u8] = b"password";
+const DEFAULT_C2S_WIRE_CONFIG: core::WireConfig = core::WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval: 1_423_000, // 1.423ms
+    packet_interval_offset: 0,
+};
+const DEFAULT_S2C_WIRE_CONFIG: core::WireConfig = core::WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval: 1_411_000, // 1.411ms
+    packet_interval_offset: 0,
+};
+
+fn ms(ms: f64) -> u64 {
+    (ms * 1_000_000.0).round() as u64
+}
 
 fn client_addr() -> SocketAddr {
     "10.140.5.1:1405".parse().unwrap()
@@ -22,8 +37,10 @@ fn server_addr() -> SocketAddr {
 fn simulated_pair(
     c2s_wire_config: core::WireConfig,
     s2c_wire_config: core::WireConfig,
+    default_delay: u64,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
-    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
+    let mut simulated_hardware =
+        SimulatedHardware::new(vec![client_addr(), server_addr()], default_delay);
     let server_core = core::server::Core::new(core::server::Config {
         pre_shared_key: PSK.into(),
     })
@@ -47,18 +64,13 @@ fn simulated_pair(
 
 const DEFAULT_PACKET_LENGTH: u16 = 1000;
 
-fn default_simulated_pair() -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
+fn default_simulated_pair(
+    default_delay: u64,
+) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
     simulated_pair(
-        core::WireConfig {
-            packet_length: DEFAULT_PACKET_LENGTH,
-            packet_interval: 1423,
-            packet_interval_offset: 0,
-        },
-        core::WireConfig {
-            packet_length: DEFAULT_PACKET_LENGTH,
-            packet_interval: 1411,
-            packet_interval_offset: 0,
-        },
+        DEFAULT_C2S_WIRE_CONFIG,
+        DEFAULT_S2C_WIRE_CONFIG,
+        default_delay,
     )
 }
 
@@ -82,40 +94,38 @@ fn setup_logging() {
 #[test]
 fn simple() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[4, 3, 2, 1]);
-    // depending on the implementation, it can reasonably send the first packet before reading the
-    // outgoing packet (in fact, that's what the current implementation does), so we need to wait
-    // long enough that it can actually read the outgoing packet. This is long enough for two
-    // packets.
-    simulated_hardware.run_until(&mut cores, 3000);
+    // at 1.411ms, the server hasn't yet gotten the first "normal" packet from the client, so it's
+    // not going to send anything outgoing until 2.822.
+    simulated_hardware.run_until(&mut cores, ms(3.0));
 
     assert_eq!(
         simulated_hardware.incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[4, 3, 2, 1]),
-            timestamp: 1411,
+            timestamp: ms(1.411 * 2.0),
         }]
     );
     assert_eq!(
         simulated_hardware.incoming_packets(&server_addr()),
         &vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[1, 4, 0, 5]),
-            timestamp: 1423,
+            timestamp: ms(1.423),
         }]
     );
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[7]);
-    simulated_hardware.run_until(&mut cores, 4500);
+    simulated_hardware.run_until(&mut cores, ms(4.5));
 
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
     assert_eq!(
         simulated_hardware.incoming_packets(&server_addr())[1],
         LocalPacket {
             buffer: IpPacketBuffer::new(&[7]),
-            timestamp: 4269
+            timestamp: ms(1.423 * 3.0),
         }
     );
 }
@@ -123,24 +133,24 @@ fn simple() {
 #[test]
 fn fragmentation() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     let packet = long_packet(1200);
 
-    simulated_hardware.run_until(&mut cores, 1000);
+    simulated_hardware.run_until(&mut cores, ms(1.0));
     simulated_hardware.make_outgoing_packet(&server_addr(), &packet);
-    simulated_hardware.run_until(&mut cores, 2000);
+    simulated_hardware.run_until(&mut cores, ms(3.0));
     assert!(
         simulated_hardware
             .incoming_packets(&client_addr())
             .is_empty()
     );
-    simulated_hardware.run_until(&mut cores, 3000);
+    simulated_hardware.run_until(&mut cores, ms(4.5));
     assert_eq!(
         simulated_hardware.incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: packet,
-            timestamp: 2822,
+            timestamp: ms(1.411 * 3.0),
         }]
     );
 }
@@ -149,7 +159,7 @@ fn fragmentation() {
 #[test]
 fn wan_packet_length() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     let wan_packet_length: usize = DTLS_HEADER_LENGTH
         .checked_add(DEFAULT_PACKET_LENGTH.into())
@@ -171,11 +181,11 @@ fn wan_packet_length() {
         wan_packet_length
     );
 
-    simulated_hardware.run_until(&mut cores, 2000);
+    simulated_hardware.run_until(&mut cores, ms(3.0));
     let empty_packets = simulated_hardware.all_wan_packets();
     let num_empty_packets = empty_packets.len();
     // just so this test doesn't get stale if others change
-    assert_eq!(num_handshake_packets + 2, num_empty_packets);
+    assert_eq!(num_handshake_packets + 3, num_empty_packets);
     // make sure actual data packets
     assert_eq!(
         empty_packets[empty_packets.len() - 1].buffer.len(),
@@ -185,10 +195,14 @@ fn wan_packet_length() {
         empty_packets[empty_packets.len() - 2].buffer.len(),
         wan_packet_length
     );
+    assert_eq!(
+        empty_packets[empty_packets.len() - 3].buffer.len(),
+        wan_packet_length
+    );
 
     // now send an actual, large packet and make sure the size is the same
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(1200));
-    simulated_hardware.run_until(&mut cores, 3000);
+    simulated_hardware.run_until(&mut cores, ms(4.5));
     let full_packets = simulated_hardware.all_wan_packets();
     assert_eq!(num_empty_packets + 2, full_packets.len());
     assert_eq!(
@@ -216,7 +230,7 @@ fn packing() {
         .checked_sub(first_message_length)
         .unwrap();
 
-    let (mut simulated_hardware, mut cores) = default_simulated_pair();
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(second_message_length));
 
@@ -230,10 +244,10 @@ fn packing() {
     // some global thing so if in /any/ of our tests it sends packets when it shouldn't, or of the
     // wrong size, it errors out, rather than needing to check on a test-by-test basis.
     let num_handshake_wan_packets = simulated_hardware.all_wan_packets().len();
-    simulated_hardware.run_until(&mut cores, 2000);
+    simulated_hardware.run_until(&mut cores, ms(3.0));
     assert_eq!(
         simulated_hardware.all_wan_packets().len(),
-        num_handshake_wan_packets.checked_add(2).unwrap()
+        num_handshake_wan_packets.checked_add(3).unwrap()
     );
     // we'll verify the actual contents later
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
@@ -244,32 +258,89 @@ fn packing() {
         &client_addr(),
         &long_packet(second_message_length.checked_add(1).unwrap()),
     );
-    simulated_hardware.run_until(&mut cores, 4000);
+    simulated_hardware.run_until(&mut cores, ms(5.0));
     // just fud because I don't fully trust the SimulatedHardware yet
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 3);
-    simulated_hardware.run_until(&mut cores, 5000);
+    simulated_hardware.run_until(&mut cores, ms(6.0));
 
     assert_eq!(
         simulated_hardware.incoming_packets(&server_addr()),
         &vec![
             LocalPacket {
                 buffer: long_packet(first_message_length),
-                timestamp: 1423,
+                timestamp: ms(1.423),
             },
             LocalPacket {
                 buffer: long_packet(second_message_length),
-                timestamp: 1423,
+                timestamp: ms(1.423),
             },
             LocalPacket {
                 buffer: long_packet(first_message_length),
-                timestamp: 2846,
+                timestamp: ms(1.423 * 3.0),
             },
             LocalPacket {
                 buffer: long_packet(second_message_length + 1),
-                timestamp: 4269,
+                timestamp: ms(1.423 * 4.0),
             },
         ]
     );
+}
+
+#[test]
+#[ignore]
+fn drop_and_reorder() {
+    setup_logging();
+    let mut simulated_hardware =
+        SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
+    simulated_hardware.drop_packet(0);
+    simulated_hardware.drop_packet(2);
+    simulated_hardware.delay_packet(3, ms(500.0));
+    simulated_hardware.delay_packet(4, ms(1500.0));
+    let server_core = core::server::Core::new(core::server::Config {
+        pre_shared_key: PSK.into(),
+    })
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[4, 3, 2, 1]);
+    // depending on the implementation, it can reasonably send the first packet before reading the
+    // outgoing packet (in fact, that's what the current implementation does), so we need to wait
+    // long enough that it can actually read the outgoing packet. This is long enough for two
+    // packets.
+    simulated_hardware.run_until(&mut cores, ms(1500.1));
+    assert!(
+        simulated_hardware
+            .incoming_packets(&client_addr())
+            .is_empty()
+    );
+    assert!(
+        simulated_hardware
+            .incoming_packets(&server_addr())
+            .is_empty()
+    );
+
+    std::thread::sleep(Duration::from_millis(1010));
+    simulated_hardware.run_until(&mut cores, ms(6000.0));
+    let client_incoming_packets = simulated_hardware.incoming_packets(&client_addr());
+    let server_incoming_packets = simulated_hardware.incoming_packets(&server_addr());
+    assert_eq!(client_incoming_packets.len(), 1);
+    assert_eq!(server_incoming_packets.len(), 1);
+    assert_eq!(&client_incoming_packets[0].buffer[..], &[4, 3, 2, 1]);
+    assert_eq!(&server_incoming_packets[0].buffer[..], &[1, 4, 0, 5]);
 }
 
 // TODO more tests:

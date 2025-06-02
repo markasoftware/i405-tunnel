@@ -144,8 +144,13 @@ impl EstablishedConnection {
         peer: std::net::SocketAddr,
         outgoing_wire_config: WireConfig,
     ) -> Result<Self> {
+        // TODO this could return Self (can't fail)
         hardware.clear_event_listeners();
-        let mut result = Self {
+        hardware.set_timer(next_outgoing_timer(
+            &outgoing_wire_config,
+            hardware.timestamp(),
+        ));
+        Ok(Self {
             session,
             peer,
             outgoing_connection: OutgoingConnection::new_unscheduled(hardware),
@@ -154,10 +159,7 @@ impl EstablishedConnection {
             )),
             defragger: Defragger::new(),
             outgoing_wire_config,
-        };
-        // simulate a timer immediately
-        result.on_timer(hardware, hardware.timestamp())?;
-        Ok(result)
+        })
     }
 
     pub(crate) fn peer(&self) -> std::net::SocketAddr {
@@ -182,15 +184,18 @@ impl EstablishedConnection {
         hardware.send_outgoing_packet(
             outgoing_packet.as_ref(),
             self.peer,
-            Some(next_outgoing_timestamp(
-                &self.outgoing_wire_config,
-                timer_timestamp,
-            )),
+            Some(
+                timer_timestamp
+                    .checked_add(PACKET_FINALIZE_TO_PACKET_SEND_DELAY)
+                    .unwrap(),
+            ),
         )?;
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
-        // TODO include the packet_interval_offset? To handle the first roundtrip properly.
-        hardware.set_timer(timer_timestamp + self.outgoing_wire_config.packet_interval);
+        hardware.set_timer(next_outgoing_timer(
+            &self.outgoing_wire_config,
+            hardware.timestamp(),
+        ));
         Ok(())
     }
 
@@ -288,6 +293,18 @@ fn next_outgoing_timestamp(wire_config: &WireConfig, timestamp: u64) -> u64 {
         .unwrap()
 }
 
+/// When should we next prepare a packet and submit it to the hardware?
+fn next_outgoing_timer(wire_config: &WireConfig, timestamp: u64) -> u64 {
+    next_outgoing_timestamp(
+        wire_config,
+        timestamp
+            .checked_add(PACKET_FINALIZE_TO_PACKET_SEND_DELAY.checked_mul(2).unwrap())
+            .unwrap(),
+    )
+    .checked_sub(PACKET_FINALIZE_TO_PACKET_SEND_DELAY)
+    .unwrap()
+}
+
 #[cfg(test)]
 mod test {
     use crate::core::WireConfig;
@@ -305,5 +322,33 @@ mod test {
         assert_eq!(super::next_outgoing_timestamp(&wire_config, 3), 13);
         assert_eq!(super::next_outgoing_timestamp(&wire_config, 12), 13);
         assert_eq!(super::next_outgoing_timestamp(&wire_config, 13), 23);
+    }
+
+    #[test]
+    fn next_outgoing_timer() {
+        // just so we remember to fix the test if it goes bad:
+        assert_eq!(
+            super::PACKET_FINALIZE_TO_PACKET_SEND_DELAY,
+            100_000,
+            "update test if this changes"
+        );
+
+        let wire_config = WireConfig {
+            packet_length: 1500,
+            packet_interval: 1_400_000,
+            packet_interval_offset: 3,
+        };
+        assert_eq!(
+            super::next_outgoing_timer(&wire_config, 2_000_000),
+            2_700_003
+        );
+        assert_eq!(
+            super::next_outgoing_timer(&wire_config, 2_600_002),
+            2_700_003
+        );
+        assert_eq!(
+            super::next_outgoing_timer(&wire_config, 2_600_003),
+            4_100_003
+        );
     }
 }

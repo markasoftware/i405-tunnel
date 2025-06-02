@@ -189,7 +189,7 @@ impl SimulatedHardware {
                         timestamp
                     );
                     if timer == timestamp {
-                        log::debug!("Timer triggered for {} at {}ns", addr, timestamp);
+                        self.debug(format!("Timer triggered for {} at {}ns", addr, timestamp));
                         core.on_timer(&mut self.hardware(addr), timestamp);
                         // the continue serves two purposes: (1) ensure that if handling one event
                         // causes other events to happen at the same timestamp, we don't advance the
@@ -209,11 +209,10 @@ impl SimulatedHardware {
                         if scheduled_time <= timestamp {
                             if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front()
                             {
-                                log::debug!(
+                                self.debug(format!(
                                     "Reading outgoing packet on {} at {}ns",
-                                    addr,
-                                    timestamp
-                                );
+                                    addr, timestamp
+                                ));
                                 core.on_read_outgoing_packet(
                                     &mut self.hardware(addr),
                                     &outgoing_packet,
@@ -228,7 +227,10 @@ impl SimulatedHardware {
                     MaybeTime::Immediate => {
                         // this is copy pasted from above, maybe should dedupe
                         if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front() {
-                            log::debug!("Reading outgoing packet on {} at {}ns", addr, timestamp);
+                            self.debug(format!(
+                                "Reading outgoing packet on {} at {}ns",
+                                addr, timestamp
+                            ));
                             core.on_read_outgoing_packet(
                                 &mut self.hardware(addr),
                                 &outgoing_packet,
@@ -241,36 +243,43 @@ impl SimulatedHardware {
                 }
 
                 // read incoming
-                if peer
-                    .unread_incoming_packets
-                    .peek()
-                    .is_some_and(|incoming_packet| incoming_packet.receipt_timestamp >= timestamp)
-                {
-                    let incoming_packet = peer.unread_incoming_packets.pop().unwrap();
-                    log::debug!(
-                        "Reading incoming packet on {}, from {}, at {}ns",
-                        addr,
-                        incoming_packet.source,
-                        timestamp
-                    );
-                    assert_eq!(incoming_packet.dest, addr);
-                    core.on_read_incoming_packet(
-                        &mut self.hardware(addr),
-                        &incoming_packet.buffer,
-                        incoming_packet.source,
-                    );
-                    continue 'main_loop;
+                if let Some(incoming_packet) = peer.unread_incoming_packets.peek() {
+                    if timestamp >= incoming_packet.receipt_timestamp {
+                        let incoming_packet = peer.unread_incoming_packets.pop().unwrap();
+                        self.debug(format!(
+                            "Reading incoming packet on {}, from {}, at {}ns",
+                            addr, incoming_packet.source, timestamp
+                        ));
+                        assert_eq!(
+                            incoming_packet.receipt_timestamp, timestamp,
+                            "AFAIK no way for us to miss the receipt timestamp in simulation"
+                        );
+                        assert_eq!(incoming_packet.dest, addr);
+                        core.on_read_incoming_packet(
+                            &mut self.hardware(addr),
+                            &incoming_packet.buffer,
+                            incoming_packet.source,
+                        );
+                        continue 'main_loop;
+                    } else {
+                        next_event_timestamp =
+                            min(next_event_timestamp, incoming_packet.receipt_timestamp);
+                    }
                 }
             }
 
             // If there's nothing to do immediately, then wait until the next time we'll be able to do something!
-            log::debug!(
+            self.debug(format!(
                 "No action to do at current timestamp {}ns; advancing to {}ns",
-                timestamp,
-                next_event_timestamp
-            );
+                timestamp, next_event_timestamp
+            ));
             self.timestamp = next_event_timestamp;
         }
+    }
+
+    // idk if AsRef<str> is really the best signature here
+    fn debug<S: AsRef<str>>(&self, msg: S) {
+        log::debug!("{}ns: {}", self.timestamp, msg.as_ref());
     }
 }
 
@@ -287,7 +296,12 @@ impl<'a> OneSideHardware<'a> {
 
 impl<'a> Hardware for OneSideHardware<'a> {
     fn set_timer(&mut self, timestamp: u64) -> Option<u64> {
-        std::mem::replace(&mut self.our_side().timer, Some(timestamp))
+        let old_timestamp = std::mem::replace(&mut self.our_side().timer, Some(timestamp));
+        self.simulated.debug(format!(
+            "Setting timer for {} to {}ns (used to be {:?})",
+            self.our_addr, timestamp, old_timestamp
+        ));
+        old_timestamp
     }
 
     fn timestamp(&self) -> u64 {
@@ -313,13 +327,13 @@ impl<'a> Hardware for OneSideHardware<'a> {
         let sent_timestamp = timestamp.unwrap_or(self.timestamp());
 
         if self.simulated.packets_to_drop.contains(&packet_counter) {
-            log::debug!(
+            self.simulated.debug(format!(
                 "Dropping packet from {} to {} of size {} (sent at {}ns)",
                 self.our_addr,
                 destination,
                 packet.len(),
                 sent_timestamp
-            );
+            ));
             return Ok(());
         }
 
@@ -335,7 +349,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
             )
             .unwrap();
         let receipt_timestamp = sent_timestamp.checked_add(delay).unwrap();
-        log::debug!(
+        self.simulated.debug(format!(
             "Sending packet from {} to {} of size {} at {}ns (delay {}ns, to be received at {}ns)",
             self.our_addr,
             destination,
@@ -343,7 +357,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
             sent_timestamp,
             delay,
             receipt_timestamp,
-        );
+        ));
         let wan_packet = WanPacket {
             buffer: IpPacketBuffer::new(packet),
             receipt_timestamp,
