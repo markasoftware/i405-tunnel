@@ -37,8 +37,8 @@ impl RealHardware {
     pub(crate) fn new(
         listen_addr: SocketAddr,
         tun_name: String,
-        tun_ipv4_addr: Option<std::net::Ipv4Addr>,
-        tun_ipv6_addr: Option<std::net::Ipv6Addr>,
+        tun_ipv4_net: Option<ipnet::Ipv4Net>,
+        tun_ipv6_net: Option<ipnet::Ipv6Net>,
     ) -> std::io::Result<Self> {
         let disconnect_addr = match listen_addr {
             SocketAddr::V4(_) => {
@@ -63,13 +63,13 @@ impl RealHardware {
         let incoming_read_socket = socket.clone();
 
         let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_name);
-        if let Some(ipv4_addr) = tun_ipv4_addr {
+        if let Some(ipv4_net) = tun_ipv4_net {
             // TODO change mask
-            tun_builder = tun_builder.ipv4(ipv4_addr, 32, None);
+            tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
         }
-        if let Some(ipv6_addr) = tun_ipv6_addr {
+        if let Some(ipv6_net) = tun_ipv6_net {
             // TODO change mask
-            tun_builder = tun_builder.ipv6(ipv6_addr, 128);
+            tun_builder = tun_builder.ipv6(ipv6_net.addr(), ipv6_net.netmask());
         }
         let tun = Arc::new(tun_builder.build_sync()?);
         let outgoing_read_tun = tun.clone();
