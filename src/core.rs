@@ -22,14 +22,12 @@ const C2S_MAX_TIMEOUT: u64 = 60_000_000_000;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct WireConfig {
-    packet_length: u16,
-    packet_interval: u64,
+    pub(crate) packet_length: u16,
+    pub(crate) packet_interval: u64,
     // packets will be sent when (epoch_time - packet_interval_offset) % packet_interval == 0
-    packet_interval_offset: u64,
+    pub(crate) packet_interval_offset: u64,
 }
 
-// TODO eliminate enum_dispatch. We only need it because declarative enum dispatch doesn't support
-// making the trait generic, which means we can't do a dyn Core for testing.
 enum_dispatch! {
     pub(crate) trait Core {
         fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);

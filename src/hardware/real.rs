@@ -12,7 +12,7 @@ use crate::{
 // time, then spin loop the rest of the way.
 const SLEEP_SPIN_DURATION: Duration = Duration::from_nanos(20_000);
 
-struct RealHardware {
+pub(crate) struct RealHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
     // threads, so that we can identify when an event is from a "previous" generation
@@ -34,7 +34,12 @@ struct RealHardware {
 }
 
 impl RealHardware {
-    fn new(listen_addr: SocketAddr, tun_addr: std::net::Ipv4Addr) -> std::io::Result<Self> {
+    pub(crate) fn new(
+        listen_addr: SocketAddr,
+        tun_name: String,
+        tun_ipv4_addr: Option<std::net::Ipv4Addr>,
+        tun_ipv6_addr: Option<std::net::Ipv6Addr>,
+    ) -> std::io::Result<Self> {
         let disconnect_addr = match listen_addr {
             SocketAddr::V4(_) => {
                 SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::from_bits(0), 0))
@@ -56,12 +61,15 @@ impl RealHardware {
         let socket = Arc::new(UdpSocket::bind(listen_addr)?);
         let outgoing_send_socket = socket.clone();
         let incoming_read_socket = socket.clone();
-        // TODO IPV6 tunnel
-        let tun = Arc::new(
-            tun_rs::DeviceBuilder::new()
-                .ipv4(tun_addr, tun_addr, None)
-                .build_sync()?,
-        );
+
+        let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_name);
+        if let Some(ipv4_addr) = tun_ipv4_addr {
+            tun_builder = tun_builder.ipv4(ipv4_addr, ipv4_addr, None);
+        }
+        if let Some(ipv6_addr) = tun_ipv6_addr {
+            tun_builder = tun_builder.ipv6(ipv6_addr, ipv6_addr);
+        }
+        let tun = Arc::new(tun_builder.build_sync()?);
         let outgoing_read_tun = tun.clone();
         let incoming_send_tun = tun;
 
@@ -103,7 +111,7 @@ impl RealHardware {
 
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
-    fn run(&mut self, core: &mut impl core::Core) {
+    pub(crate) fn run(&mut self, core: &mut impl core::Core) {
         loop {
             // we don't do precise sleep for timers, because everything time-sensitive that the Core
             // does is done via timestamps on other core methods. It's never important that the core
