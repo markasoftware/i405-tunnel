@@ -64,11 +64,9 @@ impl RealHardware {
 
         let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_name);
         if let Some(ipv4_net) = tun_ipv4_net {
-            // TODO change mask
             tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
         }
         if let Some(ipv6_net) = tun_ipv6_net {
-            // TODO change mask
             tun_builder = tun_builder.ipv6(ipv6_net.addr(), ipv6_net.netmask());
         }
         let tun = Arc::new(tun_builder.build_sync()?);
@@ -120,19 +118,20 @@ impl RealHardware {
             // itself do something at a precise timestamp.
 
             // Always use `recv_timeout` so that we can handle SIGINT in a timely fashion.
-            let max_timeout = Duration::from_secs(1);
+            let max_timeout_duration_from_now = Duration::from_secs(1);
             // only set if the user requested a timer, /and/ that timer is short enough that we're
             // actually able to use it.
-            let user_timeout = self.timer.and_then(|timer| {
-                let timer_duration = self
+            let user_timeout_duration_from_now = self.timer.and_then(|timer| {
+                let dur = self
                     .epoch
                     .checked_add(Duration::from_nanos(timer))
                     .unwrap()
                     .saturating_duration_since(Instant::now());
-                (timer_duration <= max_timeout).then_some(timer_duration)
+                (dur <= max_timeout_duration_from_now).then_some(dur)
             });
-            let timeout = user_timeout.unwrap_or(max_timeout);
-            if timeout == Duration::ZERO {
+            let timeout_duration_from_now =
+                user_timeout_duration_from_now.unwrap_or(max_timeout_duration_from_now);
+            if timeout_duration_from_now == Duration::ZERO {
                 log::warn!(
                     "Timer set in the past? Timer set for {}, current ns since epoch is {}",
                     self.timer.unwrap(),
@@ -142,7 +141,7 @@ impl RealHardware {
                         .as_nanos()
                 );
             }
-            match self.events_rx.recv_timeout(timeout) {
+            match self.events_rx.recv_timeout(timeout_duration_from_now) {
                 Ok(Event::OutgoingRead {
                     timestamp,
                     packet,
@@ -162,8 +161,9 @@ impl RealHardware {
                     core.on_read_incoming_packet(self, &packet, addr);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(used_user_timeout) = user_timeout {
-                        core.on_timer(self, used_user_timeout.as_nanos().try_into().unwrap());
+                    if user_timeout_duration_from_now.is_some() {
+                        let activated_timer = std::mem::take(&mut self.timer);
+                        core.on_timer(self, activated_timer.unwrap());
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
