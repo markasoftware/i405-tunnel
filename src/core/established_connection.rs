@@ -60,6 +60,10 @@ impl OutgoingConnection {
         }
     }
 
+    fn new_scheduled(hardware: &mut impl Hardware) -> Self {
+        unimplemented!();
+    }
+
     fn new_measure_latency() -> Self {
         Self::MeasureLatency()
     }

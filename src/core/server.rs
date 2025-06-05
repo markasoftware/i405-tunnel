@@ -22,9 +22,9 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    pub(crate) fn new(config: Config) -> Result<Self> {
+    pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
         Ok(Self {
-            state: Some(ConnectionState::NoConnection(NoConnection::new())),
+            state: Some(ConnectionState::NoConnection(NoConnection::new(hardware))),
             config,
         })
     }
@@ -161,10 +161,16 @@ struct Negotiation {
 }
 
 impl NoConnection {
-    fn new() -> Self {
+    fn new(hardware: &mut impl Hardware) -> Self {
+        hardware.clear_event_listeners();
+        NoConnection::set_timer(hardware);
         NoConnection {
             negotiations: Vec::new(),
         }
+    }
+
+    fn set_timer(hardware: &mut impl Hardware) {
+        hardware.set_timer(hardware.timestamp() + 1_000_000_000);
     }
 }
 
@@ -217,6 +223,7 @@ impl ServerConnectionStateTrait for NoConnection {
                 }
             })
             .collect();
+        Self::set_timer(hardware);
         Ok(ConnectionState::NoConnection(self))
     }
 
@@ -275,7 +282,7 @@ impl ServerConnectionStateTrait for NoConnection {
                             hardware.send_outgoing_packet(&packet, peer, None)?;
                         }
                         return Ok(ConnectionState::InProtocolHandshake(
-                            InProtocolHandshake::new(new_session, peer),
+                            InProtocolHandshake::new(hardware, new_session, peer),
                         ));
                     }
                     dtls::NegotiateResult::NeedRead(new_session, to_send, next_timeout) => {
@@ -330,7 +337,12 @@ struct InProtocolHandshake {
 }
 
 impl InProtocolHandshake {
-    fn new(session: dtls::EstablishedSession, peer: SocketAddr) -> InProtocolHandshake {
+    fn new(
+        hardware: &mut impl Hardware,
+        session: dtls::EstablishedSession,
+        peer: SocketAddr,
+    ) -> InProtocolHandshake {
+        hardware.clear_event_listeners();
         InProtocolHandshake {
             session,
             peer,

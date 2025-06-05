@@ -41,9 +41,12 @@ fn simulated_pair(
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
     let mut simulated_hardware =
         SimulatedHardware::new(vec![client_addr(), server_addr()], default_delay);
-    let server_core = core::server::Core::new(core::server::Config {
-        pre_shared_key: PSK.into(),
-    })
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
     .unwrap();
     let client_core = core::client::Core::new(
         core::client::Config {
@@ -296,9 +299,12 @@ fn drop_and_reorder() {
     simulated_hardware.drop_packet(2);
     simulated_hardware.delay_packet(3, ms(500.0));
     simulated_hardware.delay_packet(4, ms(1500.0));
-    let server_core = core::server::Core::new(core::server::Config {
-        pre_shared_key: PSK.into(),
-    })
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
     .unwrap();
     let client_core = core::client::Core::new(
         core::client::Config {

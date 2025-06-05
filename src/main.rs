@@ -66,7 +66,9 @@ fn main() {
             let server_config = core::server::Config {
                 pre_shared_key: common_config.pre_shared_key.clone(),
             };
-            core::ConcreteCore::Server(core::server::Core::new(server_config).unwrap())
+            core::ConcreteCore::Server(
+                core::server::Core::new(server_config, &mut hardware).unwrap(),
+            )
         }
     };
 
