@@ -8,10 +8,6 @@ use crate::{
     array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, core, hardware::Hardware,
 };
 
-// When sleeping accurately, use the OS sleep to wait until this long before the desired wake up
-// time, then spin loop the rest of the way.
-const SLEEP_SPIN_DURATION: Duration = Duration::from_nanos(20_000);
-
 pub(crate) struct RealHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
@@ -338,26 +334,16 @@ fn incoming_send_thread(
 }
 
 fn precise_sleep(wake_at: Instant) {
+    // this used to wake up N nanoseconds before wake_at and then do a spinloop the rest of the way,
+    // but real-world testing showed that packet intervals actually had substantially /higher/
+    // standard deviations.
     let now = Instant::now();
     if now < wake_at {
-        // do a real sleep, if we have the time
-        if now
-            .checked_add(SLEEP_SPIN_DURATION.checked_mul(2).unwrap())
-            .unwrap()
-            < wake_at
-        {
-            // we could get delayed further than we want here if the OS decides to suspend the
-            // thread partway through the following computation, but I'm just gonna hope that
-            // doesn't compromise privacy.
-            std::thread::sleep(
-                wake_at
-                    .checked_sub(SLEEP_SPIN_DURATION)
-                    .unwrap()
-                    .saturating_duration_since(now),
-            );
-        }
-        // spin loop
-        while Instant::now() < wake_at {}
+        std::thread::sleep(wake_at.saturating_duration_since(now));
+    } else {
+        log::warn!(
+            "precise_sleep called too late: Requested wake up at {wake_at:?}, but it's already {now:?}"
+        );
     }
 }
 
