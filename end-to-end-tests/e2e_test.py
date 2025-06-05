@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# As of time of writing this is the only ai-generated part of I405, i promise :|
+# it really shows lol
+
 import subprocess
 import time
 import os
@@ -99,7 +102,7 @@ def setup_network() -> None:
 
     print("Network namespaces set up")
 
-def analyze_packets_file(filepath: str) -> dict[str, float] | None:
+def analyze_packets_file(filepath: str) -> dict[str, float]:
     """Analyzes tcpdump output for timestamp deviations."""
     print(f"Analyzing packet file: {filepath}")
     timestamps: list[float] = []
@@ -147,19 +150,7 @@ def analyze_packets_file(filepath: str) -> dict[str, float] | None:
     print(f"Worst:  {worst_ns:.9f}")
     print(f"Stddev: {stddev_ns:.9f}")
 
-    return {"avg_ns": avg_ns, "worst_ns": worst_ns, "stddev_ns": stddev_ns}
-
-def assert_statistics(stats: dict[str, float] | None, stat_name: str, max_ns: int) -> None:
-    """Asserts that a statistic is within the maximum permissible value."""
-    assert stats is not None, f"Cannot assert {stat_name}: statistics not available."
-
-    value: Optional[float] = stats.get(f"{stat_name.lower()}_ns")
-    assert value is not None, f"Cannot assert {stat_name}: statistic '{stat_name.lower()}_ns' not found in stats."
-
-    print(f"Asserting {stat_name} ({value:.9f} ns) <= {max_ns} ns")
-    # Use absolute value for Avg and Worst as in shell script
-    assert abs(value) <= max_ns, f"Assertion failed: Statistic {stat_name} was larger than permissible limit {max_ns} ns: {value:.9f} ns"
-    print(f"Assertion passed: {stat_name} is within limit.")
+    return {"avg": avg_ns, "worst": worst_ns, "stddev": stddev_ns}
 
 def main() -> None:
     """Main function to run the end-to-end test."""
@@ -174,16 +165,11 @@ def main() -> None:
         cleanup() # Ensure a clean state before starting
         setup_network()
 
-        # Start server and client in the background
-        print("Starting server and client...")
-        # Use Popen to run processes in the background
+        print("Starting I405 server and client...")
         server_process = subprocess.Popen(
             ["ip", "netns", "exec", SERVER_NS_NAME,
              "./target/debug/i405-tunnel", "server", "--password", "password",
              "--tun-name", "i405-server-tun", "--tun-ipv4", f"{SERVER_TUN_IP}/24"],
-            # We don't need to capture stdout/stderr for background processes unless debugging
-            # stdout=subprocess.PIPE,
-            # stderr=subprocess.PIPE
         )
         client_process = subprocess.Popen(
             ["ip", "netns", "exec", CLIENT_NS_NAME,
@@ -191,18 +177,11 @@ def main() -> None:
              "--password", "password", "--tun-name", "i405-client-tun",
              "--tun-ipv4", f"{CLIENT_TUN_IP}/24", "--outgoing-packet-length", "1000",
              "--outgoing-packet-interval", str(PACKET_INTERVAL_NS), "--incoming-packet-length", "1000",
-             "--incoming-packet-interval", "100000000"], # Note: Incoming interval is not currently asserted
-            # stdout=subprocess.PIPE,
-            # stderr=subprocess.PIPE
+             "--incoming-packet-interval", "100000000"],
         )
+        time.sleep(0.5) # wait for handshake
 
-        # Give processes time to start and handshake
-        print("Waiting for handshake...")
-        time.sleep(2) # Increased sleep slightly to ensure handshake completes
-
-        # Ping test
-        # Ping test
-        print("Ping test: Roundtrips should be between 100ms and 200ms")
+        print("Ping test: Roundtrips should be between 100ms and 210ms")
         ping_times: list[float] = []
         try:
             # Ping from server NS to client TUN IP
@@ -234,8 +213,6 @@ def main() -> None:
 
         # Packet capture
         print(f"Measuring client->server packet timestamp deviations {NUM_CAPTURED_PACKETS} packets...")
-        # Use -l to ensure line buffering for real-time output capture if needed,
-        # but here we just wait for it to finish.
         tcpdump_c2s: subprocess.CompletedProcess = run_command_ns(
             BRIDGE_NS_NAME,
             ["tcpdump", "-c", str(NUM_CAPTURED_PACKETS), "--nano", "-n", "-tt",
@@ -257,16 +234,17 @@ def main() -> None:
 
         # Analyze and assert packet statistics
         print("Analyzing and asserting packet statistics...")
-        c2s_stats: dict[str, float] | None = analyze_packets_file(C2S_PACKETS_FILE)
-        s2c_stats: dict[str, float] | None = analyze_packets_file(S2C_PACKETS_FILE)
+        c2s_stats: dict[str, float] = analyze_packets_file(C2S_PACKETS_FILE)
+        s2c_stats: dict[str, float] = analyze_packets_file(S2C_PACKETS_FILE)
 
-        assert_statistics(c2s_stats, "Avg", 1000) # 1μs
-        assert_statistics(c2s_stats, "Worst", 1000000) # 1ms
-        assert_statistics(c2s_stats, "Stddev", 100000) # 100μs
+        assert 0 < abs(c2s_stats["avg"]) < 1000, f"Unacceptable C2S average: {c2s_stats['avg']}"
+        assert 0 < abs(c2s_stats["worst"]) < 1_000_000, f"Unacceptable C2S worst: {c2s_stats['worst']}"
+        assert 0 < abs(c2s_stats["stddev"]) < 100_000, f"Unacceptable C2S stddev: {c2s_stats['stddev']}"
 
-        assert_statistics(s2c_stats, "Avg", 1000) # 1μs
-        assert_statistics(s2c_stats, "Worst", 1000000) # 1ms
-        assert_statistics(s2c_stats, "Stddev", 100000) # 100μs
+        assert 0 < abs(s2c_stats["avg"]) < 1000, f"Unacceptable S2C average: {s2c_stats['avg']}"
+        assert 0 < abs(s2c_stats["worst"]) < 1_000_000, f"Unacceptable S2C worst: {s2c_stats['worst']}"
+        assert 0 < abs(s2c_stats["stddev"]) < 100_000, f"Unacceptable S2C stddev: {s2c_stats['stddev']}"
+
         print("Packet statistics assertions passed.")
 
     finally:
