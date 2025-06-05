@@ -7,7 +7,7 @@ import re
 import statistics
 import sys
 import signal
-from typing import Any, Tuple, IO, Dict # Keep Dict for older Python versions if needed, or remove if targeting 3.9+
+from typing import Any, Tuple, Optional
 
 # Configuration variables
 SERVER_NS_NAME: str = "i405-server"
@@ -113,11 +113,11 @@ def analyze_packets_file(filepath: str) -> dict[str, float] | None:
                     timestamps.append(float(match.group()))
     except FileNotFoundError:
         print(f"Error: Packet file not found at {filepath}")
-        return None
+        raise AssertionError(f"Packet file not found: {filepath}")
 
     if len(timestamps) < 2:
         print("Not enough timestamps to analyze.")
-        return None
+        raise AssertionError(f"Not enough timestamps to analyze in {filepath} (found {len(timestamps)})")
 
     # Calculate deviations from expected interval (0.1 seconds or 100ms)
     # The shell script calculated deviation from the *previous* packet,
@@ -131,7 +131,7 @@ def analyze_packets_file(filepath: str) -> dict[str, float] | None:
 
     if not deviations:
         print("No deviations calculated.")
-        return None
+        raise AssertionError(f"No deviations calculated from timestamps in {filepath}")
 
     avg_deviation: float = statistics.mean(deviations)
     # Worst deviation is the max absolute deviation
@@ -149,23 +149,17 @@ def analyze_packets_file(filepath: str) -> dict[str, float] | None:
 
     return {"avg_ns": avg_ns, "worst_ns": worst_ns, "stddev_ns": stddev_ns}
 
-def assert_statistics(stats: dict[str, float] | None, stat_name: str, max_ns: int) -> bool:
+def assert_statistics(stats: dict[str, float] | None, stat_name: str, max_ns: int) -> None:
     """Asserts that a statistic is within the maximum permissible value."""
-    if stats is None:
-        print(f"Cannot assert {stat_name}: statistics not available.")
-        return False
+    assert stats is not None, f"Cannot assert {stat_name}: statistics not available."
 
     value: Optional[float] = stats.get(f"{stat_name.lower()}_ns")
-    if value is None:
-        print(f"Cannot assert {stat_name}: statistic '{stat_name.lower()}_ns' not found in stats.")
-        return False
+    assert value is not None, f"Cannot assert {stat_name}: statistic '{stat_name.lower()}_ns' not found in stats."
 
     print(f"Asserting {stat_name} ({value:.9f} ns) <= {max_ns} ns")
-    if abs(value) > max_ns: # Use absolute value for Avg and Worst as in shell script
-        print(f"Assertion failed: Statistic {stat_name} was larger than permissible limit {max_ns}: {value:.9f}")
-        return False
+    # Use absolute value for Avg and Worst as in shell script
+    assert abs(value) <= max_ns, f"Assertion failed: Statistic {stat_name} was larger than permissible limit {max_ns} ns: {value:.9f} ns"
     print(f"Assertion passed: {stat_name} is within limit.")
-    return True
 
 def main() -> None:
     """Main function to run the end-to-end test."""
@@ -222,7 +216,8 @@ def main() -> None:
                 if match:
                     ping_times.append(float(match.group(1)))
                 else:
-                    print("Warning: Could not extract ping time from output.")
+                    print("Error: Could not extract ping time from output.")
+                    raise AssertionError(f"Could not extract ping time from output: {result.stdout}")
 
         except subprocess.CalledProcessError as e:
             print(f"Ping failed: {e}")
@@ -245,7 +240,7 @@ def main() -> None:
             BRIDGE_NS_NAME,
             ["tcpdump", "-c", str(NUM_CAPTURED_PACKETS), "--nano", "-n", "-tt",
              "udp port 1405 and dst host " + SERVER_VETH_IP],
-            capture_output=True, text=True, check=False # tcpdump might exit non-zero if interrupted
+            capture_output=True, text=True, check=True
         )
         with open(C2S_PACKETS_FILE, "w") as f:
             f.write(tcpdump_c2s.stdout)
@@ -255,7 +250,7 @@ def main() -> None:
             BRIDGE_NS_NAME,
             ["tcpdump", "-c", str(NUM_CAPTURED_PACKETS), "--nano", "-n", "-tt",
              "udp port 1405 and src host " + SERVER_VETH_IP],
-            capture_output=True, text=True, check=False
+            capture_output=True, text=True, check=True
         )
         with open(S2C_PACKETS_FILE, "w") as f:
             f.write(tcpdump_s2c.stdout)
@@ -274,11 +269,6 @@ def main() -> None:
         assert_statistics(s2c_stats, "Stddev", 100000) # 100μs
         print("Packet statistics assertions passed.")
 
-        print("End-to-end test completed successfully.")
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        sys.exit(1)
     finally:
         # Terminate processes before cleanup
         print("Terminating background processes...")
@@ -298,6 +288,8 @@ def main() -> None:
              client_process.kill()
 
         cleanup() # Always clean up network namespaces and interfaces
+
+    print("End-to-end test completed successfully.")
 
 if __name__ == "__main__":
     main()
