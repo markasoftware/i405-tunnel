@@ -1,19 +1,30 @@
-use clap::{Arg, ArgMatches, Command, value_parser};
+use std::time::Duration;
+
+use clap::{Arg, ArgGroup, ArgMatches, Command, value_parser};
 use declarative_enum_dispatch::enum_dispatch;
 
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1405";
 const DEFAULT_TUN_NAME: &str = "tun-i405";
 
 trait EzClap {
+    // TODO consider combining to_args and to_groups
     fn to_args() -> Vec<Arg>;
+    fn to_groups() -> Vec<ArgGroup> {
+        Vec::new()
+    }
     fn from_match(matches: &ArgMatches) -> Self;
 }
 
+pub(crate) enum WireInterval {
+    Fixed(u64), // fixed interval in ns
+    Rate(u64),  // bytes per second
+}
+
 pub(crate) struct WireConfiguration {
-    pub(crate) outgoing_packet_length: u16,
-    pub(crate) outgoing_packet_interval: u64,
-    pub(crate) incoming_packet_length: u16,
-    pub(crate) incoming_packet_interval: u64,
+    pub(crate) outgoing_packet_length: Option<u64>,
+    pub(crate) outgoing_interval: WireInterval,
+    pub(crate) incoming_packet_length: Option<u64>,
+    pub(crate) incoming_interval: WireInterval,
 }
 
 impl EzClap for WireConfiguration {
@@ -21,49 +32,79 @@ impl EzClap for WireConfiguration {
         vec![
             Arg::new("outgoing_packet_length")
                 .long("outgoing-packet-length")
-                .visible_alias("upload-packet-length")
-                .value_parser(value_parser!(u16))
-                .required(true)
+                .visible_alias("up-packet-length")
+                .value_parser(value_parser!(bytesize::ByteSize))
                 .help("Fixed upload packet length, in bytes"),
             Arg::new("outgoing_packet_interval")
                 .long("outgoing-packet-interval")
-                .visible_alias("upload-packet-interval")
-                .value_parser(value_parser!(u64))
-                .required(true)
+                .visible_alias("up-packet-interval")
+                .value_parser(humantime::parse_duration)
                 .help("Fixed upload packet interval, in nanoseconds"),
+            Arg::new("outgoing_bytes_per_second")
+                .long("outgoing-bytes-per-second")
+                .visible_alias("outgoing-speed")
+                .visible_alias("up-bytes-per-second")
+                .visible_alias("up-speed")
+                .value_parser(value_parser!(bytesize::ByteSize))
+                .help("Bytes per second to upload. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the upload packet length."),
             Arg::new("incoming_packet_length")
                 .long("incoming-packet-length")
-                .visible_alias("download-packet-length")
-                .value_parser(value_parser!(u16))
-                .required(true)
+                .visible_alias("down-packet-length")
+                .value_parser(value_parser!(bytesize::ByteSize))
                 .help("Fixed download packet length, in bytes"),
             Arg::new("incoming_packet_interval")
                 .long("incoming-packet-interval")
-                .visible_alias("download-packet-interval")
-                .value_parser(value_parser!(u64))
-                .required(true)
+                .visible_alias("down-packet-interval")
+                .value_parser(humantime::parse_duration)
                 .help("Fixed download packet interval, in nanoseconds"),
+            Arg::new("incoming_bytes_per_second")
+                .long("incoming-bytes-per-second")
+                .visible_alias("incoming-speed")
+                .visible_alias("down-bytes-per-second")
+                .visible_alias("down-speed")
+                .value_parser(value_parser!(bytesize::ByteSize))
+                .help("Bytes per second to download. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the download packet length."),
+        ]
+    }
+
+    fn to_groups() -> Vec<ArgGroup> {
+        vec![
+            ArgGroup::new("outgoing_rate")
+                .args(["outgoing_packet_interval", "outgoing_bytes_per_second"])
+                .required(true),
+            ArgGroup::new("incoming_rate")
+                .args(["incoming_packet_interval", "incoming_bytes_per_second"])
+                .required(true),
         ]
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
+        let parse_interval = |in_or_out| -> WireInterval {
+            match (
+                matches.get_one::<Duration>(&format!("{in_or_out}_packet_interval")),
+                matches.get_one::<bytesize::ByteSize>(&format!("{in_or_out}_bytes_per_second")),
+            ) {
+                (Some(interval), None) => WireInterval::Fixed(
+                    interval
+                        .as_nanos()
+                        .try_into()
+                        .expect("Don't put intervals longer than hundreds of years."),
+                ),
+                (None, Some(bytes_per_second)) => WireInterval::Rate(bytes_per_second.as_u64()),
+                _ => unreachable!(
+                    "Clap should enforce that either interval or bytes per second is set."
+                ),
+            }
+        };
         WireConfiguration {
             outgoing_packet_length: matches
-                .get_one::<u16>("outgoing_packet_length")
-                .unwrap()
-                .clone(),
-            outgoing_packet_interval: matches
-                .get_one::<u64>("outgoing_packet_interval")
-                .unwrap()
-                .clone(),
+                .get_one::<bytesize::ByteSize>("outgoing_packet_length")
+                .map(|x| x.as_u64()),
+            outgoing_interval: parse_interval("outgoing"),
             incoming_packet_length: matches
-                .get_one::<u16>("incoming_packet_length")
-                .unwrap()
-                .clone(),
-            incoming_packet_interval: matches
-                .get_one::<u64>("incoming_packet_interval")
-                .unwrap()
-                .clone(),
+                .get_one::<bytesize::ByteSize>("incoming_packet_length")
+                .map(|x| x.as_u64()),
+            incoming_interval: parse_interval("incoming"),
         }
     }
 }
@@ -72,6 +113,7 @@ pub(crate) struct CommonConfiguration {
     pub(crate) pre_shared_key: Vec<u8>,
     pub(crate) listen_addr: String,
     pub(crate) tun_name: String,
+    pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
 }
@@ -93,6 +135,10 @@ impl EzClap for CommonConfiguration {
 		.long("tun-name")
 		.default_value(DEFAULT_TUN_NAME)
 		.help("Name of the TUN device to use or create"),
+            Arg::new("tun_mtu")
+                .long("tun-mtu")
+                .value_parser(value_parser!(u16))
+                .help("MTU for the TUN device. It's okay for this to be larger than the packet length; I405 will fragment and reassemble packets as necessary. Defaults to the system default, usually 1500. I405 does not make any attempt to calculate the max TUN MTU such that the wrapped packets can also be sent out in one I405 packet; setting tun mtu to be substantially less than 1500 (eg, 1400) should be enough, and may improve latency a bit. However, because I405 tries to pack multiple wrapped packets into I405 packets, even a smaller MTU does not guarantee that sent packets will not be fragmented by I405."),
 	    Arg::new("tun_ipv4")
 		.long("tun-ipv4")
 		.help("IPv4 address (optionally with netmask) to automatically assign and route to the TUN device."),
@@ -108,8 +154,10 @@ impl EzClap for CommonConfiguration {
                 .get_one::<Vec<u8>>("pre_shared_key")
                 .unwrap()
                 .clone(),
+            // TODO rename to bind_addr so it makes more sense on the client?
             listen_addr: matches.get_one::<String>("listen_addr").unwrap().clone(),
             tun_name: matches.get_one::<String>("tun_name").unwrap().clone(),
+            tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
         }
@@ -137,6 +185,13 @@ impl EzClap for ClientConfiguration {
         result
     }
 
+    fn to_groups() -> Vec<ArgGroup> {
+        let mut result = Vec::new();
+        result.extend(CommonConfiguration::to_groups());
+        result.extend(WireConfiguration::to_groups());
+        result
+    }
+
     fn from_match(matches: &ArgMatches) -> Self {
         Self {
             common_configuration: CommonConfiguration::from_match(matches),
@@ -159,6 +214,10 @@ pub(crate) struct ServerConfiguration {
 impl EzClap for ServerConfiguration {
     fn to_args() -> Vec<Arg> {
         CommonConfiguration::to_args()
+    }
+
+    fn to_groups() -> Vec<ArgGroup> {
+        CommonConfiguration::to_groups()
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
@@ -186,11 +245,15 @@ enum_dispatch! {
 }
 
 fn client_command() -> Command {
-    Command::new("client").args(ClientConfiguration::to_args())
+    Command::new("client")
+        .args(ClientConfiguration::to_args())
+        .groups(ClientConfiguration::to_groups())
 }
 
 fn server_command() -> Command {
-    Command::new("server").args(ServerConfiguration::to_args())
+    Command::new("server")
+        .args(ServerConfiguration::to_args())
+        .groups(ServerConfiguration::to_groups())
 }
 
 fn main_command() -> Command {

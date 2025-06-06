@@ -7,9 +7,8 @@ use crate::{
     hardware::{self, Hardware},
     messages::{self, DeserializeMessageErr, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
+    wire_config::WireConfig,
 };
-
-use super::WireConfig;
 
 use thiserror::Error;
 
@@ -311,7 +310,7 @@ fn next_outgoing_timer(wire_config: &WireConfig, timestamp: u64) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::core::WireConfig;
+    use crate::wire_config::WireConfig;
 
     #[test]
     fn next_outgoing_timestamp() {

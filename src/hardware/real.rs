@@ -33,6 +33,7 @@ impl RealHardware {
     pub(crate) fn new(
         listen_addr: SocketAddr,
         tun_name: String,
+        tun_mtu: Option<u16>,
         tun_ipv4_net: Option<ipnet::Ipv4Net>,
         tun_ipv6_net: Option<ipnet::Ipv6Net>,
     ) -> std::io::Result<Self> {
@@ -59,6 +60,9 @@ impl RealHardware {
         let incoming_read_socket = socket.clone();
 
         let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_name);
+        if let Some(mtu) = tun_mtu {
+            tun_builder = tun_builder.mtu(mtu);
+        }
         if let Some(ipv4_net) = tun_ipv4_net {
             tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
         }

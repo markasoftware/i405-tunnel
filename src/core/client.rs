@@ -4,10 +4,10 @@ use declarative_enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::array_array::IpPacketBuffer;
-use crate::core::{
-    C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, WireConfig,
-};
+use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::hardware::{self, Hardware};
+use crate::utils::ns_to_str;
+use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
 use super::established_connection;
@@ -183,6 +183,13 @@ impl ConnectionStateTrait for NoConnection {
     ) -> Result<ConnectionState> {
         let (new_negotiation, packets_to_send, next_timeout) =
             self.negotiation.has_timed_out(hardware.timestamp())?;
+        log::warn!(
+            "DTLS handshake timeout. Will try again in {}. Is the server running?",
+            // unfortunate hackery to get integer seconds
+            ns_to_str(
+                (next_timeout - hardware.timestamp() + 1_000_000) / 1_000_000_000 * 1_000_000_000
+            )
+        );
         Self::from_triple(
             config,
             hardware,

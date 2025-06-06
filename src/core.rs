@@ -20,14 +20,6 @@ const C2S_RETRANSMIT_TIMEOUT: u64 = 1_000_000_000;
 const C2S_MAX_RETRANSMITS: u32 = 4;
 const C2S_MAX_TIMEOUT: u64 = 60_000_000_000;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct WireConfig {
-    pub(crate) packet_length: u16,
-    pub(crate) packet_interval: u64,
-    // packets will be sent when (epoch_time - packet_interval_offset) % packet_interval == 0
-    pub(crate) packet_interval_offset: u64,
-}
-
 enum_dispatch! {
     pub(crate) trait Core {
         fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);

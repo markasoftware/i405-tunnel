@@ -4,10 +4,10 @@ use declarative_enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::{
-    core::WireConfig,
     dtls,
     hardware::{self, Hardware},
     messages,
+    wire_config::WireConfig,
 };
 
 use super::{

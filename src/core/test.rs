@@ -5,18 +5,19 @@ use crate::array_array::IpPacketBuffer;
 use crate::constants::DTLS_HEADER_LENGTH;
 use crate::core;
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware};
+use crate::wire_config::WireConfig;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 const PSK: &[u8] = b"password";
-const DEFAULT_C2S_WIRE_CONFIG: core::WireConfig = core::WireConfig {
+const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 1_423_000, // 1.423ms
     packet_interval_offset: 0,
 };
-const DEFAULT_S2C_WIRE_CONFIG: core::WireConfig = core::WireConfig {
+const DEFAULT_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 1_411_000, // 1.411ms
     packet_interval_offset: 0,
@@ -35,8 +36,8 @@ fn server_addr() -> SocketAddr {
 }
 
 fn simulated_pair(
-    c2s_wire_config: core::WireConfig,
-    s2c_wire_config: core::WireConfig,
+    c2s_wire_config: WireConfig,
+    s2c_wire_config: WireConfig,
     default_delay: u64,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
     let mut simulated_hardware =
@@ -164,7 +165,7 @@ fn wan_packet_length() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
-    let wan_packet_length: usize = DTLS_HEADER_LENGTH
+    let wan_packet_length: usize = usize::from(DTLS_HEADER_LENGTH)
         .checked_add(DEFAULT_PACKET_LENGTH.into())
         .unwrap();
 
