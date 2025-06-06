@@ -21,19 +21,22 @@ fn main() {
     let common_config = configuration.common_configuration();
 
     let mut hardware = hardware::real::RealHardware::new(
-        common_config.listen_addr.parse().unwrap(),
+        common_config
+            .listen_addr
+            .parse()
+            .expect("Failed to parse listen address"),
         common_config.tun_name.clone(),
         common_config.tun_mtu,
         common_config
             .tun_ipv4
             .as_ref()
-            .map(|ipv4| ipv4.parse().unwrap()),
+            .map(|ipv4| ipv4.parse().expect("Failed to parse TUN IPv4 addr")),
         common_config
             .tun_ipv6
             .as_ref()
-            .map(|ipv6| ipv6.parse().unwrap()),
+            .map(|ipv6| ipv6.parse().expect("Failed to parse TUN IPv6 addr")),
     )
-    .unwrap();
+    .expect("Failed to create tun and socket; are you root?");
 
     let mut core = match &configuration {
         config::Configuration::Client(client_configuration) => {
@@ -50,7 +53,8 @@ fn main() {
                 pre_shared_key: common_config.pre_shared_key.clone(),
             };
             core::ConcreteCore::Client(
-                core::client::Core::new(client_config, &mut hardware).unwrap(),
+                core::client::Core::new(client_config, &mut hardware)
+                    .expect("Failed to create client core"),
             )
         }
         config::Configuration::Server(_) => {
@@ -58,7 +62,8 @@ fn main() {
                 pre_shared_key: common_config.pre_shared_key.clone(),
             };
             core::ConcreteCore::Server(
-                core::server::Core::new(server_config, &mut hardware).unwrap(),
+                core::server::Core::new(server_config, &mut hardware)
+                    .expect("Failed to create server core"),
             )
         }
     };
