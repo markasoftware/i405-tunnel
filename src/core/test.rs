@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use test_case::test_matrix;
+
 const PSK: &[u8] = b"password";
 const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
@@ -20,6 +22,16 @@ const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
 const DEFAULT_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 1_411_000, // 1.411ms
+    packet_interval_offset: 0,
+};
+const LONGER_C2S_WIRE_CONFIG: WireConfig = WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval: 142_300_000, // 142.3ms
+    packet_interval_offset: 0,
+};
+const LONGER_S2C_WIRE_CONFIG: WireConfig = WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval: 141_100_000, // 141.1ms
     packet_interval_offset: 0,
 };
 
@@ -348,6 +360,51 @@ fn drop_and_reorder() {
     assert_eq!(server_incoming_packets.len(), 1);
     assert_eq!(&client_incoming_packets[0].buffer[..], &[4, 3, 2, 1]);
     assert_eq!(&server_incoming_packets[0].buffer[..], &[1, 4, 0, 5]);
+}
+
+// Test to ensure that we can handle a handshake packet in established mode
+#[test_matrix(0..10, 0..10)]
+fn long_distance_reorder(which_packet_reorder: u64, which_packet_drop: u64) {
+    #[cfg(feature = "wolfssl-debug")]
+    wolfssl::enable_debugging(true);
+
+    setup_logging();
+    // TODO factor out the hardware and core creation into something where we can pass in a lambda doing delays
+    let mut simulated_hardware =
+        SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
+    simulated_hardware.drop_packet(which_packet_reorder);
+    if which_packet_reorder != which_packet_drop {
+        simulated_hardware.drop_packet(which_packet_drop);
+    }
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: LONGER_C2S_WIRE_CONFIG,
+            s2c_wire_config: LONGER_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    simulated_hardware.run_until(&mut cores, ms(1500.0));
+    std::thread::sleep(Duration::from_millis(1010));
+    simulated_hardware.run_until(&mut cores, ms(4000.0));
+    // send a packet to ensure we are actually in established mode
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.run_until(&mut cores, ms(5000.0));
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
 }
 
 // TODO more tests:

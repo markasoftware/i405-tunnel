@@ -221,8 +221,18 @@ impl EstablishedConnection {
         hardware: &mut H,
         packet: &[u8],
     ) -> Result<()> {
-        let cleartext_packet = self.session.decrypt_datagram(packet)?;
-        self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)
+        match self.session.decrypt_datagram(packet) {
+            dtls::DecryptResult::Decrypted(cleartext_packet) => {
+                self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)
+            }
+            dtls::DecryptResult::SendThese(send_these) => {
+                for packet in send_these {
+                    hardware.send_outgoing_packet(&packet, self.peer, None)?;
+                }
+                Ok(())
+            }
+            dtls::DecryptResult::Err(err) => Err(err.into()),
+        }
     }
 
     pub(crate) fn on_read_incoming_cleartext_packet<H: Hardware>(

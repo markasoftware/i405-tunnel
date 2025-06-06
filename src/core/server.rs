@@ -426,7 +426,16 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     ) -> Result<ConnectionState> {
         assert!(peer == self.peer, "handshake peer was not as expected");
 
-        let cleartext_packet = self.session.decrypt_datagram(packet)?;
+        let cleartext_packet = match self.session.decrypt_datagram(packet) {
+            dtls::DecryptResult::Decrypted(cleartext_packet) => cleartext_packet,
+            dtls::DecryptResult::SendThese(send_these) => {
+                for packet in send_these {
+                    hardware.send_outgoing_packet(&packet, self.peer, None)?;
+                }
+                return Ok(ConnectionState::InProtocolHandshake(self));
+            }
+            dtls::DecryptResult::Err(err) => return Err(err.into()),
+        };
 
         let mut read_cursor = messages::ReadCursor::new(cleartext_packet.clone());
 

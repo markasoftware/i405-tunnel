@@ -184,7 +184,7 @@ impl ConnectionStateTrait for NoConnection {
         let (new_negotiation, packets_to_send, next_timeout) =
             self.negotiation.has_timed_out(hardware.timestamp())?;
         log::warn!(
-            "DTLS handshake timeout. Will try again in {}. Is the server running?",
+            "DTLS handshake timeout, retrying now. Next timeout in {}. Is the server running?",
             // unfortunate hackery to get integer seconds
             ns_to_str(
                 (next_timeout - hardware.timestamp() + 1_000_000) / 1_000_000_000 * 1_000_000_000
@@ -251,9 +251,11 @@ impl C2SHandshakeSent {
         session: dtls::EstablishedSession,
     ) -> Result<C2SHandshakeSent> {
         hardware.clear_event_listeners();
+        let next_timeout_instant = hardware.timestamp() + C2S_RETRANSMIT_TIMEOUT;
+        hardware.set_timer(next_timeout_instant);
         let mut result = C2SHandshakeSent {
             session,
-            next_timeout_instant: hardware.timestamp() + C2S_RETRANSMIT_TIMEOUT,
+            next_timeout_instant,
             current_timeout_interval: C2S_RETRANSMIT_TIMEOUT,
             num_timeouts_happened: 0,
         };
@@ -290,10 +292,9 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         hardware: &mut impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
-        // TODO log seconds instea of ns
         log::warn!(
-            "In-protocol handshake timeout; we sent C2S handshake {}ns ago and received no response, trying again.",
-            self.current_timeout_interval
+            "In-protocol handshake timeout; we sent C2S handshake {} ago and received no response, trying again.",
+            ns_to_str(self.current_timeout_interval),
         );
         self.send_one_handshake(config, hardware)?;
         if self.num_timeouts_happened >= C2S_MAX_RETRANSMITS {
@@ -338,7 +339,16 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
-        let cleartext_packet = self.session.decrypt_datagram(&packet)?;
+        let cleartext_packet = match self.session.decrypt_datagram(&packet) {
+            dtls::DecryptResult::Decrypted(cleartext_packet) => cleartext_packet,
+            dtls::DecryptResult::SendThese(send_these) => {
+                for packet in send_these {
+                    hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
+                }
+                return Ok(ConnectionState::C2SHandshakeSent(self));
+            }
+            dtls::DecryptResult::Err(err) => return Err(err.into()),
+        };
         // It really should be an S2C handshake. The server shouldn't send us anything but an
         // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
         // so we can't get anything out-of-order here.

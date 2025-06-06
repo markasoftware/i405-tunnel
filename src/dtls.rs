@@ -248,6 +248,12 @@ impl EstablishedSession {
         }
     }
 
+    fn add_written_packet(&mut self, vec: &mut Vec<IpPacketBuffer>) {
+        if let Some(last_sent_packet) = self.underlying.io_cb_mut().pop_last_sent_packet() {
+            vec.push(last_sent_packet);
+        }
+    }
+
     // TODO consider writing the result to an &mut [u8] argument instead
 
     // TODO investigate whether wolfssl supports putting multiple dtls messages into the same
@@ -255,26 +261,68 @@ impl EstablishedSession {
     // message/packet
 
     /// Call try_read on the underlying session, and return the cleartext bytes.
-    pub(crate) fn decrypt_datagram(
-        &mut self,
-        ciphertext_packet: &[u8],
-    ) -> std::result::Result<IpPacketBuffer, wolfssl::Error> {
+    pub(crate) fn decrypt_datagram(&mut self, ciphertext_packet: &[u8]) -> DecryptResult {
         self.underlying
             .io_cb_mut()
             .set_next_packet_to_receive(ciphertext_packet);
         let mut result = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
-        match self.underlying.try_read_slice(result.as_mut())? {
-            wolfssl::Poll::Ready(len) => {
-                // TODO verify that len is what we expect it to be
-                result.shrink(len);
-                Ok(result)
+        let mut written_packets = Vec::new();
+        loop {
+            match self.underlying.try_read_slice(result.as_mut()) {
+                Ok(wolfssl::Poll::Ready(len)) => {
+                    self.add_written_packet(&mut written_packets);
+
+                    if len > 0 {
+                        assert!(
+                            written_packets.is_empty(),
+                            "DTLS state error during decryption: We have packets to write, but also successfully decrypted something. A packet shouldn't be able to be decrypted but also trigger additional writes."
+                        );
+                        result.shrink(len);
+                        return DecryptResult::Decrypted(result);
+                    }
+
+                    // len == 0
+                    return DecryptResult::SendThese(written_packets);
+                }
+                Ok(wolfssl::Poll::PendingRead) => {
+                    self.add_written_packet(&mut written_packets);
+                    log::warn!(
+                        "PendingRead during decryption with {} packets to send -- retransmitted handshake packet? Or someone sending us random invalid packets",
+                        written_packets.len()
+                    );
+                    return DecryptResult::SendThese(written_packets);
+                }
+                Ok(wolfssl::Poll::PendingWrite) => {
+                    log::warn!("PendingWrite during decryption -- retransmitted handshake packet?");
+                    self.add_written_packet(&mut written_packets);
+                }
+                Ok(wolfssl::Poll::AppData(_)) => {
+                    // TODO this shouldn't panic, just return an error
+                    panic!("Unexpected AppData during decryption");
+                }
+                // TODO as it stands, we might have inconsistent internal state on error, so our
+                // caller has to discard the session object. Can someone random (even accidentally)
+                // send us udp packets that would cause wolfssl errors and effectively reset the
+                // session?
+                Err(err) => return DecryptResult::Err(err),
             }
-            poll_result => panic!(
-                "try_read should always complete immediately, but got {:#?}",
-                poll_result
-            ),
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum DecryptResult {
+    Decrypted(IpPacketBuffer),
+    /// An old packet from the handshake was received which demands a response. This can happen
+    /// eg if the server thinks the handshake is done, but the client didn't get the final ack,
+    /// so asks again.
+    // yes, this means allocating during the established connection. But I'm more recently of the
+    // opinion that it doesn't matter that much, and this should only happen in practice within a
+    // few seconds of the initial handshake. IDK if it's possible for an attacker to replay
+    // handshake packets to force us to allocate memory but also we're not trying to be secure
+    // against on-path read-write attackers.
+    SendThese(Vec<IpPacketBuffer>),
+    Err(wolfssl::Error),
 }
 
 #[derive(Debug)]
@@ -338,7 +386,7 @@ impl wolfssl::IOCallbacks for IOCallbacks {
 
 #[cfg(test)]
 mod test {
-    use crate::array_array::IpPacketBuffer;
+    use crate::{array_array::IpPacketBuffer, dtls::DecryptResult};
 
     use super::{EstablishedSession, NegotiateResult, NegotiatingSession};
 
@@ -434,7 +482,10 @@ mod test {
         //// CLIENT -> SERVER APPLICATION DATA ////
         let msg = b"howdy howdy lil cutie";
         let c2s_packet = client.encrypt_datagram(msg).unwrap();
-        let roundtripped = server.decrypt_datagram(&c2s_packet).unwrap();
+        let roundtripped = match server.decrypt_datagram(&c2s_packet) {
+            DecryptResult::Decrypted(decrypted) => decrypted,
+            _ => panic!(),
+        };
         assert_eq!(
             &roundtripped[..],
             msg,
@@ -444,7 +495,10 @@ mod test {
         //// SERVER -> CLIENT APPLICATION DATA ////
         let msg2 = b"im buying weed on the internet";
         let s2c_packet = server.encrypt_datagram(msg2).unwrap();
-        let roundtripped2 = client.decrypt_datagram(&s2c_packet).unwrap();
+        let roundtripped2 = match client.decrypt_datagram(&s2c_packet) {
+            DecryptResult::Decrypted(decrypted) => decrypted,
+            _ => panic!(),
+        };
         assert_eq!(
             &roundtripped2[..],
             msg2,

@@ -19,6 +19,9 @@ tun-rs = "2"
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 
+[dev-dependencies]
+test-case = "3"
+
 [features]
 wolfssl-debug = ["wolfssl/debug"]
 jumbo-packets = []
