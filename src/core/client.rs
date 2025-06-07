@@ -237,7 +237,6 @@ impl ConnectionStateTrait for NoConnection {
 #[derive(Debug)]
 struct C2SHandshakeSent {
     session: dtls::EstablishedSession,
-    next_timeout_instant: u64,
     /// how long between the last timeout and `next_timeout_instant` (to compute backoff)
     current_timeout_interval: u64,
     /// How many times we've timed out
@@ -255,7 +254,6 @@ impl C2SHandshakeSent {
         hardware.set_timer(next_timeout_instant);
         let mut result = C2SHandshakeSent {
             session,
-            next_timeout_instant,
             current_timeout_interval: C2S_RETRANSMIT_TIMEOUT,
             num_timeouts_happened: 0,
         };
@@ -268,7 +266,6 @@ impl C2SHandshakeSent {
         let c2s_handshake = messages::ClientToServerHandshake {
             protocol_version: PROTOCOL_VERSION,
             oldest_compatible_protocol_version: OLDEST_COMPATIBLE_PROTOCOL_VERSION,
-            // TODO split out the WireConfig class and have it be a field on the message
             s2c_packet_length: config.s2c_wire_config.packet_length,
             s2c_packet_interval: config.s2c_wire_config.packet_interval,
         };
@@ -314,12 +311,11 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             .checked_mul(2)
             .unwrap()
             .clamp(0, C2S_MAX_TIMEOUT);
-        // TODO do we actually need this as a field? can a local variable do?
-        self.next_timeout_instant = hardware
+        let next_timeout_instant = hardware
             .timestamp()
             .checked_add(self.current_timeout_interval)
             .unwrap();
-        hardware.set_timer(self.next_timeout_instant);
+        hardware.set_timer(next_timeout_instant);
         Ok(ConnectionState::C2SHandshakeSent(self))
     }
 

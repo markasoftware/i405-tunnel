@@ -408,6 +408,71 @@ fn long_distance_reorder(which_packet_reorder: u64) {
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
 }
 
+// Test one client connecting with the wrong password, and another who starts later, with the
+// correct password, the second one should win.
+#[test]
+fn multiple_ongoing_negotiations() {
+    setup_logging();
+    let evil_client_addr = "10.140.5.10:1405".parse().unwrap();
+    let good_client_addr = "10.140.5.20:1405".parse().unwrap();
+    let mut simulated_hardware = SimulatedHardware::new(
+        vec![good_client_addr, evil_client_addr, server_addr()],
+        ms(1.0),
+    );
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let evil_client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: "wrong password".into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(evil_client_addr),
+    )
+    .unwrap();
+    let noop_core = core::noop::Core::new(&mut simulated_hardware.hardware(good_client_addr));
+    let mut cores = BTreeMap::from([
+        (evil_client_addr, evil_client_core.into()),
+        (good_client_addr, noop_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    // should be partway through the negotiation by now
+    simulated_hardware.run_until(&mut cores, ms(4.0));
+
+    let good_client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(good_client_addr),
+    )
+    .unwrap();
+    cores.insert(good_client_addr, good_client_core.into());
+    simulated_hardware.run_until(&mut cores, ms(15.0));
+
+    // ensure that we can communicate on the good core
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.run_until(&mut cores, ms(20.0));
+    assert_eq!(
+        simulated_hardware.incoming_packets(&good_client_addr).len(),
+        1
+    );
+    assert!(
+        simulated_hardware
+            .incoming_packets(&evil_client_addr)
+            .is_empty()
+    );
+}
+
 // TODO more tests:
 // + Multiple clients doing DTLS handshakes simultaneously, whoever finishes first gets the prize
 // + DTLS handshake from a client when another client already has an established connection

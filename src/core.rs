@@ -6,6 +6,7 @@ use crate::hardware::Hardware;
 
 pub(crate) mod client;
 mod established_connection;
+pub(crate) mod noop;
 pub(crate) mod server;
 #[cfg(test)]
 mod test;
@@ -20,6 +21,7 @@ const C2S_RETRANSMIT_TIMEOUT: u64 = 1_000_000_000;
 const C2S_MAX_RETRANSMITS: u32 = 4;
 const C2S_MAX_TIMEOUT: u64 = 60_000_000_000;
 
+// Core is not dyn-compatible because it's generic on Hardware
 enum_dispatch! {
     pub(crate) trait Core {
         fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);
@@ -35,5 +37,6 @@ enum_dispatch! {
     pub(crate) enum ConcreteCore {
         Client(client::Core),
         Server(server::Core),
+        NoOp(noop::Core)
     }
 }

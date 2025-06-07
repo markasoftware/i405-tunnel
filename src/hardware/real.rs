@@ -353,7 +353,6 @@ fn precise_sleep(wake_at: Instant) {
 
 impl Hardware for RealHardware {
     fn timestamp(&self) -> u64 {
-        // TODO evaluate whether the system clock going backward could cause problems.
         Instant::now()
             .duration_since(self.epoch)
             .as_nanos()
