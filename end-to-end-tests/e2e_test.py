@@ -176,8 +176,8 @@ def main() -> None:
              "./target/debug/i405-tunnel", "client", "--peer", f"{SERVER_VETH_IP}:1405",
              "--password", "password", "--tun-name", "i405-client-tun",
              "--tun-ipv4", f"{CLIENT_TUN_IP}/24", "--outgoing-packet-length", "1000",
-             "--outgoing-packet-interval", str(PACKET_INTERVAL_NS), "--incoming-packet-length", "1000",
-             "--incoming-packet-interval", "100000000"],
+             "--outgoing-packet-interval", f"{PACKET_INTERVAL_NS}ns", "--incoming-packet-length", "1000",
+             "--incoming-packet-interval", f"{PACKET_INTERVAL_NS}ns"],
         )
         time.sleep(0.5) # wait for handshake
 

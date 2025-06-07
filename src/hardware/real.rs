@@ -21,14 +21,17 @@ pub(crate) struct RealHardware {
     timer: Option<u64>,
     socket: Arc<UdpSocket>,
 
-    events_rx: mpsc::Receiver<Event>,
-
     outgoing_read_thread: ChannelThread<OutgoingReadRequest>,
     outgoing_send_thread: ChannelThread<OutgoingSend>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
     incoming_read_thread: ChannelThread<()>,
     incoming_send_thread: ChannelThread<IncomingSend>,
+
+    // events_rx should be listed after the threads, because if it's dropped before the threads are
+    // dropped, then the threads may try to send to their events_txs after the receiver has been
+    // dropped, and get errors.
+    events_rx: mpsc::Receiver<Event>,
 }
 
 impl RealHardware {

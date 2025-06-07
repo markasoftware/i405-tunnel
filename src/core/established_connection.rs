@@ -17,7 +17,7 @@ use thiserror::Error;
 /// be delayed due to high system load and not be sent at the right time, but setting it higher
 /// could increase latency because read packets may be unnecessarily delayed to the next packet.
 // TODO ensure there are no issues when this is greater than the inter-packet interval
-const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 100_000;
+const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 1_000_000;
 
 type Result<T> = std::result::Result<T, Error>;
 
