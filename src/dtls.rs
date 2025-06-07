@@ -368,6 +368,7 @@ fn terminate(
     loop {
         match session.try_shutdown() {
             Ok(wolfssl::Poll::Ready(is_ready)) => {
+                add_written_packet(&mut session, &mut written_packets);
                 if is_ready {
                     log::error!(
                         "Got successful bidirectional shutdown even though we don't send close_notify? Maybe race condition with other side shutting down?"
@@ -377,7 +378,6 @@ fn terminate(
                     !written_packets.is_empty(),
                     "Shutdown didn't cause any packets to be sent"
                 );
-                add_written_packet(&mut session, &mut written_packets);
                 return Ok(written_packets);
             }
             Ok(wolfssl::Poll::PendingRead) => return Err(TerminateError::PendingRead),
@@ -570,6 +570,15 @@ mod test {
             msg2,
             "Roundtripped should equal original msg (server->client)"
         );
+
+        //// CLIENT -> SERVER TERMINATION ////
+        let c2s_packets = client.terminate().unwrap();
+        // it should fit in one packet
+        assert_eq!(c2s_packets.len(), 1);
+        match server.decrypt_datagram(&c2s_packets[0]) {
+            DecryptResult::Terminated => (),
+            _ => panic!(),
+        }
     }
 
     #[test]
