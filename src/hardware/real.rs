@@ -326,10 +326,9 @@ fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket:
                         if err.kind() == std::io::ErrorKind::WouldBlock {
                             // this is fairly normal, just make we aren't somehow in fully non-blocking mode.
                             let now = Instant::now();
-                            assert!(
-                                now - last_block > SOCKET_READ_TIMEOUT / 8,
-                                "WouldBlock too frequently!"
-                            );
+                            if now.saturating_duration_since(last_block) < SOCKET_READ_TIMEOUT / 8 {
+                                log::error!("WouldBlock too frequently!");
+                            }
                             last_block = now;
                         } else {
                             log::error!("Incoming read error (from udp socket): {err:?}");
