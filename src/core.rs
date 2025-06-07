@@ -32,6 +32,7 @@ enum_dispatch! {
             recv_timestamp: u64,
         );
         fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr);
+        fn on_terminate(self, hardware: &mut impl Hardware);
     }
 
     pub(crate) enum ConcreteCore {

@@ -4,6 +4,7 @@ use declarative_enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::{
+    core::established_connection::IsConnectionOpen,
     dtls,
     hardware::{self, Hardware},
     messages,
@@ -71,6 +72,12 @@ impl super::Core for Core {
             state.on_read_incoming_packet(&self.config, hardware, packet, peer)
         });
     }
+
+    fn on_terminate(self, hardware: &mut impl Hardware) {
+        if let Err(err) = self.state.unwrap().on_terminate(hardware) {
+            log::error!("Error while terminating: {err:?}")
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, ConnectionStateError>;
@@ -85,6 +92,8 @@ pub(crate) enum ConnectionStateError {
     IOErr(#[from] std::io::Error),
     #[error("New session DTLS error: {0}")]
     NewSessionErr(#[from] dtls::NewSessionError),
+    #[error("termination error: {0}")]
+    Terminate(#[from] dtls::TerminateError),
     #[error("wolfSSL error: {0}")]
     WolfErr(#[from] wolfssl::Error),
     #[error("hardware error: {0}")]
@@ -135,6 +144,7 @@ enum_dispatch! {
             packet: &[u8],
             peer: SocketAddr,
         ) -> Result<ConnectionState>;
+        fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()>;
     }
 
     #[derive(Debug)]
@@ -310,6 +320,11 @@ impl ServerConnectionStateTrait for NoConnection {
                             });
                         }
                     }
+                    dtls::NegotiateResult::Terminated => {
+                        log::info!(
+                            "DTLS negotiation with {peer} ended because the peer terminated the connection normally."
+                        );
+                    }
                     dtls::NegotiateResult::Err(err) => {
                         log::error!(
                             "DTLS negotiation with {} failed during make_progress: {:?}",
@@ -326,6 +341,27 @@ impl ServerConnectionStateTrait for NoConnection {
         Ok(ConnectionState::NoConnection(NoConnection {
             negotiations: new_negotiations,
         }))
+    }
+
+    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+        for negotiation in self.negotiations {
+            let peer = negotiation.peer.clone();
+            match negotiation.session.terminate() {
+                Ok(send_these) => {
+                    for packet in send_these {
+                        hardware
+                            .send_outgoing_packet(&packet, peer, None)
+                            .unwrap_or_else(|err| {
+                                log::error!(
+                                    "Error sending packet during termination for {peer}: {err:?}"
+                                )
+                            });
+                    }
+                }
+                Err(err) => log::error!("Error terminating connection for {peer}: {err:?}"),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -434,6 +470,9 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 }
                 return Ok(ConnectionState::InProtocolHandshake(self));
             }
+            dtls::DecryptResult::Terminated => {
+                return Ok(ConnectionState::NoConnection(NoConnection::new(hardware)));
+            }
             dtls::DecryptResult::Err(err) => return Err(err.into()),
         };
 
@@ -472,13 +511,28 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 );
                 let mut established_connection =
                     EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
-                established_connection
-                    .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
-                Ok(ConnectionState::EstablishedConnection(
-                    established_connection,
-                ))
+                match established_connection
+                    .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?
+                {
+                    IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(
+                        established_connection,
+                    )),
+                    IsConnectionOpen::No => {
+                        log::info!(
+                            "The client terminated the connection immediately after handshake -- weird, but ok. Resetting state to NoConnection"
+                        );
+                        Ok(ConnectionState::NoConnection(NoConnection::new(hardware)))
+                    }
+                }
             }
         }
+    }
+
+    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+        for packet in self.session.terminate()? {
+            hardware.send_outgoing_packet(&packet, self.peer, None)?;
+        }
+        Ok(())
     }
 }
 
@@ -517,8 +571,23 @@ impl ServerConnectionStateTrait for EstablishedConnection {
             self.peer(),
             "should only be receiving from the correct peer once established"
         );
-        EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
-        Ok(ConnectionState::EstablishedConnection(self))
+        match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)? {
+            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
+            IsConnectionOpen::No => {
+                log::info!(
+                    "Client terminated connection normally -- returning to NoConnection state"
+                );
+                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)))
+            }
+        }
+    }
+
+    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+        let peer = self.peer();
+        for packet in EstablishedConnection::on_terminate_inner(self)? {
+            hardware.send_outgoing_packet(&packet, peer, None)?;
+        }
+        Ok(())
     }
 }
 

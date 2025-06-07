@@ -38,7 +38,7 @@ fn main() {
     )
     .expect("Failed to create tun and socket; are you root?");
 
-    let mut core = match &configuration {
+    let core = match &configuration {
         config::Configuration::Client(client_configuration) => {
             // TODO do DNS resolving so we can use domains
             let peer: std::net::SocketAddr = client_configuration
@@ -69,5 +69,5 @@ fn main() {
     };
 
     log::info!("Starting I405");
-    hardware.run(&mut core);
+    hardware.run(core);
 }

@@ -367,7 +367,7 @@ fn drop_and_reorder() {
 // TODO test drops not just reorders, weird problems occur
 #[test_matrix(0..20)]
 #[ignore]
-#[cfg(FALSE)]
+#[cfg(any())]
 fn long_distance_reorder(which_packet_reorder: u64) {
     #[cfg(feature = "wolfssl-debug")]
     wolfssl::enable_debugging(true);

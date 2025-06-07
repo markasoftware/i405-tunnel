@@ -38,4 +38,6 @@ impl super::Core for Core {
         _peer: SocketAddr,
     ) {
     }
+
+    fn on_terminate(self, _hardware: &mut impl Hardware) {}
 }

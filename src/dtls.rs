@@ -33,6 +33,12 @@ impl std::fmt::Debug for NegotiatingSession {
     }
 }
 
+fn add_written_packet(session: &mut wolfssl::Session<IOCallbacks>, vec: &mut Vec<IpPacketBuffer>) {
+    if let Some(last_sent_packet) = session.io_cb_mut().pop_last_sent_packet() {
+        vec.push(last_sent_packet);
+    }
+}
+
 impl NegotiatingSession {
     /// Construct a new client, and also returns the initial handshake packets that should be sent and the first timeout.
     pub(crate) fn new_client(
@@ -51,6 +57,7 @@ impl NegotiatingSession {
             NegotiateResult::NeedRead(new_session, packets, next_timeout) => {
                 Ok((new_session, packets, next_timeout))
             }
+            NegotiateResult::Terminated => Err(NewSessionError::TerminatedImmediately),
             NegotiateResult::Err(e) => Err(NewSessionError::from(e)),
         }
     }
@@ -64,12 +71,6 @@ impl NegotiatingSession {
         Ok(NegotiatingSession {
             underlying: session,
         })
-    }
-
-    fn add_written_packet(&mut self, vec: &mut Vec<IpPacketBuffer>) {
-        if let Some(last_sent_packet) = self.underlying.io_cb_mut().pop_last_sent_packet() {
-            vec.push(last_sent_packet);
-        }
     }
 
     /// Negotiate as far as we can. Pass in the most recently read packet off the network. If we
@@ -90,19 +91,25 @@ impl NegotiatingSession {
 
         loop {
             match self.underlying.try_negotiate() {
+                Err(wolfssl::Error::Fatal(wolfssl::ErrorKind::PeerClosed)) => {
+                    log::info!("Remote peer terminated DTLS connection (during negotiation).");
+                    return NegotiateResult::Terminated;
+                }
                 Err(err) => return NegotiateResult::Err(NegotiateError::WolfError(err)),
                 // We don't use secure renegotiation, so this shouldn't happen!
                 Ok(wolfssl::Poll::AppData(_)) => {
                     return NegotiateResult::Err(NegotiateError::UnexpectedAppData);
                 }
-                Ok(wolfssl::Poll::PendingWrite) => self.add_written_packet(&mut written_packets),
+                Ok(wolfssl::Poll::PendingWrite) => {
+                    add_written_packet(&mut self.underlying, &mut written_packets)
+                }
                 Ok(wolfssl::Poll::PendingRead) => {
-                    self.add_written_packet(&mut written_packets);
+                    add_written_packet(&mut self.underlying, &mut written_packets);
                     let next_timeout = self.next_timeout(timestamp);
                     return NegotiateResult::NeedRead(self, written_packets, next_timeout);
                 }
                 Ok(wolfssl::Poll::Ready(())) => {
-                    self.add_written_packet(&mut written_packets);
+                    add_written_packet(&mut self.underlying, &mut written_packets);
                     return NegotiateResult::Ready(
                         EstablishedSession {
                             underlying: self.underlying,
@@ -134,8 +141,12 @@ impl NegotiatingSession {
         let mut written_packets = Vec::new();
 
         match self.underlying.dtls_has_timed_out() {
-            wolfssl::Poll::Ready(false) => self.add_written_packet(&mut written_packets),
-            wolfssl::Poll::PendingWrite => self.add_written_packet(&mut written_packets),
+            wolfssl::Poll::Ready(false) => {
+                add_written_packet(&mut self.underlying, &mut written_packets)
+            }
+            wolfssl::Poll::PendingWrite => {
+                add_written_packet(&mut self.underlying, &mut written_packets)
+            }
             wolfssl::Poll::PendingRead => {
                 return Err(NegotiateError::PendingReadDuringTimeout);
             }
@@ -157,8 +168,13 @@ impl NegotiatingSession {
                 written_packets.extend(later_written_packets);
                 Ok((new_session, written_packets, timeout))
             }
+            NegotiateResult::Terminated => Err(NegotiateError::NegotiationTerminatedDuringTimeout),
             NegotiateResult::Err(e) => Err(e),
         }
+    }
+
+    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+        terminate(self.underlying)
     }
 }
 
@@ -173,6 +189,8 @@ pub(crate) enum NewSessionError {
     NegotiateError(#[from] NegotiateError),
     #[error("Negotiation was reported as complete immediately upon session creation??")]
     ReadyImmediately,
+    #[error("Negotiation was terminated immediately upon session creation??")]
+    TerminatedImmediately,
 }
 
 #[derive(Error, Debug)]
@@ -188,6 +206,18 @@ pub(crate) enum NegotiateError {
     PendingReadDuringTimeout,
     #[error("Negotiation finished during timeout processing???")]
     NegotiationReadyDuringTimeout,
+    #[error("Negotiation terminated during timeout???")]
+    NegotiationTerminatedDuringTimeout,
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum TerminateError {
+    #[error("WolfSSL error {0:?}")]
+    Wolf(#[from] wolfssl::Error),
+    #[error("Unexpected AppData during termination")]
+    AppData,
+    #[error("Tried to read during termination")]
+    PendingRead,
 }
 
 #[derive(Debug)]
@@ -196,6 +226,8 @@ pub(crate) enum NegotiateResult {
     Ready(EstablishedSession, Vec<IpPacketBuffer>),
     /// Send these packets, then read more packets and get back to us. Last tuple element is the timeout timestamp.
     NeedRead(NegotiatingSession, Vec<IpPacketBuffer>, u64),
+    /// The connection was terminated normally by the other side.
+    Terminated,
     Err(NegotiateError),
 }
 
@@ -248,12 +280,6 @@ impl EstablishedSession {
         }
     }
 
-    fn add_written_packet(&mut self, vec: &mut Vec<IpPacketBuffer>) {
-        if let Some(last_sent_packet) = self.underlying.io_cb_mut().pop_last_sent_packet() {
-            vec.push(last_sent_packet);
-        }
-    }
-
     // TODO consider writing the result to an &mut [u8] argument instead
 
     // TODO investigate whether wolfssl supports putting multiple dtls messages into the same
@@ -270,7 +296,7 @@ impl EstablishedSession {
         loop {
             match self.underlying.try_read_slice(result.as_mut()) {
                 Ok(wolfssl::Poll::Ready(len)) => {
-                    self.add_written_packet(&mut written_packets);
+                    add_written_packet(&mut self.underlying, &mut written_packets);
 
                     if len > 0 {
                         assert!(
@@ -285,7 +311,7 @@ impl EstablishedSession {
                     return DecryptResult::SendThese(written_packets);
                 }
                 Ok(wolfssl::Poll::PendingRead) => {
-                    self.add_written_packet(&mut written_packets);
+                    add_written_packet(&mut self.underlying, &mut written_packets);
                     log::warn!(
                         "PendingRead during decryption with {} packets to send -- retransmitted handshake packet? Or someone sending us random invalid packets",
                         written_packets.len()
@@ -294,11 +320,15 @@ impl EstablishedSession {
                 }
                 Ok(wolfssl::Poll::PendingWrite) => {
                     log::warn!("PendingWrite during decryption -- retransmitted handshake packet?");
-                    self.add_written_packet(&mut written_packets);
+                    add_written_packet(&mut self.underlying, &mut written_packets);
                 }
                 Ok(wolfssl::Poll::AppData(_)) => {
-                    // TODO this shouldn't panic, just return an error
+                    // TODO this shouldn't panic, just return an error. Waiting until we switch to anyhow.
                     panic!("Unexpected AppData during decryption");
+                }
+                Err(wolfssl::Error::Fatal(wolfssl::ErrorKind::PeerClosed)) => {
+                    log::info!("Remote peer terminated normally");
+                    return DecryptResult::Terminated;
                 }
                 // TODO as it stands, we might have inconsistent internal state on error, so our
                 // caller has to discard the session object. Can someone random (even accidentally)
@@ -307,6 +337,10 @@ impl EstablishedSession {
                 Err(err) => return DecryptResult::Err(err),
             }
         }
+    }
+
+    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+        terminate(self.underlying)
     }
 }
 
@@ -322,7 +356,39 @@ pub(crate) enum DecryptResult {
     // handshake packets to force us to allocate memory but also we're not trying to be secure
     // against on-path read-write attackers.
     SendThese(Vec<IpPacketBuffer>),
+    /// Connection terminated normally by peer
+    Terminated,
     Err(wolfssl::Error),
+}
+
+fn terminate(
+    mut session: wolfssl::Session<IOCallbacks>,
+) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+    let mut written_packets = Vec::new();
+    loop {
+        match session.try_shutdown() {
+            Ok(wolfssl::Poll::Ready(is_ready)) => {
+                if is_ready {
+                    log::error!(
+                        "Got successful bidirectional shutdown even though we don't send close_notify? Maybe race condition with other side shutting down?"
+                    );
+                }
+                assert!(
+                    !written_packets.is_empty(),
+                    "Shutdown didn't cause any packets to be sent"
+                );
+                add_written_packet(&mut session, &mut written_packets);
+                return Ok(written_packets);
+            }
+            Ok(wolfssl::Poll::PendingRead) => return Err(TerminateError::PendingRead),
+            Ok(wolfssl::Poll::PendingWrite) => {
+                add_written_packet(&mut session, &mut written_packets)
+            }
+            // TODO
+            Ok(wolfssl::Poll::AppData(_)) => return Err(TerminateError::AppData),
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 #[derive(Debug)]

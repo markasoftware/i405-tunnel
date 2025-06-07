@@ -59,7 +59,7 @@ impl OutgoingConnection {
         }
     }
 
-    fn new_scheduled(hardware: &mut impl Hardware) -> Self {
+    fn new_scheduled(_hardware: &mut impl Hardware) -> Self {
         unimplemented!();
     }
 
@@ -216,11 +216,13 @@ impl EstablishedConnection {
         );
     }
 
+    /// Returns an error if something unexpected happened, vs Ok(IsConnectionOpen::No) means the
+    /// other side terminated the connection normally in this packet.
     pub(crate) fn on_read_incoming_packet<H: Hardware>(
         &mut self,
         hardware: &mut H,
         packet: &[u8],
-    ) -> Result<()> {
+    ) -> Result<IsConnectionOpen> {
         match self.session.decrypt_datagram(packet) {
             dtls::DecryptResult::Decrypted(cleartext_packet) => {
                 self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)
@@ -229,8 +231,9 @@ impl EstablishedConnection {
                 for packet in send_these {
                     hardware.send_outgoing_packet(&packet, self.peer, None)?;
                 }
-                Ok(())
+                Ok(IsConnectionOpen::Yes)
             }
+            dtls::DecryptResult::Terminated => Ok(IsConnectionOpen::No),
             dtls::DecryptResult::Err(err) => Err(err.into()),
         }
     }
@@ -239,7 +242,7 @@ impl EstablishedConnection {
         &mut self,
         hardware: &mut H,
         packet: &[u8],
-    ) -> Result<()> {
+    ) -> Result<IsConnectionOpen> {
         let mut cursor = messages::ReadCursor::new(packet);
         while messages::has_message(&cursor) {
             let msg = cursor.read()?;
@@ -273,14 +276,29 @@ impl EstablishedConnection {
                 }
             }
         }
-        Ok(())
+        Ok(IsConnectionOpen::Yes)
     }
+
+    // When I name this just `on_terminate`, there's a conflict with the name of the same method
+    // defined on EstablishedConnection as part of the connection state traits. This is likely a bug
+    // with the declarative_enum_dispatch crate. Not sure why it doesn't affect the other methods.
+    pub(crate) fn on_terminate_inner(self) -> Result<Vec<IpPacketBuffer>> {
+        Ok(self.session.terminate()?)
+    }
+}
+
+#[must_use]
+pub(crate) enum IsConnectionOpen {
+    Yes,
+    No,
 }
 
 #[derive(Error, Debug)]
 pub(crate) enum Error {
     #[error("Error deserializing message: {0:?}")]
     DeserializeMessage(#[from] DeserializeMessageErr),
+    #[error("Error terminating connection: {0:?}")]
+    Terminate(#[from] dtls::TerminateError),
     #[error("std::io::Error {0:?}")]
     IO(#[from] std::io::Error),
     #[error("wolfssl error {0:?}")]

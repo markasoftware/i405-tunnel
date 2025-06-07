@@ -53,7 +53,8 @@ impl RealHardware {
 
         let (events_tx, events_rx) = mpsc::channel();
         let tx_for_outgoing_read_thread = events_tx.clone();
-        let tx_for_incoming_read_thread = events_tx;
+        let tx_for_incoming_read_thread = events_tx.clone();
+        let tx_for_signal_handler = events_tx;
 
         let socket = Arc::new(UdpSocket::bind(listen_addr)?);
         let outgoing_send_socket = socket.clone();
@@ -74,6 +75,12 @@ impl RealHardware {
         let incoming_send_tun = tun;
 
         let epoch = Instant::now();
+
+        ctrlc::set_handler(move || {
+            log::info!("Shutting down I405 due to received signal");
+            tx_for_signal_handler.send(Event::Terminate).unwrap();
+        })
+        .expect("Error installing signal handlers");
 
         Ok(Self {
             epoch,
@@ -111,27 +118,21 @@ impl RealHardware {
 
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
-    pub(crate) fn run(&mut self, core: &mut impl core::Core) {
+    pub(crate) fn run(&mut self, mut core: impl core::Core) {
         loop {
             // we don't do precise sleep for timers, because everything time-sensitive that the Core
             // does is done via timestamps on other core methods. It's never important that the core
             // itself do something at a precise timestamp.
 
-            // Always use `recv_timeout` so that we can handle SIGINT in a timely fashion.
-            let max_timeout_duration_from_now = Duration::from_secs(1);
             // only set if the user requested a timer, /and/ that timer is short enough that we're
             // actually able to use it.
-            let user_timeout_duration_from_now = self.timer.and_then(|timer| {
-                let dur = self
-                    .epoch
+            let timeout_duration_from_now = self.timer.map(|timer| {
+                self.epoch
                     .checked_add(Duration::from_nanos(timer))
                     .unwrap()
-                    .saturating_duration_since(Instant::now());
-                (dur <= max_timeout_duration_from_now).then_some(dur)
+                    .saturating_duration_since(Instant::now())
             });
-            let timeout_duration_from_now =
-                user_timeout_duration_from_now.unwrap_or(max_timeout_duration_from_now);
-            if timeout_duration_from_now == Duration::ZERO {
+            if timeout_duration_from_now == Some(Duration::ZERO) {
                 log::warn!(
                     "Timer set in the past? Timer set for {}, current ns since epoch is {}",
                     self.timer.unwrap(),
@@ -141,7 +142,14 @@ impl RealHardware {
                         .as_nanos()
                 );
             }
-            match self.events_rx.recv_timeout(timeout_duration_from_now) {
+            let event_or_timeout = match timeout_duration_from_now {
+                Some(duration) => self.events_rx.recv_timeout(duration),
+                None => self
+                    .events_rx
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match event_or_timeout {
                 Ok(Event::OutgoingRead {
                     timestamp,
                     packet,
@@ -160,11 +168,10 @@ impl RealHardware {
                 Ok(Event::IncomingRead { addr, packet }) => {
                     core.on_read_incoming_packet(self, &packet, addr);
                 }
+                Ok(Event::Terminate) => return core.on_terminate(self),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if user_timeout_duration_from_now.is_some() {
-                        let activated_timer = std::mem::take(&mut self.timer);
-                        core.on_timer(self, activated_timer.unwrap());
-                    }
+                    let activated_timer = std::mem::take(&mut self.timer);
+                    core.on_timer(self, activated_timer.unwrap());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     panic!("events_rx shouldn't disconnect as long as the RealHardware lives.")
@@ -201,14 +208,14 @@ impl Drop for JThread {
 // close, giving us a fully RAII-based cooperative thread closing mechanism.
 struct ChannelThread<TX> {
     tx: mpsc::Sender<TX>,
-    jthread: JThread,
+    _jthread: JThread,
 }
 
 impl<TX> ChannelThread<TX> {
     fn spawn<F: FnOnce() -> () + Send + 'static>(tx: mpsc::Sender<TX>, f: F) -> Self {
         Self {
             tx,
-            jthread: JThread::spawn(f),
+            _jthread: JThread::spawn(f),
         }
     }
 }
@@ -239,6 +246,7 @@ enum Event {
         addr: SocketAddr,
         packet: IpPacketBuffer,
     },
+    Terminate,
 }
 
 fn outgoing_read_thread(

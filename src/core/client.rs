@@ -10,7 +10,7 @@ use crate::utils::ns_to_str;
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
-use super::established_connection;
+use super::established_connection::{self, IsConnectionOpen};
 use super::{C2S_MAX_RETRANSMITS, C2S_MAX_TIMEOUT, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
@@ -67,11 +67,17 @@ impl super::Core for Core {
         &mut self,
         hardware: &mut impl Hardware,
         packet: &[u8],
-        peer: SocketAddr,
+        _peer: SocketAddr,
     ) {
         replace_state_with_result(&mut self.state, |state| {
             state.on_read_incoming_packet(&self.config, hardware, packet)
         });
+    }
+
+    fn on_terminate(self, hardware: &mut impl Hardware) {
+        if let Err(err) = self.state.unwrap().on_terminate(&self.config, hardware) {
+            log::error!("Error while terminating connection: {:?}", err);
+        }
     }
 }
 
@@ -89,21 +95,22 @@ enum_dispatch! {
             hardware: &mut impl Hardware,
             packet: &[u8],
         recv_timestamp: u64,
-    ) -> Result<ConnectionState>;
-    fn on_read_incoming_packet(
-        self,
-        config: &Config,
-        hardware: &mut impl Hardware,
-        packet: &[u8],
-    ) -> Result<ConnectionState>;
-}
+        ) -> Result<ConnectionState>;
+        fn on_read_incoming_packet(
+            self,
+            config: &Config,
+            hardware: &mut impl Hardware,
+            packet: &[u8],
+        ) -> Result<ConnectionState>;
+        fn on_terminate(self, config: &Config, hardware: &mut impl Hardware) -> Result<()>;
+    }
 
-#[derive(Debug)]
-enum ConnectionState {
-    NoConnection(NoConnection),
-    C2SHandshakeSent(C2SHandshakeSent),
-    EstablishedConnection(EstablishedConnection),
-}
+    #[derive(Debug)]
+    enum ConnectionState {
+        NoConnection(NoConnection),
+        C2SHandshakeSent(C2SHandshakeSent),
+        EstablishedConnection(EstablishedConnection),
+    }
 }
 
 #[derive(Error, Debug)]
@@ -114,6 +121,8 @@ pub(crate) enum ConnectionStateError {
     Hardware(#[from] hardware::Error),
     #[error("DTLS new session error: {0}")]
     NewSession(#[from] dtls::NewSessionError),
+    #[error("DTLS Terminate error: {0}")]
+    Terminate(#[from] dtls::TerminateError),
     #[error("Error deserializing a message: {0}")]
     DeserializeMessage(#[from] messages::DeserializeMessageErr),
     // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
@@ -229,8 +238,18 @@ impl ConnectionStateTrait for NoConnection {
                 Self::from_triple(config, hardware, session, &to_send, timeout)
                     .map(ConnectionState::NoConnection)
             }
+            dtls::NegotiateResult::Terminated => Ok(ConnectionState::NoConnection(
+                NoConnection::new(config, hardware)?,
+            )),
             dtls::NegotiateResult::Err(err) => Err(ConnectionStateError::Negotiate(err)),
         }
+    }
+
+    fn on_terminate(self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
+        for packet in self.negotiation.terminate()? {
+            hardware.send_outgoing_packet(&packet[..], config.peer_address, None)?;
+        }
+        Ok(())
     }
 }
 
@@ -343,6 +362,11 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                 }
                 return Ok(ConnectionState::C2SHandshakeSent(self));
             }
+            dtls::DecryptResult::Terminated => {
+                return Ok(ConnectionState::NoConnection(NoConnection::new(
+                    config, hardware,
+                )?));
+            }
             dtls::DecryptResult::Err(err) => return Err(err.into()),
         };
         // It really should be an S2C handshake. The server shouldn't send us anything but an
@@ -395,6 +419,13 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             other_msg => Err(ConnectionStateError::S2CHandshakeWasnt(Box::new(other_msg))),
         }
     }
+
+    fn on_terminate(self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
+        for packet in self.session.terminate()? {
+            hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
+        }
+        Ok(())
+    }
 }
 
 impl ConnectionStateTrait for EstablishedConnection {
@@ -421,12 +452,30 @@ impl ConnectionStateTrait for EstablishedConnection {
 
     fn on_read_incoming_packet(
         mut self,
-        _config: &Config,
+        config: &Config,
         hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
-        EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
-        Ok(ConnectionState::EstablishedConnection(self))
+        match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)? {
+            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
+            IsConnectionOpen::No => {
+                // TODO this should be handled by some global policy on whether to retry or shut
+                // down after errors, rather than always retrying by resetting to NoConnection.
+                log::info!(
+                    "Server terminated connection normally -- it probably shut down. Will attempt new connection."
+                );
+                return Ok(ConnectionState::NoConnection(NoConnection::new(
+                    config, hardware,
+                )?));
+            }
+        }
+    }
+
+    fn on_terminate(self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
+        for packet in EstablishedConnection::on_terminate_inner(self)? {
+            hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
+        }
+        Ok(())
     }
 }
 
