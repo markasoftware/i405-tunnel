@@ -587,7 +587,6 @@ fn server_termination_and_reconnect() {
 }
 
 // TODO more tests:
-// + Multiple clients doing DTLS handshakes simultaneously, whoever finishes first gets the prize
 // + DTLS handshake from a client when another client already has an established connection
 // + Packet drops and timeouts, esp. during in-protocol handshake (could theoretically abstract the in-protocol handshake even more in order to make it more openssl-like and then test it more isolated-ly, but it's simpler not to for now)
 // + Packet finalization time (ie, submitted to hardware with the right buffer before they /need/ to be sent)
@@ -596,6 +595,5 @@ fn server_termination_and_reconnect() {
 //   - DTLS handshake messages during in-protocol and established, and in-protocol handshake messages during established.
 //   - After server disconnect/reconnect, messages from the previous connection. These should fail DTLS decryption.
 //   - C2S post-handshake messages arriving before handshake (shouldn't actually crash it)
-// + Server disconnecting and reconnecting to a new client.
 // + Differing protocol versions
 // + Deserialization failures

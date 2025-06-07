@@ -8,6 +8,8 @@ use crate::{
     array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, core, hardware::Hardware,
 };
 
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
+
 pub(crate) struct RealHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
@@ -57,6 +59,9 @@ impl RealHardware {
         let tx_for_signal_handler = events_tx;
 
         let socket = Arc::new(UdpSocket::bind(listen_addr)?);
+        socket
+            .set_read_timeout(Some(SOCKET_READ_TIMEOUT))
+            .expect("Failed to set UDP socket read timeout");
         let outgoing_send_socket = socket.clone();
         let incoming_read_socket = socket.clone();
 
@@ -278,6 +283,7 @@ fn outgoing_read_thread(
             Err(err) => log::error!("Outgoing read error (from tun): {err:?}"),
         }
     }
+    log::trace!("outgoing read thread quitting");
 }
 
 fn outgoing_send_thread(rx: mpsc::Receiver<OutgoingSend>, socket: Arc<UdpSocket>, epoch: Instant) {
@@ -298,9 +304,11 @@ fn outgoing_send_thread(rx: mpsc::Receiver<OutgoingSend>, socket: Arc<UdpSocket>
             Err(err) => log::error!("Outgoing send error (to udp socket): {err:?}"),
         }
     }
+    log::trace!("outgoing send thread quitting");
 }
 
 fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket: Arc<UdpSocket>) {
+    let mut last_block = Instant::now().checked_sub(SOCKET_READ_TIMEOUT).unwrap();
     // keep reading packets until the channel disconnects
     loop {
         match rx.try_recv() {
@@ -314,11 +322,24 @@ fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket:
                         tx.send(Event::IncomingRead { addr, packet: buf }).unwrap();
                     }
                     // TODO somehow signal the error more seriously?
-                    Err(err) => log::error!("Incoming read error (from udp socket): {err:?}"),
+                    Err(err) => {
+                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                            // this is fairly normal, just make we aren't somehow in fully non-blocking mode.
+                            let now = Instant::now();
+                            assert!(
+                                now - last_block > SOCKET_READ_TIMEOUT / 8,
+                                "WouldBlock too frequently!"
+                            );
+                            last_block = now;
+                        } else {
+                            log::error!("Incoming read error (from udp socket): {err:?}");
+                        }
+                    }
                 }
             }
         }
     }
+    log::trace!("incoming read thread quitting");
 }
 
 fn incoming_send_thread(
@@ -343,6 +364,7 @@ fn incoming_send_thread(
             Err(err) => log::error!("Incoming send error (over tun): {err:?}"),
         }
     }
+    log::trace!("incoming send thread quitting");
 }
 
 fn precise_sleep(wake_at: Instant) {

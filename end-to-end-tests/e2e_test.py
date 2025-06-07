@@ -267,6 +267,9 @@ def main() -> None:
 
         cleanup() # Always clean up network namespaces and interfaces
 
+    # TODO test that SIGINT to the server shuts it down. But this might have to wait until we've
+    # decided exactly what behavior we /want/
+
     print("End-to-end test completed successfully.")
 
 if __name__ == "__main__":
