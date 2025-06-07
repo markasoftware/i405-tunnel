@@ -461,9 +461,6 @@ impl ConnectionStateTrait for EstablishedConnection {
             IsConnectionOpen::No => {
                 // TODO this should be handled by some global policy on whether to retry or shut
                 // down after errors, rather than always retrying by resetting to NoConnection.
-                log::info!(
-                    "Server terminated connection normally -- it probably shut down. Will attempt new connection."
-                );
                 return Ok(ConnectionState::NoConnection(NoConnection::new(
                     config, hardware,
                 )?));

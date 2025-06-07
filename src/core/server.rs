@@ -518,9 +518,6 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                         established_connection,
                     )),
                     IsConnectionOpen::No => {
-                        log::info!(
-                            "The client terminated the connection immediately after handshake -- weird, but ok. Resetting state to NoConnection"
-                        );
                         Ok(ConnectionState::NoConnection(NoConnection::new(hardware)))
                     }
                 }

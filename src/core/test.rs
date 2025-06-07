@@ -3,7 +3,7 @@
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
 use crate::constants::DTLS_HEADER_LENGTH;
-use crate::core;
+use crate::core::{self, Core};
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware};
 use crate::wire_config::WireConfig;
 
@@ -471,6 +471,119 @@ fn multiple_ongoing_negotiations() {
             .incoming_packets(&evil_client_addr)
             .is_empty()
     );
+}
+
+#[test]
+fn client_termination_and_reconnect() {
+    setup_logging();
+    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    // send a packet just to ensure it actually establishes connection the first time.
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.run_until(&mut cores, ms(2.0));
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+
+    let original_client_core = cores.insert(
+        client_addr(),
+        core::noop::Core::new(&mut simulated_hardware.hardware(client_addr())).into(),
+    );
+    original_client_core
+        .unwrap()
+        .on_terminate(&mut simulated_hardware.hardware(client_addr()));
+    let new_client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    cores.insert(client_addr(), new_client_core.into());
+
+    simulated_hardware.run_until(&mut cores, ms(2.001));
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
+    simulated_hardware.run_until(&mut cores, ms(4.0));
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
+}
+
+#[test]
+fn server_termination_and_reconnect() {
+    setup_logging();
+    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    // send a packet just to ensure it actually establishes connection the first time.
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.run_until(&mut cores, ms(2.0));
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+
+    let original_server_core = cores.insert(
+        server_addr(),
+        core::noop::Core::new(&mut simulated_hardware.hardware(server_addr())).into(),
+    );
+    original_server_core
+        .unwrap()
+        .on_terminate(&mut simulated_hardware.hardware(server_addr()));
+    let new_server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    cores.insert(server_addr(), new_server_core.into());
+
+    // whether the simulated core will process incoming or outgoing packets first is indeterminate,
+    // and if it processes this outgoing packet first, then it will start preparing a packet to fire
+    // off, then immediately discard it. So we want to wait to enqueue any packets until the new
+    // connection is made.
+    simulated_hardware.run_until(&mut cores, ms(2.001));
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
+    simulated_hardware.run_until(&mut cores, ms(4.0));
+    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
 }
 
 // TODO more tests:
