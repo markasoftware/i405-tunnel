@@ -16,7 +16,7 @@ ipnet = "2"
 log = "0.4"
 mtu = "0.2.9"
 thiserror = "2"
-tun-rs = "2"
+tun-rs = { version = "2", features = [ "experimental"] }
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 

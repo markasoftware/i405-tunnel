@@ -1,6 +1,6 @@
 use std::{
     net::{SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket},
-    sync::{Arc, mpsc},
+    sync::{Arc, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
 
@@ -20,6 +20,8 @@ pub(crate) struct RealHardware {
 
     timer: Option<u64>,
     socket: Arc<UdpSocket>,
+    tun: Arc<tun_rs::SyncDevice>,
+    tun_is_shutdown: Arc<AtomicBool>,
 
     outgoing_read_thread: ChannelThread<OutgoingReadRequest>,
     outgoing_send_thread: ChannelThread<OutgoingSend>,
@@ -79,8 +81,10 @@ impl RealHardware {
             tun_builder = tun_builder.ipv6(ipv6_net.addr(), ipv6_net.netmask());
         }
         let tun = Arc::new(tun_builder.build_sync()?);
-        let outgoing_read_tun = tun.clone();
-        let incoming_send_tun = tun;
+        let tun_for_outgoing_read_thread = tun.clone();
+        let incoming_send_tun = tun.clone();
+        let tun_is_shutdown = Arc::new(AtomicBool::new(false));
+        let tun_is_shutdown_for_outgoing_read_thread = tun_is_shutdown.clone();
 
         let epoch = Instant::now();
 
@@ -97,6 +101,8 @@ impl RealHardware {
 
             timer: None,
             socket,
+            tun,
+            tun_is_shutdown,
 
             events_rx,
 
@@ -104,7 +110,8 @@ impl RealHardware {
                 outgoing_read_thread(
                     outgoing_read_requests_rx,
                     tx_for_outgoing_read_thread,
-                    outgoing_read_tun,
+                    tun_for_outgoing_read_thread,
+                    tun_is_shutdown_for_outgoing_read_thread,
                     epoch,
                 )
             }),
@@ -189,6 +196,18 @@ impl RealHardware {
     }
 }
 
+// HACK: The outgoing read thread does a blocking `recv` on the tun, and there's no way to add a
+// timeout. We could get the fd out of the tun, and then poll it using the `nix` package. However,
+// we avoid an extra dependency by just shutting down the TUN, which at least on my system does
+// cause the recv to be interrupted.
+impl Drop for RealHardware {
+    fn drop(&mut self) {
+        self.tun_is_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.tun.shutdown().expect("Error closing TUN");
+    }
+}
+
 /// Automatically joins thread on drop.
 struct JThread {
     join_handle: Option<std::thread::JoinHandle<()>>,
@@ -261,6 +280,7 @@ fn outgoing_read_thread(
     read_request_rx: mpsc::Receiver<OutgoingReadRequest>,
     tx: mpsc::Sender<Event>,
     tun: Arc<tun_rs::SyncDevice>,
+    tun_is_shutdown: Arc<AtomicBool>,
     epoch: Instant,
 ) {
     while let Ok(read_request) = read_request_rx.recv() {
@@ -283,7 +303,14 @@ fn outgoing_read_thread(
                     return;
                 }
             }
-            Err(err) => log::error!("Outgoing read error (from tun): {err:?}"),
+            Err(err) => {
+                // if we are shutting down, ignore ConnectionAborted error -- that's normal.
+                if !(err.kind() == std::io::ErrorKind::ConnectionAborted
+                    && tun_is_shutdown.load(std::sync::atomic::Ordering::SeqCst))
+                {
+                    log::error!("Outgoing read error (from tun): {err:?}");
+                }
+            }
         }
     }
     log::trace!("outgoing read thread quitting");
