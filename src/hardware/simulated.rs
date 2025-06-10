@@ -2,6 +2,8 @@ use std::cmp::min;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 
+use anyhow::Result;
+
 use crate::array_array::IpPacketBuffer;
 use crate::core::Core;
 use crate::{core, hardware::Hardware};
@@ -247,8 +249,11 @@ impl SimulatedHardware {
                     if timestamp >= incoming_packet.receipt_timestamp {
                         let incoming_packet = peer.unread_incoming_packets.pop().unwrap();
                         self.debug(format!(
-                            "Reading incoming packet on {}, from {}, at {}ns",
-                            addr, incoming_packet.source, timestamp
+                            "Reading incoming packet of size {} on {}, from {}, at {}ns",
+                            incoming_packet.buffer.len(),
+                            addr,
+                            incoming_packet.source,
+                            timestamp
                         ));
                         assert_eq!(
                             incoming_packet.receipt_timestamp, timestamp,
@@ -320,7 +325,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
         packet: &[u8],
         destination: SocketAddr,
         timestamp: Option<u64>,
-    ) -> super::Result<()> {
+    ) -> Result<()> {
         let packet_counter = self.simulated.packet_counter;
         self.simulated.packet_counter += 1;
 
@@ -376,7 +381,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
         Ok(())
     }
 
-    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> super::Result<()> {
+    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()> {
         assert!(
             self.our_side()
                 .sent_incoming_packets
@@ -393,12 +398,12 @@ impl<'a> Hardware for OneSideHardware<'a> {
         Ok(())
     }
 
-    fn socket_connect(&mut self, _socket_addr: &SocketAddr) -> super::Result<()> {
+    fn socket_connect(&mut self, _socket_addr: &SocketAddr) -> Result<()> {
         unimplemented!("TODO");
     }
 
     // TODO rethink this fn more generally: Should it perhaps be part of clear_event_listeners?
-    fn socket_disconnect(&mut self) -> super::Result<()> {
+    fn socket_disconnect(&mut self) -> Result<()> {
         unimplemented!("TODO");
     }
 

@@ -1,6 +1,6 @@
 mod ip_packet;
 
-use thiserror::Error;
+use anyhow::{Result, anyhow, bail};
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
@@ -119,14 +119,14 @@ impl serdes::Serializable for ClientToServerHandshake {
 }
 
 impl serdes::Deserializable for ClientToServerHandshake {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         deserialize_type_byte!(read_cursor);
 
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
-            return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
+            bail!(
+                "Wrong magic value in handshake message: Got {magic_value:#x}, wanted {MAGIC_VALUE:#x}"
+            );
         }
 
         // If this is not an exact match between client/server, we cannot even proceed with
@@ -134,9 +134,9 @@ impl serdes::Deserializable for ClientToServerHandshake {
         // not to clutter the limited space of available types.
         let serdes_version: u32 = read_cursor.read()?;
         if serdes_version != SERDES_VERSION {
-            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(
-                serdes_version,
-            ));
+            bail!(
+                "Unsupported serdes version; peer has {serdes_version}, but we have {SERDES_VERSION}"
+            );
         }
 
         Ok(ClientToServerHandshake {
@@ -176,22 +176,22 @@ impl serdes::Serializable for ServerToClientHandshake {
 }
 
 impl serdes::Deserializable for ServerToClientHandshake {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         deserialize_type_byte!(read_cursor);
 
         let magic_value: u32 = read_cursor.read()?;
         if magic_value != MAGIC_VALUE {
-            return Err(DeserializeMessageErr::WrongMagicValue(magic_value));
+            bail!(
+                "Wrong magic value in handshake message: Got {magic_value:#x}, wanted {MAGIC_VALUE:#x}"
+            );
         }
 
         // TODO do we really need to check in this direction?
         let serdes_version: u32 = read_cursor.read()?;
         if serdes_version != SERDES_VERSION {
-            return Err(DeserializeMessageErr::UnsupportedSerdesVersion(
-                serdes_version,
-            ));
+            bail!(
+                "Unsupported serdes version; peer has {serdes_version}, but we have {SERDES_VERSION}"
+            );
         }
 
         Ok(ServerToClientHandshake {
@@ -201,29 +201,11 @@ impl serdes::Deserializable for ServerToClientHandshake {
     }
 }
 
-#[derive(Error, Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeserializeMessageErr {
-    #[error("Unknown message type byte: {0}")]
-    UnknownMessageType(MessageType),
-    #[error("Truncated message of type TODO")]
-    Truncated(Option<MessageType>),
-    #[error("Invalid bool byte {0:#x}")]
-    InvalidBool(u8),
-    #[error("Unsupported serdes version; peer has {0}, but we have {serdes_version}", serdes_version = SERDES_VERSION)]
-    UnsupportedSerdesVersion(u32),
-    #[error("Wrong magic value in handshake message: Got {0}, wanted {magic_value}", magic_value = MAGIC_VALUE)]
-    WrongMagicValue(u32),
-    #[error("Unknown IP packet flags. Got {0:#x}")]
-    UnknownIPFlagBytes(u8),
-}
-
 impl serdes::Deserializable for Message {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         let message_type = match read_cursor.peek_exact_comptime::<1>() {
             Some(message_type_bytes) => message_type_bytes[0],
-            None => return Err(DeserializeMessageErr::Truncated(None)),
+            None => bail!("Truncated message"),
         };
         assert!(
             message_type != 0,
@@ -240,7 +222,7 @@ impl serdes::Deserializable for Message {
             };
         }
         deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; IpPacket; IpPacketFragment);
-        Err(DeserializeMessageErr::UnknownMessageType(message_type))
+        Err(anyhow!("Unknown message type byte: {message_type:#x}"))
     }
 }
 
@@ -319,7 +301,7 @@ where
         }
     }
 
-    pub(crate) fn read<D: serdes::Deserializable>(&mut self) -> Result<D, DeserializeMessageErr> {
+    pub(crate) fn read<D: serdes::Deserializable>(&mut self) -> Result<D> {
         D::deserialize(self)
     }
 }
@@ -368,7 +350,8 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 mod serdes {
     use crate::array_array::ArrayArray;
 
-    use crate::messages::{DeserializeMessageErr, ReadCursor, WriteCursor};
+    use crate::messages::{ReadCursor, WriteCursor};
+    use anyhow::{Result, anyhow};
 
     pub(crate) trait Serializer {
         fn serialize(&mut self, data: &[u8]);
@@ -442,33 +425,27 @@ mod serdes {
     {
         // could theoretically make this more generic than just ReadCursor, just like how Serialize
         // is generic over Serializers, but let's not do it until we need it.
-        fn deserialize<T: AsRef<[u8]>>(
-            read_cursor: &mut ReadCursor<T>,
-        ) -> Result<Self, DeserializeMessageErr>;
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self>;
     }
 
     impl<const C: usize> Deserializable for ArrayArray<u8, C> {
-        fn deserialize<T: AsRef<[u8]>>(
-            read_cursor: &mut ReadCursor<T>,
-        ) -> Result<Self, DeserializeMessageErr> {
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
             let len: SerializedArrayArrayLength = read_cursor.read()?;
             Ok(Self::new(
                 read_cursor
                     .read_exact_runtime(len.into())
-                    .ok_or(DeserializeMessageErr::Truncated(None))?,
+                    .ok_or(anyhow!("Truncated message"))?,
             ))
         }
     }
 
     impl Deserializable for bool {
-        fn deserialize<T: AsRef<[u8]>>(
-            read_cursor: &mut ReadCursor<T>,
-        ) -> Result<Self, DeserializeMessageErr> {
+        fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
             let byte: u8 = read_cursor.read()?;
             match byte {
                 0 => Ok(false),
                 1 => Ok(true),
-                _ => Err(DeserializeMessageErr::InvalidBool(byte)),
+                _ => Err(anyhow!("Invalid bool byte {byte:#x}")),
             }
         }
     }
@@ -484,12 +461,12 @@ mod serdes {
             impl Deserializable for $integral_type {
                 fn deserialize<T: AsRef<[u8]>>(
                     read_cursor: &mut ReadCursor<T>,
-                ) -> Result<$integral_type, DeserializeMessageErr> {
+                ) -> Result<$integral_type> {
                     // I keep getting syntax errors trying to inline this into the <...> below
                     const SIZE: usize = size_of::<$integral_type>();
                     let read_bytes = read_cursor
                         .read_exact_comptime::<SIZE>()
-                        .ok_or(DeserializeMessageErr::Truncated(None))?;
+                        .ok_or(anyhow!("Truncated message"))?;
                     Ok($integral_type::from_be_bytes(read_bytes))
                 }
             }
@@ -508,10 +485,11 @@ mod test {
         array_array::ArrayArray,
         constants::MAX_IP_PACKET_LENGTH,
         messages::{
-            ClientToServerHandshake, DeserializeMessageErr, MAGIC_VALUE, Message, PacketBuilder,
-            ReadCursor, SERDES_VERSION, ServerToClientHandshake, WriteCursor, has_message,
+            ClientToServerHandshake, MAGIC_VALUE, Message, PacketBuilder, ReadCursor,
+            SERDES_VERSION, ServerToClientHandshake, WriteCursor, has_message,
         },
     };
+    use anyhow::anyhow;
 
     pub(crate) fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
@@ -572,9 +550,15 @@ mod test {
             has_message(&read_cursor),
             "Should be a message to deserialize"
         );
-        assert!(
-            read_cursor.read::<Message>()
-                == Err(DeserializeMessageErr::WrongMagicValue(MAGIC_VALUE + 1)),
+        let err = read_cursor.read::<Message>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            anyhow!(
+                "Wrong magic value in handshake message: Got {:#x}, wanted {:#x}",
+                MAGIC_VALUE + 1,
+                MAGIC_VALUE
+            )
+            .to_string(),
             "Magic values should not match"
         );
     }
@@ -594,11 +578,15 @@ mod test {
             has_message(&read_cursor),
             "Should be a message to deserialize"
         );
-        assert!(
-            read_cursor.read::<Message>()
-                == Err(DeserializeMessageErr::UnsupportedSerdesVersion(
-                    SERDES_VERSION + 1
-                )),
+        let err = read_cursor.read::<Message>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            anyhow!(
+                "Unsupported serdes version; peer has {}, but we have {}",
+                SERDES_VERSION + 1,
+                SERDES_VERSION
+            )
+            .to_string(),
             "Serdes versions should not match"
         );
     }

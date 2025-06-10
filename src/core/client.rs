@@ -1,16 +1,16 @@
 use std::net::SocketAddr;
 
+use anyhow::{Result, bail};
 use declarative_enum_dispatch::enum_dispatch;
-use thiserror::Error;
 
 use crate::array_array::IpPacketBuffer;
 use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
-use crate::hardware::{self, Hardware};
+use crate::hardware::Hardware;
 use crate::utils::ns_to_str;
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
-use super::established_connection::{self, IsConnectionOpen};
+use super::established_connection::IsConnectionOpen;
 use super::{C2S_MAX_RETRANSMITS, C2S_MAX_TIMEOUT, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
@@ -113,37 +113,6 @@ enum_dispatch! {
     }
 }
 
-#[derive(Error, Debug)]
-pub(crate) enum ConnectionStateError {
-    #[error("DTLS Negotiation error: {0}")]
-    Negotiate(#[from] dtls::NegotiateError),
-    #[error("Hardware error: {0}")]
-    Hardware(#[from] hardware::Error),
-    #[error("DTLS new session error: {0}")]
-    NewSession(#[from] dtls::NewSessionError),
-    #[error("DTLS Terminate error: {0}")]
-    Terminate(#[from] dtls::TerminateError),
-    #[error("Error deserializing a message: {0}")]
-    DeserializeMessage(#[from] messages::DeserializeMessageErr),
-    // TODO we can map many of these types onto our own types. Maybe it's time to just use Anyhow :(
-    #[error("Established connection error: {0}")]
-    EstablishedConnection(#[from] established_connection::Error),
-    #[error("wolfSSL error: {0}")]
-    Wolf(#[from] wolfssl::Error),
-    #[error("S2C handshake indicated failure on the server-side. Remote protocol version: {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-    S2CHandshakeServer(u32),
-    #[error("The server sent an empty packet when it should have sent an S2C handshake")]
-    S2CHandshakeEmpty,
-    #[error("The server sent a different message instead of S2C handshake: {0:?}")]
-    S2CHandshakeWasnt(Box<messages::Message>),
-    #[error("There were other messages in the packet with the S2C handshake")]
-    S2CHandshakeNotAlone,
-    #[error("The server sent an incompatible protocol version, {0} (vs ours {protocol_version})", protocol_version = PROTOCOL_VERSION)]
-    S2CHandshakeIncompatibleProtocolVersion(u32),
-}
-
-type Result<T> = std::result::Result<T, ConnectionStateError>;
-
 #[derive(Debug)]
 struct NoConnection {
     negotiation: dtls::NegotiatingSession,
@@ -241,7 +210,7 @@ impl ConnectionStateTrait for NoConnection {
             dtls::NegotiateResult::Terminated => Ok(ConnectionState::NoConnection(
                 NoConnection::new(config, hardware)?,
             )),
-            dtls::NegotiateResult::Err(err) => Err(ConnectionStateError::Negotiate(err)),
+            dtls::NegotiateResult::Err(err) => Err(err),
         }
     }
 
@@ -376,7 +345,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         // TODO I'm not totally happy that we have to do `has_message` rather than being able to
         // use `read`
         if !messages::has_message(&read_cursor) {
-            return Err(ConnectionStateError::S2CHandshakeEmpty);
+            bail!("The server sent an empty packet when it should have sent an S2C handshake");
         }
 
         let message = read_cursor.read()?;
@@ -384,20 +353,22 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             messages::Message::ServerToClientHandshake(s2c_handshake) => {
                 // first, ensure there's nothing left in the cursor
                 if messages::has_message(&read_cursor) {
-                    return Err(ConnectionStateError::S2CHandshakeNotAlone);
+                    bail!("There were other messages in the packet with the S2C handshake");
                 }
 
                 if !s2c_handshake.success {
-                    return Err(ConnectionStateError::S2CHandshakeServer(
+                    bail!(
+                        "S2C handshake indicated failure on the server-side. Remote protocol version: {} (vs ours {})",
                         s2c_handshake.protocol_version,
-                    ));
+                        PROTOCOL_VERSION
+                    );
                 }
 
                 if s2c_handshake.protocol_version != PROTOCOL_VERSION {
-                    return Err(
-                        ConnectionStateError::S2CHandshakeIncompatibleProtocolVersion(
-                            s2c_handshake.protocol_version,
-                        ),
+                    bail!(
+                        "The server sent an incompatible protocol version, {} (vs ours {})",
+                        s2c_handshake.protocol_version,
+                        PROTOCOL_VERSION
                     );
                 }
 
@@ -416,7 +387,10 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                     )?,
                 ))
             }
-            other_msg => Err(ConnectionStateError::S2CHandshakeWasnt(Box::new(other_msg))),
+            other_msg => bail!(
+                "The server sent a different message instead of S2C handshake: {:?}",
+                other_msg
+            ),
         }
     }
 

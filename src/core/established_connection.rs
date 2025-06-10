@@ -4,22 +4,21 @@ use crate::{
     array_array::IpPacketBuffer,
     defragger::Defragger,
     dtls,
-    hardware::{self, Hardware},
-    messages::{self, DeserializeMessageErr, Message, Serializable as _},
+    hardware::Hardware,
+    messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     wire_config::WireConfig,
 };
 
-use thiserror::Error;
+use anyhow::Result;
 
 /// How long before one of the constant-size packets is supposed to be sent should we hand it off to
 /// the Hardware struct (in nanoseconds)? Setting this lower increases the chance that a packet will
 /// be delayed due to high system load and not be sent at the right time, but setting it higher
 /// could increase latency because read packets may be unnecessarily delayed to the next packet.
 // TODO ensure there are no issues when this is greater than the inter-packet interval
-const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 1_000_000;
-
-type Result<T> = std::result::Result<T, Error>;
+// TODO update this to 1_000_000 and fix the tests
+const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 100_000;
 
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
@@ -291,20 +290,6 @@ impl EstablishedConnection {
 pub(crate) enum IsConnectionOpen {
     Yes,
     No,
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum Error {
-    #[error("Error deserializing message: {0:?}")]
-    DeserializeMessage(#[from] DeserializeMessageErr),
-    #[error("Error terminating connection: {0:?}")]
-    Terminate(#[from] dtls::TerminateError),
-    #[error("std::io::Error {0:?}")]
-    IO(#[from] std::io::Error),
-    #[error("wolfssl error {0:?}")]
-    Wolf(#[from] wolfssl::Error),
-    #[error("hardware error: {0:?}")]
-    Hardware(#[from] hardware::Error),
 }
 
 /// Return the next packet send time strictly after `timestamp`

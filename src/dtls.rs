@@ -16,7 +16,7 @@
 /// to insert a custom time function. But I do think this is a design issue on their part, and that
 /// it should be part of the IO callbacks to simplify things for users.
 // TODO add logging and tests for DTLS timestamps
-use thiserror::Error;
+use anyhow::{Result, anyhow, bail};
 
 use crate::{
     array_array::IpPacketBuffer,
@@ -44,7 +44,7 @@ impl NegotiatingSession {
     pub(crate) fn new_client(
         pre_shared_key: &[u8],
         timestamp: u64,
-    ) -> Result<(Self, Vec<IpPacketBuffer>, u64), NewSessionError> {
+    ) -> Result<(Self, Vec<IpPacketBuffer>, u64)> {
         let wolf_session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsClientV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
@@ -53,17 +53,21 @@ impl NegotiatingSession {
             underlying: wolf_session,
         };
         match session.inner_try_negotiate(None, timestamp) {
-            NegotiateResult::Ready(_, _) => Err(NewSessionError::ReadyImmediately),
+            NegotiateResult::Ready(_, _) => {
+                bail!("Negotiation was reported as complete immediately upon session creation??")
+            }
             NegotiateResult::NeedRead(new_session, packets, next_timeout) => {
                 Ok((new_session, packets, next_timeout))
             }
-            NegotiateResult::Terminated => Err(NewSessionError::TerminatedImmediately),
-            NegotiateResult::Err(e) => Err(NewSessionError::from(e)),
+            NegotiateResult::Terminated => {
+                bail!("Negotiation was terminated immediately upon session creation??")
+            }
+            NegotiateResult::Err(e) => Err(e),
         }
     }
 
     /// There's no initial timeout for the server, since it's just waiting for a client.
-    pub(crate) fn new_server(pre_shared_key: &[u8]) -> Result<Self, NewSessionError> {
+    pub(crate) fn new_server(pre_shared_key: &[u8]) -> Result<Self> {
         let session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsServerV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
@@ -95,10 +99,14 @@ impl NegotiatingSession {
                     log::info!("Remote peer terminated DTLS connection (during negotiation).");
                     return NegotiateResult::Terminated;
                 }
-                Err(err) => return NegotiateResult::Err(NegotiateError::WolfError(err)),
+                Err(err) => {
+                    return NegotiateResult::Err(
+                        anyhow::Error::from(err).context("wolfSSL error during negotiation"),
+                    );
+                }
                 // We don't use secure renegotiation, so this shouldn't happen!
                 Ok(wolfssl::Poll::AppData(_)) => {
-                    return NegotiateResult::Err(NegotiateError::UnexpectedAppData);
+                    return NegotiateResult::Err(anyhow!("Unexpected AppData during negotiation"));
                 }
                 Ok(wolfssl::Poll::PendingWrite) => {
                     add_written_packet(&mut self.underlying, &mut written_packets)
@@ -134,7 +142,7 @@ impl NegotiatingSession {
     pub(crate) fn has_timed_out(
         mut self,
         timestamp: u64,
-    ) -> Result<(NegotiatingSession, Vec<IpPacketBuffer>, u64), NegotiateError> {
+    ) -> Result<(NegotiatingSession, Vec<IpPacketBuffer>, u64)> {
         // dtls_has_timed_out, if blocked by a PendingWrite, won't do anything the next time it's
         // called -- you're supposed to enter back into a negotiation loop. So that's what we do!
 
@@ -148,14 +156,14 @@ impl NegotiatingSession {
                 add_written_packet(&mut self.underlying, &mut written_packets)
             }
             wolfssl::Poll::PendingRead => {
-                return Err(NegotiateError::PendingReadDuringTimeout);
+                bail!("wolfSSL tried to read during DTLS timeout");
             }
             wolfssl::Poll::AppData(_) => {
-                return Err(NegotiateError::UnexpectedAppData);
+                bail!("Unexpected AppData during negotiation");
             }
             // this means some wolfssl error, but the wolfssl-rs api won't tell us which :|
             wolfssl::Poll::Ready(true) => {
-                return Err(NegotiateError::UnknownWolfErrorDuringTimeout);
+                bail!("wolfSSL error during DTLS timeout (no further details available)");
             }
         }
 
@@ -163,61 +171,21 @@ impl NegotiatingSession {
         // during timeout handling onto those returned by negotiation.
         match self.inner_try_negotiate(None, timestamp) {
             // I believe this would be a state machine error:
-            NegotiateResult::Ready(_, _) => Err(NegotiateError::NegotiationReadyDuringTimeout),
+            NegotiateResult::Ready(_, _) => {
+                bail!("Negotiation finished during timeout processing???")
+            }
             NegotiateResult::NeedRead(new_session, later_written_packets, timeout) => {
                 written_packets.extend(later_written_packets);
                 Ok((new_session, written_packets, timeout))
             }
-            NegotiateResult::Terminated => Err(NegotiateError::NegotiationTerminatedDuringTimeout),
+            NegotiateResult::Terminated => bail!("Negotiation terminated during timeout???"),
             NegotiateResult::Err(e) => Err(e),
         }
     }
 
-    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>> {
         terminate(self.underlying)
     }
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum NewSessionError {
-    // TODO why do we need these error() messages? The docs make it seem like you don't when you have #[from]
-    #[error("NewSessionError {0:?}")]
-    WolfNewSessionError(#[from] wolfssl::NewSessionError),
-    #[error("NewContextBuilderError {0:?}")]
-    WolfNewContextBuilderError(#[from] wolfssl::NewContextBuilderError),
-    #[error("NegotiateError {0:?}")]
-    NegotiateError(#[from] NegotiateError),
-    #[error("Negotiation was reported as complete immediately upon session creation??")]
-    ReadyImmediately,
-    #[error("Negotiation was terminated immediately upon session creation??")]
-    TerminatedImmediately,
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum NegotiateError {
-    // TODO also why do we need these error() messages? (see above)
-    #[error("wolfSSL error {0:?}")]
-    WolfError(#[from] wolfssl::Error),
-    #[error("Unexpected AppData during negotiation")]
-    UnexpectedAppData,
-    #[error("wolfSSL error during DTLS timeout (no further details available)")]
-    UnknownWolfErrorDuringTimeout,
-    #[error("wolfSSL tried to read during DTLS timeout")]
-    PendingReadDuringTimeout,
-    #[error("Negotiation finished during timeout processing???")]
-    NegotiationReadyDuringTimeout,
-    #[error("Negotiation terminated during timeout???")]
-    NegotiationTerminatedDuringTimeout,
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum TerminateError {
-    #[error("WolfSSL error {0:?}")]
-    Wolf(#[from] wolfssl::Error),
-    #[error("Unexpected AppData during termination")]
-    AppData,
-    #[error("Tried to read during termination")]
-    PendingRead,
 }
 
 #[derive(Debug)]
@@ -228,7 +196,7 @@ pub(crate) enum NegotiateResult {
     NeedRead(NegotiatingSession, Vec<IpPacketBuffer>, u64),
     /// The connection was terminated normally by the other side.
     Terminated,
-    Err(NegotiateError),
+    Err(anyhow::Error),
 }
 
 pub(crate) struct EstablishedSession {
@@ -339,7 +307,7 @@ impl EstablishedSession {
         }
     }
 
-    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+    pub(crate) fn terminate(self) -> Result<Vec<IpPacketBuffer>> {
         terminate(self.underlying)
     }
 }
@@ -361,9 +329,7 @@ pub(crate) enum DecryptResult {
     Err(wolfssl::Error),
 }
 
-fn terminate(
-    mut session: wolfssl::Session<IOCallbacks>,
-) -> Result<Vec<IpPacketBuffer>, TerminateError> {
+fn terminate(mut session: wolfssl::Session<IOCallbacks>) -> Result<Vec<IpPacketBuffer>> {
     let mut written_packets = Vec::new();
     loop {
         match session.try_shutdown() {
@@ -380,12 +346,12 @@ fn terminate(
                 );
                 return Ok(written_packets);
             }
-            Ok(wolfssl::Poll::PendingRead) => return Err(TerminateError::PendingRead),
+            Ok(wolfssl::Poll::PendingRead) => bail!("Tried to read during termination"),
             Ok(wolfssl::Poll::PendingWrite) => {
                 add_written_packet(&mut session, &mut written_packets)
             }
             // TODO
-            Ok(wolfssl::Poll::AppData(_)) => return Err(TerminateError::AppData),
+            Ok(wolfssl::Poll::AppData(_)) => bail!("Unexpected AppData during termination"),
             Err(err) => return Err(err.into()),
         }
     }

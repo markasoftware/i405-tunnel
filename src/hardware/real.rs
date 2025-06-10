@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Result;
+
 use crate::{
     array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, core, hardware::Hardware,
 };
@@ -43,7 +45,7 @@ impl RealHardware {
         tun_mtu: Option<u16>,
         tun_ipv4_net: Option<ipnet::Ipv4Net>,
         tun_ipv6_net: Option<ipnet::Ipv6Net>,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self> {
         let disconnect_addr = match listen_addr {
             SocketAddr::V4(_) => {
                 SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::from_bits(0), 0))
@@ -423,12 +425,12 @@ impl Hardware for RealHardware {
         std::mem::replace(&mut self.timer, Some(timestamp))
     }
 
-    fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> super::Result<()> {
+    fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()> {
         self.socket.connect(socket_addr)?;
         Ok(())
     }
 
-    fn socket_disconnect(&mut self) -> super::Result<()> {
+    fn socket_disconnect(&mut self) -> Result<()> {
         self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
@@ -448,7 +450,7 @@ impl Hardware for RealHardware {
         packet: &[u8],
         destination: std::net::SocketAddr,
         timestamp: Option<u64>,
-    ) -> super::Result<()> {
+    ) -> Result<()> {
         // TODO consider changing signature to unconditionnal (), since errors are async anyway.
         self.outgoing_send_thread
             .tx
@@ -462,7 +464,7 @@ impl Hardware for RealHardware {
     }
 
     // TODO like above, consider changing the signature, since this always succeeds.
-    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> super::Result<()> {
+    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()> {
         self.incoming_send_thread
             .tx
             .send(IncomingSend {

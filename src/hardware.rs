@@ -2,15 +2,7 @@ pub(crate) mod real;
 #[cfg(test)]
 pub(crate) mod simulated;
 
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub(crate) enum Error {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-}
-
-type Result<T> = std::result::Result<T, Error>;
+use anyhow::Result;
 
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
 /// only able to interact with the outside world through an instance of `Hardware`

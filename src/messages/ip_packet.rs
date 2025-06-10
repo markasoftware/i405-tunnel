@@ -1,9 +1,10 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
-use crate::messages::{DeserializeMessageErr, ReadCursor, serdes};
+use crate::messages::{ReadCursor, serdes};
 
 use super::serdes::SerializableLength as _;
+use anyhow::{Result, anyhow};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct IpPacket {
@@ -68,9 +69,7 @@ impl serdes::Serializable for IpPacket {
 }
 
 impl serdes::Deserializable for IpPacket {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         let type_byte: u8 = read_cursor.read()?;
         assert!(
             (Self::TYPE_BYTE_LOW..=Self::TYPE_BYTE_HIGH).contains(&type_byte),
@@ -79,7 +78,7 @@ impl serdes::Deserializable for IpPacket {
 
         let flag_bits = type_byte & (Self::TYPE_BYTE_LOW - 1);
         let flags: BitFlags<IpPacketFlags> = BitFlags::try_from(flag_bits)
-            .map_err(|_| DeserializeMessageErr::UnknownIPFlagBytes(flag_bits))?;
+            .map_err(|_| anyhow!("Unknown IP flags: {flag_bits:#x}"))?;
 
         let fragmentation_id = if flags.contains(IpPacketFlags::Fragmented) {
             Some(read_cursor.read()?)
@@ -148,9 +147,7 @@ impl serdes::Serializable for IpPacketFragment {
 }
 
 impl serdes::Deserializable for IpPacketFragment {
-    fn deserialize<T: AsRef<[u8]>>(
-        read_cursor: &mut ReadCursor<T>,
-    ) -> Result<Self, DeserializeMessageErr> {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         let type_byte: u8 = read_cursor.read()?;
         let is_last = match type_byte {
             Self::TYPE_BYTE_FINAL => true,
@@ -173,7 +170,6 @@ impl serdes::Deserializable for IpPacketFragment {
 #[cfg(test)]
 mod test {
     use crate::array_array::IpPacketBuffer;
-    use crate::messages::serdes::SerializableLength as _;
     use crate::messages::{
         Message,
         ip_packet::{IpPacket, IpPacketFragment},

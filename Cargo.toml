@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
 bitvec = "1"
 bytesize = "2"
 clap = "4"
@@ -15,7 +16,6 @@ humantime = "2"
 ipnet = "2"
 log = "0.4"
 mtu = "0.2.9"
-thiserror = "2"
 tun-rs = { version = "2", features = [ "experimental"] }
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"

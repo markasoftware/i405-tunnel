@@ -408,6 +408,7 @@ checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
 name = "i405-tunnel"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bitvec",
  "bytesize",
  "clap",
@@ -420,7 +421,6 @@ dependencies = [
  "log",
  "mtu",
  "test-case",
- "thiserror 2.0.12",
  "tun-rs",
  "wolfssl",
 ]
@@ -1294,7 +1294,6 @@ dependencies = [
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk-and-rw-signatures#77f2b5dd8a108e74a334d595817c26d8cad8b98d"
 dependencies = [
  "bytes",
  "log",
@@ -1305,7 +1304,6 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "2.0.0"
-source = "git+https://github.com/markasoftware/wolfssl-rs?branch=markasoftware%2Fpsk-and-rw-signatures#77f2b5dd8a108e74a334d595817c26d8cad8b98d"
 dependencies = [
  "autotools",
  "bindgen 0.71.1",

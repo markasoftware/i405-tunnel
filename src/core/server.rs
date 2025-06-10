@@ -1,20 +1,14 @@
 use std::net::SocketAddr;
 
+use anyhow::{Result, anyhow, bail};
 use declarative_enum_dispatch::enum_dispatch;
-use thiserror::Error;
 
 use crate::{
-    core::established_connection::IsConnectionOpen,
-    dtls,
-    hardware::{self, Hardware},
-    messages,
+    core::established_connection::IsConnectionOpen, dtls, hardware::Hardware, messages,
     wire_config::WireConfig,
 };
 
-use super::{
-    PROTOCOL_VERSION,
-    established_connection::{self, EstablishedConnection},
-};
+use super::{PROTOCOL_VERSION, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
 pub(crate) struct Core {
@@ -80,47 +74,9 @@ impl super::Core for Core {
     }
 }
 
-type Result<T> = std::result::Result<T, ConnectionStateError>;
-
 // To keep the code here relatively simple, the different server connection states emit errors, but
 // these never actually cause the process to exit. Instead, they all just cause the server to revert
 // to the NoConnection state. Truly fatal errors should simply panic.
-
-#[derive(Error, Debug)]
-pub(crate) enum ConnectionStateError {
-    #[error("IO error: {0}")]
-    IOErr(#[from] std::io::Error),
-    #[error("New session DTLS error: {0}")]
-    NewSessionErr(#[from] dtls::NewSessionError),
-    #[error("termination error: {0}")]
-    Terminate(#[from] dtls::TerminateError),
-    #[error("wolfSSL error: {0}")]
-    WolfErr(#[from] wolfssl::Error),
-    #[error("hardware error: {0}")]
-    HardwareErr(#[from] hardware::Error),
-    #[error("established connection error: {0}")]
-    EstablishedConnectionErr(#[from] established_connection::Error),
-    #[error("deserialize error: {0}")]
-    DeserializeMessageErr(#[from] messages::DeserializeMessageErr),
-    #[error(
-        "Client with protocol version {0} wanted protocol version at least {1}, but we have {2}"
-    )]
-    IncompatibleProtocolVersions(u32, u32, u32),
-    #[error(
-        "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
-    )]
-    PacketsTooShortForS2CHandshake,
-    #[error(
-        "Got multiple C2S handshakes and they weren't the same: First time {0:?}, second time {1:?}"
-    )]
-    DifferentC2SHandshakes(
-        Box<messages::ClientToServerHandshake>,
-        Box<messages::ClientToServerHandshake>,
-    ),
-    #[error("Got a non-handshake message before the C2S handshake")]
-    // i don't care that the option is inside the box, don't @ me
-    OtherMessageBeforeC2SHandshake(Box<Option<messages::Message>>),
-}
 
 enum_dispatch! {
     trait ServerConnectionStateTrait {
@@ -400,7 +356,9 @@ impl InProtocolHandshake {
             let did_add =
                 builder.try_add_message(&messages::Message::ServerToClientHandshake(response));
             if !did_add {
-                return Err(ConnectionStateError::PacketsTooShortForS2CHandshake);
+                bail!(
+                    "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
+                );
             }
             let cleartext_packet = builder.into_inner();
             let ciphertext_packet = self.session.encrypt_datagram(&cleartext_packet)?;
@@ -414,19 +372,21 @@ impl InProtocolHandshake {
             .is_some_and(|old_c2s_handshake| old_c2s_handshake != c2s_handshake)
         {
             send_response(false)?;
-            return Err(ConnectionStateError::DifferentC2SHandshakes(
-                Box::new(self.c2s_handshake.clone().unwrap()),
-                Box::new(c2s_handshake.clone()),
-            ));
+            bail!(
+                "Got multiple C2S handshakes and they weren't the same: First time {:?}, second time {:?}",
+                self.c2s_handshake.as_ref().unwrap(),
+                c2s_handshake
+            );
         }
 
         if PROTOCOL_VERSION < c2s_handshake.oldest_compatible_protocol_version {
             send_response(false)?;
-            return Err(ConnectionStateError::IncompatibleProtocolVersions(
+            bail!(
+                "Client with protocol version {} wanted protocol version at least {}, but we have {}",
                 c2s_handshake.protocol_version,
                 c2s_handshake.oldest_compatible_protocol_version,
-                PROTOCOL_VERSION,
-            ));
+                PROTOCOL_VERSION
+            );
         }
 
         send_response(true)
@@ -495,9 +455,12 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
             }
             other => {
                 // TODO this shouldn't be an error, but let's write a test for it before fixing:
-                let c2s_handshake = self.c2s_handshake.ok_or(
-                    ConnectionStateError::OtherMessageBeforeC2SHandshake(Box::new(other)),
-                )?;
+                let c2s_handshake = self.c2s_handshake.ok_or_else(|| {
+                    anyhow!(
+                        "Got a non-handshake message before the C2S handshake: {:?}",
+                        other
+                    )
+                })?;
                 let s2c_wire_config = WireConfig {
                     packet_length: c2s_handshake.s2c_packet_length,
                     packet_interval: c2s_handshake.s2c_packet_interval,
