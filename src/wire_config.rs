@@ -12,6 +12,8 @@ pub(crate) struct WireConfig {
     pub(crate) packet_interval: u64,
     // packets will be sent when (epoch_time - packet_interval_offset) % packet_interval == 0
     pub(crate) packet_interval_offset: u64,
+    // How long to send the packet to the sending thread before the actual scheduled send time.
+    pub(crate) packet_finalize_delta: u64,
 }
 
 pub(crate) struct WireConfigs {
@@ -26,6 +28,7 @@ fn to_wire_config(
     max_packet_length: u16,
     packet_length: Option<u64>,
     interval: &WireInterval,
+    finalize_delta: u64,
 ) -> WireConfig {
     let packet_length: u16 = packet_length
         .map(|pl| {
@@ -67,6 +70,7 @@ fn to_wire_config(
         packet_interval,
         // TODO randomize:
         packet_interval_offset: 0,
+        packet_finalize_delta: finalize_delta,
     }
 }
 
@@ -100,6 +104,7 @@ pub(crate) fn to_wire_configs(
             max_packet_length,
             wire_configuration.outgoing_packet_length,
             &wire_configuration.outgoing_interval,
+            wire_configuration.outgoing_finalize_delta,
         ),
         s2c: to_wire_config(
             "server-to-client",
@@ -108,6 +113,7 @@ pub(crate) fn to_wire_configs(
             max_packet_length,
             wire_configuration.incoming_packet_length,
             &wire_configuration.incoming_interval,
+            wire_configuration.incoming_finalize_delta,
         ),
     }
 }

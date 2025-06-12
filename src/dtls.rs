@@ -498,8 +498,8 @@ mod test {
         // a lot, wolfSSL decides to just wait for ACKs rather than proceeding with a flight...but I
         // have a branch where I changed the IO callbacks to have a buffer of 10 packets instead of
         // 1, and the behavior is the same.
-        let server = NegotiatingSession::new_server(psk).unwrap();
-        let (client, c2s_packets, _) = NegotiatingSession::new_client(psk, 0).unwrap();
+        let server = NegotiatingSession::new_server(psk, 1400).unwrap();
+        let (client, c2s_packets, _) = NegotiatingSession::new_client(psk, 1400, 0).unwrap();
 
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
         let (client, c2s_packets, _) = make_progress(client, &s2c_packets, 0);
@@ -556,9 +556,9 @@ mod test {
 
         let psk = b"password";
 
-        let server = NegotiatingSession::new_server(psk).unwrap();
+        let server = NegotiatingSession::new_server(psk, 1400).unwrap();
         // drop an initial handshake message
-        let (client, _, _) = NegotiatingSession::new_client(psk, 0).unwrap();
+        let (client, _, _) = NegotiatingSession::new_client(psk, 1400, 0).unwrap();
         let (client, c2s_packets, _) = client.has_timed_out(0).unwrap();
         assert!(!c2s_packets.is_empty());
         let (server, s2c_packets, _) = make_progress(server, &c2s_packets, 0);
@@ -587,10 +587,10 @@ mod test {
 
         let psk = b"password";
 
-        let server = NegotiatingSession::new_server(psk).unwrap();
+        let server = NegotiatingSession::new_server(psk, 1400).unwrap();
 
         // drop an initial handshake message
-        let (client, _, _) = NegotiatingSession::new_client(psk, 0).unwrap();
+        let (client, _, _) = NegotiatingSession::new_client(psk, 1400, 0).unwrap();
         let (client, c2s_packets, _) = client.has_timed_out(0).unwrap();
         assert!(!c2s_packets.is_empty());
 
@@ -619,7 +619,7 @@ mod test {
         assert!(s2c_packets.is_empty());
         // the server already did some retransmitting not long ago, so we have to do this to get it
         // to retransmit again.
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(1010));
         let (server, s2c_packets, _) = server.has_timed_out(0).unwrap();
         assert!(!s2c_packets.is_empty());
 

@@ -260,6 +260,7 @@ impl C2SHandshakeSent {
             oldest_compatible_protocol_version: OLDEST_COMPATIBLE_PROTOCOL_VERSION,
             s2c_packet_length: config.s2c_wire_config.packet_length,
             s2c_packet_interval: config.s2c_wire_config.packet_interval,
+            s2c_packet_finalize_delta: config.s2c_wire_config.packet_finalize_delta,
         };
         let did_add =
             builder.try_add_message(&messages::Message::ClientToServerHandshake(c2s_handshake));

@@ -37,8 +37,6 @@ impl PacketBuilder {
     }
 }
 
-type MessageType = u8;
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
@@ -95,6 +93,7 @@ pub(crate) struct ClientToServerHandshake {
     pub(crate) oldest_compatible_protocol_version: u32,
     pub(crate) s2c_packet_length: u16,
     pub(crate) s2c_packet_interval: u64,
+    pub(crate) s2c_packet_finalize_delta: u64,
 }
 
 impl ClientToServerHandshake {
@@ -115,6 +114,7 @@ impl serdes::Serializable for ClientToServerHandshake {
             .serialize(serializer);
         self.s2c_packet_length.serialize(serializer);
         self.s2c_packet_interval.serialize(serializer);
+        self.s2c_packet_finalize_delta.serialize(serializer);
     }
 }
 
@@ -144,6 +144,7 @@ impl serdes::Deserializable for ClientToServerHandshake {
             oldest_compatible_protocol_version: read_cursor.read()?,
             s2c_packet_length: read_cursor.read()?,
             s2c_packet_interval: read_cursor.read()?,
+            s2c_packet_finalize_delta: read_cursor.read()?,
         })
     }
 }
@@ -519,6 +520,7 @@ mod test {
             oldest_compatible_protocol_version: 8322,
             s2c_packet_length: 2277,
             s2c_packet_interval: 992828,
+            s2c_packet_finalize_delta: 1_000_000,
         }));
     }
 

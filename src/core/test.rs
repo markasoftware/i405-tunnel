@@ -18,21 +18,25 @@ const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 1_423_000, // 1.423ms
     packet_interval_offset: 0,
+    packet_finalize_delta: 100_000,
 };
 const DEFAULT_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 1_411_000, // 1.411ms
     packet_interval_offset: 0,
+    packet_finalize_delta: 100_000,
 };
 const LONGER_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 142_300_000, // 142.3ms
     packet_interval_offset: 0,
+    packet_finalize_delta: 100_000,
 };
 const LONGER_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval: 141_100_000, // 141.1ms
     packet_interval_offset: 0,
+    packet_finalize_delta: 100_000,
 };
 
 fn ms(ms: f64) -> u64 {

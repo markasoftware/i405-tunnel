@@ -467,6 +467,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     packet_interval: c2s_handshake.s2c_packet_interval,
                     // TODO randomize or specify in C2S handshake?
                     packet_interval_offset: 0,
+                    packet_finalize_delta: c2s_handshake.s2c_packet_finalize_delta,
                 };
                 log::info!(
                     "Handshake complete with {}, proceeding to established connection with {:?}",

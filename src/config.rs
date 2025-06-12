@@ -5,6 +5,8 @@ use declarative_enum_dispatch::enum_dispatch;
 
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1405";
 const DEFAULT_TUN_NAME: &str = "tun-i405";
+// TODO ensure there are no issues when this is greater than the inter-packet interval
+const DEFAULT_FINALIZE_DELTA: &str = "1ms";
 
 trait EzClap {
     // TODO consider combining to_args and to_groups
@@ -22,8 +24,10 @@ pub(crate) enum WireInterval {
 
 pub(crate) struct WireConfiguration {
     pub(crate) outgoing_packet_length: Option<u64>,
+    pub(crate) outgoing_finalize_delta: u64,
     pub(crate) outgoing_interval: WireInterval,
     pub(crate) incoming_packet_length: Option<u64>,
+    pub(crate) incoming_finalize_delta: u64,
     pub(crate) incoming_interval: WireInterval,
 }
 
@@ -47,6 +51,12 @@ impl EzClap for WireConfiguration {
                 .visible_alias("up-speed")
                 .value_parser(value_parser!(bytesize::ByteSize))
                 .help("Bytes per second to upload. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the upload packet length."),
+            Arg::new("outgoing_finalize_delta")
+                .long("outgoing-finalize-delta")
+                .visible_alias("up-finalize-delta")
+                .default_value(DEFAULT_FINALIZE_DELTA)
+                .value_parser(humantime::parse_duration)
+                .help("How long to finalize the contents of a packet to be sent before actually sending it. If too short, then packets may frequently be delayed and not sent at the intended times. This is most likely to happen under system load, and those delayed packets could indicate to an attacker that your system is under load. Warnings are logged whenever this happens, so increase this value if you see those warnings frequently."),
             Arg::new("incoming_packet_length")
                 .long("incoming-packet-length")
                 .visible_alias("down-packet-length")
@@ -64,6 +74,14 @@ impl EzClap for WireConfiguration {
                 .visible_alias("down-speed")
                 .value_parser(value_parser!(bytesize::ByteSize))
                 .help("Bytes per second to download. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the download packet length."),
+            Arg::new("incoming_finalize_delta")
+                .long("incoming-finalize-delta")
+                .visible_alias("down-finalize-delta")
+                .default_value(DEFAULT_FINALIZE_DELTA)
+                .value_parser(humantime::parse_duration)
+                // TODO make sure we print warnings for delayed finalization on the server, on the
+                // client (via statistics).
+                .help("See --outgoing-finalize-delta docs"),
         ]
     }
 
@@ -101,10 +119,22 @@ impl EzClap for WireConfiguration {
                 .get_one::<bytesize::ByteSize>("outgoing_packet_length")
                 .map(|x| x.as_u64()),
             outgoing_interval: parse_interval("outgoing"),
+            outgoing_finalize_delta: matches
+                .get_one::<Duration>("outgoing_finalize_delta")
+                .unwrap()
+                .as_nanos()
+                .try_into()
+                .unwrap(),
             incoming_packet_length: matches
                 .get_one::<bytesize::ByteSize>("incoming_packet_length")
                 .map(|x| x.as_u64()),
             incoming_interval: parse_interval("incoming"),
+            incoming_finalize_delta: matches
+                .get_one::<Duration>("incoming_finalize_delta")
+                .unwrap()
+                .as_nanos()
+                .try_into()
+                .unwrap(),
         }
     }
 }

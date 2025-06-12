@@ -12,14 +12,6 @@ use crate::{
 
 use anyhow::Result;
 
-/// How long before one of the constant-size packets is supposed to be sent should we hand it off to
-/// the Hardware struct (in nanoseconds)? Setting this lower increases the chance that a packet will
-/// be delayed due to high system load and not be sent at the right time, but setting it higher
-/// could increase latency because read packets may be unnecessarily delayed to the next packet.
-// TODO ensure there are no issues when this is greater than the inter-packet interval
-// TODO update this to 1_000_000 and fix the tests
-const PACKET_FINALIZE_TO_PACKET_SEND_DELAY: u64 = 100_000;
-
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
@@ -188,7 +180,7 @@ impl EstablishedConnection {
             self.peer,
             Some(
                 timer_timestamp
-                    .checked_add(PACKET_FINALIZE_TO_PACKET_SEND_DELAY)
+                    .checked_add(self.outgoing_wire_config.packet_finalize_delta)
                     .unwrap(),
             ),
         )?;
@@ -314,10 +306,10 @@ fn next_outgoing_timer(wire_config: &WireConfig, timestamp: u64) -> u64 {
     next_outgoing_timestamp(
         wire_config,
         timestamp
-            .checked_add(PACKET_FINALIZE_TO_PACKET_SEND_DELAY.checked_mul(2).unwrap())
+            .checked_add(wire_config.packet_finalize_delta.checked_mul(2).unwrap())
             .unwrap(),
     )
-    .checked_sub(PACKET_FINALIZE_TO_PACKET_SEND_DELAY)
+    .checked_sub(wire_config.packet_finalize_delta)
     .unwrap()
 }
 
@@ -331,6 +323,7 @@ mod test {
             packet_length: 1500,
             packet_interval: 10,
             packet_interval_offset: 3,
+            packet_finalize_delta: 100_000,
         };
 
         assert_eq!(super::next_outgoing_timestamp(&wire_config, 0), 3);
@@ -342,17 +335,11 @@ mod test {
 
     #[test]
     fn next_outgoing_timer() {
-        // just so we remember to fix the test if it goes bad:
-        assert_eq!(
-            super::PACKET_FINALIZE_TO_PACKET_SEND_DELAY,
-            100_000,
-            "update test if this changes"
-        );
-
         let wire_config = WireConfig {
             packet_length: 1500,
             packet_interval: 1_400_000,
             packet_interval_offset: 3,
+            packet_finalize_delta: 100_000,
         };
         assert_eq!(
             super::next_outgoing_timer(&wire_config, 2_000_000),
