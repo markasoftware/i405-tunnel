@@ -2,6 +2,8 @@ pub(crate) mod real;
 #[cfg(test)]
 pub(crate) mod simulated;
 
+use std::net::SocketAddr;
+
 use anyhow::Result;
 
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
@@ -34,4 +36,8 @@ pub(crate) trait Hardware {
 
     /// delete any timers and read_outgoing_
     fn clear_event_listeners(&mut self);
+
+    /// mtu, including ip and udp headers, in bytes. This isn't used by any business logic, it is
+    /// just needed to configure the MTU for wolfSSL
+    fn mtu(&self, peer: SocketAddr) -> Result<u16>;
 }

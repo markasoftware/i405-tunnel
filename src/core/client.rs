@@ -6,7 +6,7 @@ use declarative_enum_dispatch::enum_dispatch;
 use crate::array_array::IpPacketBuffer;
 use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::hardware::Hardware;
-use crate::utils::ns_to_str;
+use crate::utils::{ip_mtu_to_dtls_mtu, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
@@ -132,8 +132,12 @@ fn send_packets(
 impl NoConnection {
     fn new(config: &Config, hardware: &mut impl Hardware) -> Result<NoConnection> {
         hardware.clear_event_listeners();
-        let (new_session, initial_packets, timeout) =
-            dtls::NegotiatingSession::new_client(&config.pre_shared_key, hardware.timestamp())?;
+        let dtls_mtu = ip_mtu_to_dtls_mtu(hardware.mtu(config.peer_address)?, config.peer_address);
+        let (new_session, initial_packets, timeout) = dtls::NegotiatingSession::new_client(
+            &config.pre_shared_key,
+            dtls_mtu,
+            hardware.timestamp(),
+        )?;
         Self::from_triple(config, hardware, new_session, &initial_packets, timeout)
     }
 

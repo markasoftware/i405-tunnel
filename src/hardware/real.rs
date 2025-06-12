@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::{
     array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, core, hardware::Hardware,
@@ -478,5 +478,9 @@ impl Hardware for RealHardware {
     fn clear_event_listeners(&mut self) {
         self.timer = None;
         self.generation = self.generation.checked_add(1).unwrap();
+    }
+
+    fn mtu(&self, peer: SocketAddr) -> Result<u16> {
+        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1).map_err(|_| anyhow!("Interface MTU was wayy too large"))?)
     }
 }

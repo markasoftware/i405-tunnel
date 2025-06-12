@@ -5,7 +5,7 @@ use declarative_enum_dispatch::enum_dispatch;
 
 use crate::{
     core::established_connection::IsConnectionOpen, dtls, hardware::Hardware, messages,
-    wire_config::WireConfig,
+    utils::ip_mtu_to_dtls_mtu, wire_config::WireConfig,
 };
 
 use super::{PROTOCOL_VERSION, established_connection::EstablishedConnection};
@@ -219,9 +219,10 @@ impl ServerConnectionStateTrait for NoConnection {
         {
             // start a negotiation
             log::info!("New DTLS handshake started with {}", peer);
+            let dtls_mtu = ip_mtu_to_dtls_mtu(hardware.mtu(peer)?, peer);
             self.negotiations.push(Negotiation {
                 peer,
-                session: dtls::NegotiatingSession::new_server(&config.pre_shared_key)?,
+                session: dtls::NegotiatingSession::new_server(&config.pre_shared_key, dtls_mtu)?,
                 timeout: u64::MAX,
             });
         }

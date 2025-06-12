@@ -43,12 +43,14 @@ impl NegotiatingSession {
     /// Construct a new client, and also returns the initial handshake packets that should be sent and the first timeout.
     pub(crate) fn new_client(
         pre_shared_key: &[u8],
+        // excluding IP and UDP:
+        mtu: u16,
         timestamp: u64,
     ) -> Result<(Self, Vec<IpPacketBuffer>, u64)> {
         let wolf_session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsClientV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
-            .new_session(wolfssl::SessionConfig::new(IOCallbacks::new()))?;
+            .new_session(wolfssl::SessionConfig::new(IOCallbacks::new()).with_dtls_mtu(mtu))?;
         let session = NegotiatingSession {
             underlying: wolf_session,
         };
@@ -67,11 +69,11 @@ impl NegotiatingSession {
     }
 
     /// There's no initial timeout for the server, since it's just waiting for a client.
-    pub(crate) fn new_server(pre_shared_key: &[u8]) -> Result<Self> {
+    pub(crate) fn new_server(pre_shared_key: &[u8], mtu: u16) -> Result<Self> {
         let session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsServerV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
-            .new_session(wolfssl::SessionConfig::new(IOCallbacks::new()))?;
+            .new_session(wolfssl::SessionConfig::new(IOCallbacks::new()).with_dtls_mtu(mtu))?;
         Ok(NegotiatingSession {
             underlying: session,
         })

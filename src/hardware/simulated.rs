@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 
 use crate::array_array::IpPacketBuffer;
+use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::Core;
 use crate::{core, hardware::Hardware};
 
@@ -410,5 +411,9 @@ impl<'a> Hardware for OneSideHardware<'a> {
     fn clear_event_listeners(&mut self) {
         self.our_side().timer = None;
         self.our_side().next_read_outgoing = MaybeTime::None;
+    }
+
+    fn mtu(&self, _peer: SocketAddr) -> Result<u16> {
+        Ok(MAX_IP_PACKET_LENGTH.try_into().unwrap())
     }
 }
