@@ -19,6 +19,7 @@ pub(crate) struct RealHardware {
     generation: u64,
     // we'll "connect" to this address to disconnect:
     disconnect_addr: SocketAddr,
+    spin_sleep: bool,
 
     timer: Option<u64>,
     socket: Arc<UdpSocket>,
@@ -45,6 +46,7 @@ impl RealHardware {
         tun_mtu: Option<u16>,
         tun_ipv4_net: Option<ipnet::Ipv4Net>,
         tun_ipv6_net: Option<ipnet::Ipv6Net>,
+        spin_sleep: bool,
     ) -> Result<Self> {
         let disconnect_addr = match listen_addr {
             SocketAddr::V4(_) => {
@@ -100,6 +102,7 @@ impl RealHardware {
             epoch,
             generation: 0,
             disconnect_addr,
+            spin_sleep,
 
             timer: None,
             socket,
@@ -114,11 +117,12 @@ impl RealHardware {
                     tx_for_outgoing_read_thread,
                     tun_for_outgoing_read_thread,
                     tun_is_shutdown_for_outgoing_read_thread,
+                    spin_sleep,
                     epoch,
                 )
             }),
             outgoing_send_thread: ChannelThread::spawn(outgoing_sends_tx, move || {
-                outgoing_send_thread(outgoing_sends_rx, outgoing_send_socket, epoch)
+                outgoing_send_thread(outgoing_sends_rx, outgoing_send_socket, spin_sleep, epoch)
             }),
             incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, move || {
                 incoming_read_thread(
@@ -128,7 +132,7 @@ impl RealHardware {
                 )
             }),
             incoming_send_thread: ChannelThread::spawn(incoming_sends_tx, move || {
-                incoming_send_thread(incoming_sends_rx, incoming_send_tun, epoch)
+                incoming_send_thread(incoming_sends_rx, incoming_send_tun, spin_sleep, epoch)
             }),
         })
     }
@@ -143,24 +147,42 @@ impl RealHardware {
 
             // only set if the user requested a timer, /and/ that timer is short enough that we're
             // actually able to use it.
-            let timeout_duration_from_now = self.timer.map(|timer| {
-                self.epoch
-                    .checked_add(Duration::from_nanos(timer))
-                    .unwrap()
-                    .saturating_duration_since(Instant::now())
-            });
-            if timeout_duration_from_now == Some(Duration::ZERO) {
-                log::warn!(
-                    "Timer set in the past? Timer set for {}, current ns since epoch is {}",
-                    self.timer.unwrap(),
-                    Instant::now()
-                        .checked_duration_since(self.epoch)
-                        .unwrap()
-                        .as_nanos()
-                );
-            }
-            let event_or_timeout = match timeout_duration_from_now {
-                Some(duration) => self.events_rx.recv_timeout(duration),
+            let event_or_timeout = match self.timer {
+                Some(timer_nanos) => {
+                    let timeout_instant = self
+                        .epoch
+                        .checked_add(Duration::from_nanos(timer_nanos))
+                        .unwrap();
+                    let overshoot_duration =
+                        Instant::now().saturating_duration_since(timeout_instant);
+                    if !overshoot_duration.is_zero() {
+                        log::warn!(
+                            "Timer set in the past, by {}",
+                            humantime::format_duration(overshoot_duration)
+                        );
+                    }
+                    if self.spin_sleep {
+                        loop {
+                            if Instant::now() >= timeout_instant {
+                                break Err(mpsc::RecvTimeoutError::Timeout);
+                            }
+                            match self.events_rx.try_recv() {
+                                Ok(event) => break Ok(event),
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    break Err(mpsc::RecvTimeoutError::Disconnected);
+                                }
+                                Err(mpsc::TryRecvError::Empty) => (),
+                            }
+                        }
+                    } else {
+                        let timeout_duration_from_now = self
+                            .epoch
+                            .checked_add(Duration::from_nanos(timer_nanos))
+                            .unwrap()
+                            .saturating_duration_since(Instant::now());
+                        self.events_rx.recv_timeout(timeout_duration_from_now)
+                    }
+                }
                 None => self
                     .events_rx
                     .recv()
@@ -283,12 +305,13 @@ fn outgoing_read_thread(
     tx: mpsc::Sender<Event>,
     tun: Arc<tun_rs::SyncDevice>,
     tun_is_shutdown: Arc<AtomicBool>,
+    spin_sleep: bool,
     epoch: Instant,
 ) {
     while let Ok(read_request) = read_request_rx.recv() {
         let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
         if let Some(no_earlier_than) = read_request.no_earlier_than {
-            precise_sleep(epoch + Duration::from_nanos(no_earlier_than));
+            precise_sleep(epoch + Duration::from_nanos(no_earlier_than), spin_sleep);
         }
         match tun.recv(&mut buf) {
             Ok(len) => {
@@ -318,10 +341,15 @@ fn outgoing_read_thread(
     log::trace!("outgoing read thread quitting");
 }
 
-fn outgoing_send_thread(rx: mpsc::Receiver<OutgoingSend>, socket: Arc<UdpSocket>, epoch: Instant) {
+fn outgoing_send_thread(
+    rx: mpsc::Receiver<OutgoingSend>,
+    socket: Arc<UdpSocket>,
+    spin_sleep: bool,
+    epoch: Instant,
+) {
     while let Ok(outgoing_send) = rx.recv() {
         if let Some(timestamp) = outgoing_send.timestamp {
-            precise_sleep(epoch + Duration::from_nanos(timestamp));
+            precise_sleep(epoch + Duration::from_nanos(timestamp), spin_sleep);
         }
         match socket.send_to(&outgoing_send.packet, outgoing_send.addr) {
             Ok(len) => {
@@ -376,11 +404,12 @@ fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket:
 fn incoming_send_thread(
     rx: mpsc::Receiver<IncomingSend>,
     tun: Arc<tun_rs::SyncDevice>,
+    spin_sleep: bool,
     epoch: Instant,
 ) {
     while let Ok(incoming_send) = rx.recv() {
         if let Some(timestamp) = incoming_send.timestamp {
-            precise_sleep(epoch + Duration::from_nanos(timestamp));
+            precise_sleep(epoch + Duration::from_nanos(timestamp), spin_sleep);
         }
         match tun.send(&incoming_send.packet) {
             Ok(len) => {
@@ -398,16 +427,21 @@ fn incoming_send_thread(
     log::trace!("incoming send thread quitting");
 }
 
-fn precise_sleep(wake_at: Instant) {
+fn precise_sleep(wake_at: Instant, spin_sleep: bool) {
     // this used to wake up N nanoseconds before wake_at and then do a spinloop the rest of the way,
     // but real-world testing showed that packet intervals actually had substantially /higher/
     // standard deviations.
     let now = Instant::now();
     if now < wake_at {
-        std::thread::sleep(wake_at.saturating_duration_since(now));
+        if spin_sleep {
+            while Instant::now() < wake_at {}
+        } else {
+            std::thread::sleep(wake_at.saturating_duration_since(now));
+        }
     } else {
         log::warn!(
-            "precise_sleep called too late: Requested wake up at {wake_at:?}, but it's already {now:?}"
+            "precise_sleep called too late (by {})",
+            humantime::format_duration(now - wake_at)
         );
     }
 }

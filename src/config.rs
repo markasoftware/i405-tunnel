@@ -146,6 +146,7 @@ pub(crate) struct CommonConfiguration {
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
+    pub(crate) spin_sleep: bool,
 }
 
 impl EzClap for CommonConfiguration {
@@ -174,7 +175,11 @@ impl EzClap for CommonConfiguration {
 		.help("IPv4 address (optionally with netmask) to automatically assign and route to the TUN device."),
             Arg::new("tun_ipv6")
                 .long("tun-ipv6")
-                .help("IPv6 address (optionall with netmask) to automatically assign and route to the TUN device.")
+                .help("IPv6 address (optionall with netmask) to automatically assign and route to the TUN device."),
+            Arg::new("spin_sleep")
+                .long("spin-sleep")
+                .action(clap::ArgAction::SetTrue)
+                .help("Spin on the CPU, never yield on the main thread. May make timers more accurate."),
         ]
     }
 
@@ -190,6 +195,7 @@ impl EzClap for CommonConfiguration {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
+            spin_sleep: matches.get_one::<bool>("spin_sleep").unwrap().clone(),
         }
     }
 }

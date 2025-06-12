@@ -35,6 +35,7 @@ fn main() {
             .tun_ipv6
             .as_ref()
             .map(|ipv6| ipv6.parse().expect("Failed to parse TUN IPv6 addr")),
+        common_config.spin_sleep,
     )
     .expect("Failed to create tun and socket; are you root?");
 
