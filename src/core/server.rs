@@ -160,6 +160,7 @@ impl ServerConnectionStateTrait for NoConnection {
                 if now < negotiation.timeout {
                     Some(negotiation)
                 } else {
+                    log::debug!("Handshake timeout with {}, informing wolfSSL", negotiation.peer);
                     match negotiation.session.has_timed_out(now) {
                         Ok((new_session, to_send, new_timeout)) => 'timeout_success: {
                             for packet in to_send {

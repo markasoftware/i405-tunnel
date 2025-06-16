@@ -367,11 +367,11 @@ fn drop_and_reorder() {
 }
 
 // Test to ensure that we can handle a handshake packet in established mode
-// TODO add another argument so we delay one packet, and drop another once https://github.com/wolfSSL/wolfssl/issues/8855 is fixed
-// TODO test drops not just reorders, weird problems occur
-#[test_matrix(0..20)]
+// TODO unignore once wolfssl fixes are released
+#[test_matrix(0..15, 0..15, (false, true))]
 #[ignore]
-fn long_distance_reorder(which_packet_reorder: u64) {
+#[cfg(any())]
+fn long_distance_reorder(packet_1: u64, packet_2: u64, reorder_1st_instead_of_drop: bool) {
     #[cfg(feature = "wolfssl-debug")]
     wolfssl::enable_debugging(true);
 
@@ -379,7 +379,14 @@ fn long_distance_reorder(which_packet_reorder: u64) {
     // TODO factor out the hardware and core creation into something where we can pass in a lambda doing delays
     let mut simulated_hardware =
         SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
-    simulated_hardware.delay_packet(which_packet_reorder, ms(2000.0));
+    if reorder_1st_instead_of_drop {
+        simulated_hardware.delay_packet(packet_1, ms(2000.0));
+    } else {
+        simulated_hardware.drop_packet(packet_1);
+    }
+    if packet_1 != packet_2 {
+        simulated_hardware.drop_packet(packet_2);
+    }
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
@@ -402,12 +409,20 @@ fn long_distance_reorder(which_packet_reorder: u64) {
         (server_addr(), server_core.into()),
     ]);
 
-    simulated_hardware.run_until(&mut cores, ms(1500.0));
-    std::thread::sleep(Duration::from_millis(1010));
-    simulated_hardware.run_until(&mut cores, ms(4000.0));
+    let mut next_time = ms(2000.0);
+
+    // I'm not sure why so many roundtrips are needed. Try reducing it, and you'll see there's a
+    // couple cases (drop 2,6, and then reorder 2,5) that need substantially more timeouts than the
+    // others to complete. Who knows??
+    for _ in 0..7 {
+        simulated_hardware.run_until(&mut cores, next_time);
+        std::thread::sleep(Duration::from_millis(1010));
+        next_time += ms(2000.0);
+    }
+
     // send a packet to ensure we are actually in established mode
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
-    simulated_hardware.run_until(&mut cores, ms(5000.0));
+    simulated_hardware.run_until(&mut cores, next_time);
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
 }
 
