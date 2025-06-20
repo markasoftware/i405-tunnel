@@ -8,7 +8,6 @@ use anyhow::{Result, anyhow};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct IpPacket {
-    pub(crate) schedule: Option<u64>, // timestamp
     pub(crate) fragmentation_id: Option<u16>,
     pub(crate) packet: IpPacketBuffer,
 }
@@ -23,9 +22,8 @@ impl IpPacket {
 
     /// The size of a serialized IpPacket is the return value of this function plus the length of
     /// the packet.
-    pub(crate) fn base_length(schedule: Option<u64>, fragmentation_id: Option<u16>) -> usize {
+    pub(crate) fn base_length(fragmentation_id: Option<u16>) -> usize {
         Self {
-            schedule,
             fragmentation_id,
             packet: IpPacketBuffer::new_empty(0),
         }
@@ -42,7 +40,6 @@ impl IpPacket {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum IpPacketFlags {
     Fragmented = 1 << 0,
-    Scheduled = 1 << 1,
 }
 
 impl serdes::Serializable for IpPacket {
@@ -51,17 +48,11 @@ impl serdes::Serializable for IpPacket {
         if self.fragmentation_id.is_some() {
             flags |= IpPacketFlags::Fragmented;
         }
-        if self.schedule.is_some() {
-            flags |= IpPacketFlags::Scheduled;
-        }
         let type_byte = Self::TYPE_BYTE_LOW | flags.bits();
         type_byte.serialize(serializer);
 
         if let Some(fragmentation_id) = self.fragmentation_id {
             fragmentation_id.serialize(serializer);
-        }
-        if let Some(schedule) = self.schedule {
-            schedule.serialize(serializer);
         }
 
         self.packet.serialize(serializer);
@@ -86,15 +77,8 @@ impl serdes::Deserializable for IpPacket {
             None
         };
 
-        let schedule = if flags.contains(IpPacketFlags::Scheduled) {
-            Some(read_cursor.read()?)
-        } else {
-            None
-        };
-
         Ok(IpPacket {
             fragmentation_id,
-            schedule,
             packet: read_cursor.read()?,
         })
     }
@@ -180,17 +164,14 @@ mod test {
     fn roundtrip_ip_packet() {
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
             fragmentation_id: None,
-            schedule: None,
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
             fragmentation_id: Some(258),
-            schedule: Some(99),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
             fragmentation_id: None,
-            schedule: Some(99),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         }));
         let mut test_vec = Vec::new();
@@ -199,7 +180,6 @@ mod test {
         }
         assert_roundtrip_message(&Message::IpPacket(IpPacket {
             fragmentation_id: None,
-            schedule: None,
             packet: IpPacketBuffer::new(test_vec.as_ref()),
         }));
     }

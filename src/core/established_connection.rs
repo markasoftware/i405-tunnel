@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use crate::{
     array_array::IpPacketBuffer,
     defragger::Defragger,
@@ -29,33 +27,17 @@ enum OutgoingConnection {
         queued_packet: Box<Option<QueuedIpPacket>>,
         fragmentation_id: u16,
     },
-    Scheduled {
-        // TODO maybe more settings than this:
-        send_rate_bytes_per_second: u64,
-        next_expected_outgoing_read_timestamp: u64,
-        queued_packets: VecDeque<QueuedIpPacket>,
-        fragmentation_id: u16,
-    },
-    MeasureLatency(),
 }
 
 impl OutgoingConnection {
-    fn new_unscheduled(hardware: &mut impl Hardware) -> Self {
+    fn new(hardware: &mut impl Hardware) -> Self {
         // unless we have a queued packet (which we don't yet), we want the hardware to always know
         // we are ready to read an outgoing packet.
-        hardware.read_outgoing_packet(None);
+        hardware.read_outgoing_packet();
         Self::Unscheduled {
             queued_packet: Box::new(None),
             fragmentation_id: 0,
         }
-    }
-
-    fn new_scheduled(_hardware: &mut impl Hardware) -> Self {
-        unimplemented!();
-    }
-
-    fn new_measure_latency() -> Self {
-        Self::MeasureLatency()
     }
 
     /// When a new send outgoing packet is created, call this so that any internal queued packets
@@ -82,7 +64,7 @@ impl OutgoingConnection {
                         FragmentResult::Done(msg) => {
                             msg.serialize(write_cursor);
                             // queue is empty, let's ask for another packet!
-                            hardware.read_outgoing_packet(None);
+                            hardware.read_outgoing_packet();
                         }
                         FragmentResult::Partial(msg, new_queued_packet) => {
                             msg.serialize(write_cursor);
@@ -94,10 +76,6 @@ impl OutgoingConnection {
                     }
                 }
             }
-            OutgoingConnection::Scheduled { .. } => {
-                unimplemented!("Scheduled outgoing connection not implemented yet")
-            }
-            OutgoingConnection::MeasureLatency() => (),
         }
     }
 
@@ -118,15 +96,9 @@ impl OutgoingConnection {
                     queued_packet.is_none(),
                     "We never request to read an outgoing packet while we have a queued packet"
                 );
-                **queued_packet = Some(QueuedIpPacket::new(packet, None));
+                **queued_packet = Some(QueuedIpPacket::new(packet));
                 self.try_to_dequeue(hardware, write_cursor);
             }
-            OutgoingConnection::Scheduled { .. } => {
-                unimplemented!("Scheduled outgoing connection not implemented yet")
-            }
-            OutgoingConnection::MeasureLatency() => panic!(
-                "MeasureLatency outgoing connection never asks to read outgoing packets but we just got one"
-            ),
         }
     }
 }
@@ -147,7 +119,7 @@ impl EstablishedConnection {
         Ok(Self {
             session,
             peer,
-            outgoing_connection: OutgoingConnection::new_unscheduled(hardware),
+            outgoing_connection: OutgoingConnection::new(hardware),
             partial_outgoing_packet: messages::WriteCursor::new(IpPacketBuffer::new_empty(
                 outgoing_wire_config.packet_length.into(),
             )),
@@ -245,24 +217,16 @@ impl EstablishedConnection {
                     "Received ServerToClientHandshake during established session -- retransmission?"
                 ),
                 Message::IpPacket(ip_packet) => {
-                    if let Some(defragged_logical_packet) =
-                        self.defragger.handle_ip_packet(&ip_packet)
-                    {
-                        hardware.send_incoming_packet(
-                            &defragged_logical_packet.packet,
-                            defragged_logical_packet.schedule,
-                        )?;
+                    if let Some(defragged_packet) = self.defragger.handle_ip_packet(&ip_packet) {
+                        hardware.send_incoming_packet(&defragged_packet)?;
                     }
                 }
                 Message::IpPacketFragment(ip_packet_fragment) => {
-                    if let Some(defragged_logical_packet) = self
+                    if let Some(defragged_packet) = self
                         .defragger
                         .handle_ip_packet_fragment(&ip_packet_fragment)
                     {
-                        hardware.send_incoming_packet(
-                            &defragged_logical_packet.packet,
-                            defragged_logical_packet.schedule,
-                        )?;
+                        hardware.send_incoming_packet(&defragged_packet)?;
                     }
                 }
             }

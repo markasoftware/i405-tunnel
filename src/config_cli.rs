@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use clap::{Arg, ArgGroup, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 use declarative_enum_dispatch::enum_dispatch;
 
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1405";
@@ -17,21 +17,21 @@ trait EzClap {
     fn from_match(matches: &ArgMatches) -> Self;
 }
 
-pub(crate) enum WireInterval {
+pub(crate) enum WireIntervalCli {
     Fixed(u64), // fixed interval in ns
     Rate(u64),  // bytes per second
 }
 
-pub(crate) struct WireConfiguration {
+pub(crate) struct WireConfigCli {
     pub(crate) outgoing_packet_length: Option<u64>,
     pub(crate) outgoing_finalize_delta: u64,
-    pub(crate) outgoing_interval: WireInterval,
+    pub(crate) outgoing_interval: WireIntervalCli,
     pub(crate) incoming_packet_length: Option<u64>,
     pub(crate) incoming_finalize_delta: u64,
-    pub(crate) incoming_interval: WireInterval,
+    pub(crate) incoming_interval: WireIntervalCli,
 }
 
-impl EzClap for WireConfiguration {
+impl EzClap for WireConfigCli {
     fn to_args() -> Vec<Arg> {
         vec![
             Arg::new("outgoing_packet_length")
@@ -97,24 +97,24 @@ impl EzClap for WireConfiguration {
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
-        let parse_interval = |in_or_out| -> WireInterval {
+        let parse_interval = |in_or_out| -> WireIntervalCli {
             match (
                 matches.get_one::<Duration>(&format!("{in_or_out}_packet_interval")),
                 matches.get_one::<bytesize::ByteSize>(&format!("{in_or_out}_bytes_per_second")),
             ) {
-                (Some(interval), None) => WireInterval::Fixed(
+                (Some(interval), None) => WireIntervalCli::Fixed(
                     interval
                         .as_nanos()
                         .try_into()
                         .expect("Don't put intervals longer than hundreds of years."),
                 ),
-                (None, Some(bytes_per_second)) => WireInterval::Rate(bytes_per_second.as_u64()),
+                (None, Some(bytes_per_second)) => WireIntervalCli::Rate(bytes_per_second.as_u64()),
                 _ => unreachable!(
                     "Clap should enforce that either interval or bytes per second is set."
                 ),
             }
         };
-        WireConfiguration {
+        WireConfigCli {
             outgoing_packet_length: matches
                 .get_one::<bytesize::ByteSize>("outgoing_packet_length")
                 .map(|x| x.as_u64()),
@@ -139,17 +139,24 @@ impl EzClap for WireConfiguration {
     }
 }
 
-pub(crate) struct CommonConfiguration {
+pub(crate) struct CommonConfigCli {
     pub(crate) pre_shared_key: Vec<u8>,
     pub(crate) listen_addr: String,
     pub(crate) tun_name: String,
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
-    pub(crate) spin_sleep: bool,
+    pub(crate) force_sched_fifo: bool,
+    pub(crate) force_no_sched_fifo: bool,
+    pub(crate) poll_mode: PollMode,
 }
 
-impl EzClap for CommonConfiguration {
+pub(crate) enum PollMode {
+    Sleepy,
+    Spinny,
+}
+
+impl EzClap for CommonConfigCli {
     fn to_args() -> Vec<Arg> {
         vec![
             Arg::new("pre_shared_key")
@@ -176,15 +183,25 @@ impl EzClap for CommonConfiguration {
             Arg::new("tun_ipv6")
                 .long("tun-ipv6")
                 .help("IPv6 address (optionall with netmask) to automatically assign and route to the TUN device."),
-            Arg::new("spin_sleep")
-                .long("spin-sleep")
-                .action(clap::ArgAction::SetTrue)
-                .help("Spin on the CPU, never yield on the main thread. May make timers more accurate."),
+            Arg::new("poll_mode")
+                .long("poll-mode")
+                .value_parser(["sleepy", "spinny"])
+                // TODO consider changing to spinny:
+                .default_value("sleepy")
+                .help("Control how we poll/wait for network events. The default is `sleepy`, which uses the OS' timers to schedule wakeups whenthere is nothing to do immediately (eg, to wait until the next time that an outgoing packet is scheduled to be sent). This is power-efficient and keeps CPU usage low. However, the time it takes to wake up after a sleep varies under system load, so outgoing packet timings may sligthly vary based on system load and leak information about whether the system is busy. In `spinny` mode, spin loops/busy loops are used for timing, which keeps the CPU hot and has more consistent wake-up times, at the cost of 100% CPU usage on one core. In spinny mode, you'll also probably want to "),
+            Arg::new("force_sched_fifo")
+                .long("sched-fifo")
+                .action(ArgAction::SetTrue)
+                .help("Set the main thread's scheduling to SCHED_FIFO, which will cause it to take precedence over most other threads on your system when it's time for it to be scheduled. On by default in spinny poll mode, off by default in sleepy poll mode."),
+            Arg::new("force_no_sched_fifo")
+                .long("no-sched-fifo")
+                .action(ArgAction::SetTrue)
+                .help("Force opposite of --sched-fifo"),
         ]
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
-        CommonConfiguration {
+        CommonConfigCli {
             pre_shared_key: matches
                 .get_one::<Vec<u8>>("pre_shared_key")
                 .unwrap()
@@ -195,22 +212,33 @@ impl EzClap for CommonConfiguration {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
-            spin_sleep: matches.get_one::<bool>("spin_sleep").unwrap().clone(),
+            force_sched_fifo: matches.get_one::<bool>("force_sched_fifo").unwrap().clone(),
+            force_no_sched_fifo: matches
+                .get_one::<bool>("force_no_sched_fifo")
+                .unwrap()
+                .clone(),
+            poll_mode: match matches.get_one::<String>("poll_mode").unwrap().as_ref() {
+                "sleepy" => PollMode::Sleepy,
+                "spinny" => PollMode::Spinny,
+                other => {
+                    panic!("\"{other}\" is not a valid poll mode -- try \"sleepy\" or \"spinny\"")
+                }
+            },
         }
     }
 }
 
-pub(crate) struct ClientConfiguration {
-    pub(crate) common_configuration: CommonConfiguration,
-    pub(crate) wire_configuration: WireConfiguration,
+pub(crate) struct ClientConfigCli {
+    pub(crate) common_configuration: CommonConfigCli,
+    pub(crate) wire_configuration: WireConfigCli,
     pub(crate) peer: String,
 }
 
-impl EzClap for ClientConfiguration {
+impl EzClap for ClientConfigCli {
     fn to_args() -> Vec<Arg> {
         let mut result = Vec::new();
-        result.extend(CommonConfiguration::to_args());
-        result.extend(WireConfiguration::to_args());
+        result.extend(CommonConfigCli::to_args());
+        result.extend(WireConfigCli::to_args());
         result.push(
             Arg::new("peer")
                 .long("peer")
@@ -223,73 +251,73 @@ impl EzClap for ClientConfiguration {
 
     fn to_groups() -> Vec<ArgGroup> {
         let mut result = Vec::new();
-        result.extend(CommonConfiguration::to_groups());
-        result.extend(WireConfiguration::to_groups());
+        result.extend(CommonConfigCli::to_groups());
+        result.extend(WireConfigCli::to_groups());
         result
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
         Self {
-            common_configuration: CommonConfiguration::from_match(matches),
-            wire_configuration: WireConfiguration::from_match(matches),
+            common_configuration: CommonConfigCli::from_match(matches),
+            wire_configuration: WireConfigCli::from_match(matches),
             peer: matches.get_one::<String>("peer").unwrap().clone(),
         }
     }
 }
 
-impl ContainsCommonConfiguration for ClientConfiguration {
-    fn common_configuration(&self) -> &CommonConfiguration {
+impl ContainsCommonConfigCli for ClientConfigCli {
+    fn common_config_cli(&self) -> &CommonConfigCli {
         &self.common_configuration
     }
 }
 
-pub(crate) struct ServerConfiguration {
-    pub(crate) common_configuration: CommonConfiguration,
+pub(crate) struct ServerConfigCli {
+    pub(crate) common_configuration: CommonConfigCli,
 }
 
-impl EzClap for ServerConfiguration {
+impl EzClap for ServerConfigCli {
     fn to_args() -> Vec<Arg> {
-        CommonConfiguration::to_args()
+        CommonConfigCli::to_args()
     }
 
     fn to_groups() -> Vec<ArgGroup> {
-        CommonConfiguration::to_groups()
+        CommonConfigCli::to_groups()
     }
 
     fn from_match(matches: &ArgMatches) -> Self {
         Self {
-            common_configuration: CommonConfiguration::from_match(matches),
+            common_configuration: CommonConfigCli::from_match(matches),
         }
     }
 }
 
-impl ContainsCommonConfiguration for ServerConfiguration {
-    fn common_configuration(&self) -> &CommonConfiguration {
+impl ContainsCommonConfigCli for ServerConfigCli {
+    fn common_config_cli(&self) -> &CommonConfigCli {
         &self.common_configuration
     }
 }
 
 enum_dispatch! {
-    pub(crate) trait ContainsCommonConfiguration {
-        fn common_configuration(&self) -> &CommonConfiguration;
+    pub(crate) trait ContainsCommonConfigCli {
+        fn common_config_cli(&self) -> &CommonConfigCli;
     }
 
-    pub(crate) enum Configuration {
-        Client(ClientConfiguration),
-        Server(ServerConfiguration),
+    pub(crate) enum ConfigCli {
+        Client(ClientConfigCli),
+        Server(ServerConfigCli),
     }
 }
 
 fn client_command() -> Command {
     Command::new("client")
-        .args(ClientConfiguration::to_args())
-        .groups(ClientConfiguration::to_groups())
+        .args(ClientConfigCli::to_args())
+        .groups(ClientConfigCli::to_groups())
 }
 
 fn server_command() -> Command {
     Command::new("server")
-        .args(ServerConfiguration::to_args())
-        .groups(ServerConfiguration::to_groups())
+        .args(ServerConfigCli::to_args())
+        .groups(ServerConfigCli::to_groups())
 }
 
 fn main_command() -> Command {
@@ -299,15 +327,11 @@ fn main_command() -> Command {
         .subcommand_required(true)
 }
 
-pub(crate) fn parse_args() -> Configuration {
+pub(crate) fn parse_args() -> ConfigCli {
     let top_level_matches = main_command().get_matches();
     match top_level_matches.subcommand() {
-        Some(("client", matches)) => {
-            Configuration::Client(ClientConfiguration::from_match(matches))
-        }
-        Some(("server", matches)) => {
-            Configuration::Server(ServerConfiguration::from_match(matches))
-        }
+        Some(("client", matches)) => ConfigCli::Client(ClientConfigCli::from_match(matches)),
+        Some(("server", matches)) => ConfigCli::Server(ServerConfigCli::from_match(matches)),
         _ => unreachable!(),
     }
 }

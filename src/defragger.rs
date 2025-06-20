@@ -3,7 +3,6 @@ use bitvec::{BitArr, bitarr};
 use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
-    logical_ip_packet::LogicalIpPacket,
     messages::{IpPacket, IpPacketFragment},
 };
 
@@ -47,9 +46,7 @@ struct DefragPacket {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct PacketDetails {
-    schedule: Option<u64>,
-}
+struct PacketDetails {}
 
 impl Defragger {
     pub(crate) fn new() -> Defragger {
@@ -132,17 +129,14 @@ impl Defragger {
 
     /// Take an IP packet message and returns the inner IP packet content if it's unfragmented.
     /// Else, updates internal data structures to account for the fragment, and returns None.
-    pub(crate) fn handle_ip_packet(&mut self, message: &IpPacket) -> Option<LogicalIpPacket> {
+    pub(crate) fn handle_ip_packet(&mut self, message: &IpPacket) -> Option<IpPacketBuffer> {
         let fragmentation_id = match message.fragmentation_id {
             Some(fragmentation_id) => fragmentation_id,
             // the packet is not fragmented
             None => {
                 // this ensures that we kick out old fragments
                 self.next_counter();
-                return Some(LogicalIpPacket {
-                    packet: message.packet.clone(),
-                    schedule: message.schedule,
-                });
+                return Some(message.packet.clone());
             }
         };
 
@@ -163,16 +157,14 @@ impl Defragger {
             return self.handle_ip_packet(message);
         }
 
-        defrag_packet.details = Some(PacketDetails {
-            schedule: message.schedule,
-        });
+        defrag_packet.details = Some(PacketDetails {});
         defrag_packet.written_bytes[..message.packet.len()].fill(true);
         defrag_packet.packet_so_far[..message.packet.len()].copy_from_slice(&message.packet[..]);
 
         match defrag_packet.try_complete() {
-            Some(logical_packet) => {
+            Some(packet) => {
                 self.remove_specific_defrag_packet(fragmentation_id);
-                Some(logical_packet)
+                Some(packet)
             }
             None => None,
         }
@@ -186,7 +178,7 @@ impl Defragger {
     pub(crate) fn handle_ip_packet_fragment(
         &mut self,
         message: &IpPacketFragment,
-    ) -> Option<LogicalIpPacket> {
+    ) -> Option<IpPacketBuffer> {
         // actually one past the end
         let message_offset_past_end = usize::from(message.offset)
             .checked_add(message.fragment.len())
@@ -222,9 +214,9 @@ impl Defragger {
         // take it out of the vec, then try_complete consumes it, and then put the result back into
         // the vec if not complete. More similar to DTLS handling.
         match defrag_packet.try_complete() {
-            Some(logical_packet) => {
+            Some(packet) => {
                 self.remove_specific_defrag_packet(message.fragmentation_id);
-                Some(logical_packet)
+                Some(packet)
             }
             None => None,
         }
@@ -244,18 +236,15 @@ impl DefragPacket {
     }
 
     /// If the fragment is complete, return the buffer within!
-    fn try_complete(&self) -> Option<LogicalIpPacket> {
+    fn try_complete(&self) -> Option<IpPacketBuffer> {
         match (&self.details, self.unfragmented_length) {
-            (Some(details), Some(unfragmented_length)) => {
+            (Some(_details), Some(unfragmented_length)) => {
                 if self.written_bytes[..unfragmented_length.into()].all() {
                     assert!(
                         self.packet_so_far.len() == unfragmented_length.into(),
                         "Packet to return in try_complete was not the expected length; it should be shrunk when unfragmented_length is set"
                     );
-                    Some(LogicalIpPacket {
-                        packet: self.packet_so_far.clone(),
-                        schedule: details.schedule,
-                    })
+                    Some(self.packet_so_far.clone())
                 } else {
                     None
                 }
@@ -269,32 +258,23 @@ impl DefragPacket {
 mod test {
     use super::{Defragger, MAX_ACTIVE_FRAGMENTATION_IDS, MAX_FRAGMENTATION_ID_AGE};
     use crate::array_array::IpPacketBuffer;
-    use crate::logical_ip_packet::LogicalIpPacket;
     use crate::messages::{IpPacket, IpPacketFragment};
 
     #[test]
     fn defrag_non_fragmented_packet() {
         let mut defragger = Defragger::new();
         let message = IpPacket {
-            schedule: Some(999),
             fragmentation_id: None,
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         };
         let defrag_result = defragger.handle_ip_packet(&message);
-        assert_eq!(
-            defrag_result,
-            Some(LogicalIpPacket {
-                packet: message.packet,
-                schedule: Some(999)
-            })
-        );
+        assert_eq!(defrag_result, Some(message.packet.clone()));
     }
 
     #[test]
     fn defrag_three_packets_all_orders() {
         let mut defragger = Defragger::new();
         let message_0 = IpPacket {
-            schedule: Some(999),
             fragmentation_id: Some(42),
             packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
         };
@@ -331,10 +311,7 @@ mod test {
                         assert_eq!(handle_message(j), None);
                         assert_eq!(
                             handle_message(k),
-                            Some(LogicalIpPacket {
-                                packet: IpPacketBuffer::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]),
-                                schedule: Some(999)
-                            })
+                            Some(IpPacketBuffer::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9])),
                         );
                     }
                 }
@@ -350,7 +327,6 @@ mod test {
         let mut defragger = Defragger::new();
         for fid in 0..u16::try_from(MAX_ACTIVE_FRAGMENTATION_IDS).unwrap() + 1 {
             defragger.handle_ip_packet(&IpPacket {
-                schedule: Some(2828),
                 fragmentation_id: Some(fid),
                 packet: IpPacketBuffer::new(&[8, 9, 0]),
             });
@@ -389,7 +365,6 @@ mod test {
         // first, insert the start of the packet we'll allow to get old.
         let old_fid = 8;
         let old_start = IpPacket {
-            schedule: Some(992),
             fragmentation_id: Some(old_fid),
             packet: IpPacketBuffer::new(&[8]),
         };
@@ -397,7 +372,6 @@ mod test {
 
         let old_fid_2 = 9;
         let old_start_2 = IpPacket {
-            schedule: Some(993),
             fragmentation_id: Some(old_fid_2),
             packet: IpPacketBuffer::new(&[8]),
         };
@@ -407,24 +381,16 @@ mod test {
             // push through unfragmented packets
             let buf = IpPacketBuffer::new(&[2, 9]);
             let defragged = defragger.handle_ip_packet(&IpPacket {
-                schedule: Some(992),
                 fragmentation_id: None,
                 packet: buf.clone(),
             });
             // we don't care that much about the result but why not check
-            assert_eq!(
-                defragged,
-                Some(LogicalIpPacket {
-                    packet: buf,
-                    schedule: Some(992)
-                })
-            );
+            assert_eq!(defragged, Some(buf));
         }
         for new_fid in 990..995 {
             // push through fragmented packets. The idea here is we want to check that both
             // fragmented and unfragmented packets increase the counter
             defragger.handle_ip_packet(&IpPacket {
-                schedule: Some(828),
                 fragmentation_id: Some(new_fid),
                 packet: IpPacketBuffer::new(&[1, 2]),
             });

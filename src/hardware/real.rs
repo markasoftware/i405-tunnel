@@ -1,521 +1,78 @@
-use std::{
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket},
-    sync::{Arc, atomic::AtomicBool, mpsc},
-    time::{Duration, Instant},
-};
+use std::net::SocketAddr;
 
-use anyhow::{Result, anyhow};
+/// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
+use anyhow::Result;
 
-use crate::{
-    array_array::IpPacketBuffer, constants::MAX_IP_PACKET_LENGTH, core, hardware::Hardware,
-};
+use crate::config_cli::CommonConfigCli;
 
-const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
-
-pub(crate) struct RealHardware {
-    epoch: Instant,
-    // we increment this when event listeners are cleared, and include it in all requests to other
-    // threads, so that we can identify when an event is from a "previous" generation
-    generation: u64,
-    // we'll "connect" to this address to disconnect:
-    disconnect_addr: SocketAddr,
-    spin_sleep: bool,
-
-    timer: Option<u64>,
-    socket: Arc<UdpSocket>,
-    tun: Arc<tun_rs::SyncDevice>,
-    tun_is_shutdown: Arc<AtomicBool>,
-
-    outgoing_read_thread: ChannelThread<OutgoingReadRequest>,
-    outgoing_send_thread: ChannelThread<OutgoingSend>,
-    // don't need to send anything here, we are always listening to incoming reads. It's still
-    // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
-    incoming_read_thread: ChannelThread<()>,
-    incoming_send_thread: ChannelThread<IncomingSend>,
-
-    // events_rx should be listed after the threads, because if it's dropped before the threads are
-    // dropped, then the threads may try to send to their events_txs after the receiver has been
-    // dropped, and get errors.
-    events_rx: mpsc::Receiver<Event>,
-}
-
-impl RealHardware {
-    pub(crate) fn new(
-        listen_addr: SocketAddr,
-        tun_name: String,
-        tun_mtu: Option<u16>,
-        tun_ipv4_net: Option<ipnet::Ipv4Net>,
-        tun_ipv6_net: Option<ipnet::Ipv6Net>,
-        spin_sleep: bool,
-    ) -> Result<Self> {
-        let disconnect_addr = match listen_addr {
-            SocketAddr::V4(_) => {
-                SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::from_bits(0), 0))
-            }
-            SocketAddr::V6(_) => {
-                SocketAddr::V6(SocketAddrV6::new(std::net::Ipv6Addr::from_bits(0), 0, 0, 0))
-            }
-        };
-
-        let (outgoing_read_requests_tx, outgoing_read_requests_rx) = mpsc::channel();
-        let (outgoing_sends_tx, outgoing_sends_rx) = mpsc::channel();
-        let (incoming_reads_tx, incoming_reads_rx) = mpsc::channel();
-        let (incoming_sends_tx, incoming_sends_rx) = mpsc::channel();
-
-        let (events_tx, events_rx) = mpsc::channel();
-        let tx_for_outgoing_read_thread = events_tx.clone();
-        let tx_for_incoming_read_thread = events_tx.clone();
-        let tx_for_signal_handler = events_tx;
-
-        let socket = Arc::new(UdpSocket::bind(listen_addr)?);
-        socket
-            .set_read_timeout(Some(SOCKET_READ_TIMEOUT))
-            .expect("Failed to set UDP socket read timeout");
-        let outgoing_send_socket = socket.clone();
-        let incoming_read_socket = socket.clone();
-
-        let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_name);
-        if let Some(mtu) = tun_mtu {
-            tun_builder = tun_builder.mtu(mtu);
-        }
-        if let Some(ipv4_net) = tun_ipv4_net {
-            tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
-        }
-        if let Some(ipv6_net) = tun_ipv6_net {
-            tun_builder = tun_builder.ipv6(ipv6_net.addr(), ipv6_net.netmask());
-        }
-        let tun = Arc::new(tun_builder.build_sync()?);
-        let tun_for_outgoing_read_thread = tun.clone();
-        let incoming_send_tun = tun.clone();
-        let tun_is_shutdown = Arc::new(AtomicBool::new(false));
-        let tun_is_shutdown_for_outgoing_read_thread = tun_is_shutdown.clone();
-
-        let epoch = Instant::now();
-
-        ctrlc::set_handler(move || {
-            log::info!("Shutting down I405 due to received signal");
-            tx_for_signal_handler.send(Event::Terminate).unwrap();
-        })
-        .expect("Error installing signal handlers");
-
-        Ok(Self {
-            epoch,
-            generation: 0,
-            disconnect_addr,
-            spin_sleep,
-
-            timer: None,
-            socket,
-            tun,
-            tun_is_shutdown,
-
-            events_rx,
-
-            outgoing_read_thread: ChannelThread::spawn(outgoing_read_requests_tx, move || {
-                outgoing_read_thread(
-                    outgoing_read_requests_rx,
-                    tx_for_outgoing_read_thread,
-                    tun_for_outgoing_read_thread,
-                    tun_is_shutdown_for_outgoing_read_thread,
-                    spin_sleep,
-                    epoch,
-                )
-            }),
-            outgoing_send_thread: ChannelThread::spawn(outgoing_sends_tx, move || {
-                outgoing_send_thread(outgoing_sends_rx, outgoing_send_socket, spin_sleep, epoch)
-            }),
-            incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, move || {
-                incoming_read_thread(
-                    incoming_reads_rx,
-                    tx_for_incoming_read_thread,
-                    incoming_read_socket,
-                )
-            }),
-            incoming_send_thread: ChannelThread::spawn(incoming_sends_tx, move || {
-                incoming_send_thread(incoming_sends_rx, incoming_send_tun, spin_sleep, epoch)
-            }),
-        })
-    }
-
-    /// Run our poor excuse for an event loop until interrupted by SIGINT
-    // TODO this doesn't really need to be generic, could just use ConcreteCore
-    pub(crate) fn run(&mut self, mut core: impl core::Core) {
-        loop {
-            // we don't do precise sleep for timers, because everything time-sensitive that the Core
-            // does is done via timestamps on other core methods. It's never important that the core
-            // itself do something at a precise timestamp.
-
-            // only set if the user requested a timer, /and/ that timer is short enough that we're
-            // actually able to use it.
-            let event_or_timeout = match self.timer {
-                Some(timer_nanos) => {
-                    let timeout_instant = self
-                        .epoch
-                        .checked_add(Duration::from_nanos(timer_nanos))
-                        .unwrap();
-                    let overshoot_duration =
-                        Instant::now().saturating_duration_since(timeout_instant);
-                    if !overshoot_duration.is_zero() {
-                        log::warn!(
-                            "Timer set in the past, by {}",
-                            humantime::format_duration(overshoot_duration)
-                        );
-                    }
-                    if self.spin_sleep {
-                        loop {
-                            if Instant::now() >= timeout_instant {
-                                break Err(mpsc::RecvTimeoutError::Timeout);
-                            }
-                            match self.events_rx.try_recv() {
-                                Ok(event) => break Ok(event),
-                                Err(mpsc::TryRecvError::Disconnected) => {
-                                    break Err(mpsc::RecvTimeoutError::Disconnected);
-                                }
-                                Err(mpsc::TryRecvError::Empty) => (),
-                            }
-                        }
-                    } else {
-                        let timeout_duration_from_now = self
-                            .epoch
-                            .checked_add(Duration::from_nanos(timer_nanos))
-                            .unwrap()
-                            .saturating_duration_since(Instant::now());
-                        self.events_rx.recv_timeout(timeout_duration_from_now)
-                    }
-                }
-                None => self
-                    .events_rx
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            match event_or_timeout {
-                Ok(Event::OutgoingRead {
-                    timestamp,
-                    packet,
-                    generation,
-                }) => {
-                    if generation == self.generation {
-                        // TODO the packet comes to us as &[u8], then we wrap it in an
-                        // IpPacketBuffer, then we deref it here, then it'll almost certainly be
-                        // made back into an IpPacketBuffer again later. Does explicitly converting
-                        // it back and forth between a slice and an IpPacketBuffer cause even more
-                        // copying than necessary? Probably depends on inlining and stuff but I'm
-                        // not sure!
-                        core.on_read_outgoing_packet(self, &packet, timestamp);
-                    }
-                }
-                Ok(Event::IncomingRead { addr, packet }) => {
-                    core.on_read_incoming_packet(self, &packet, addr);
-                }
-                Ok(Event::Terminate) => return core.on_terminate(self),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let activated_timer = std::mem::take(&mut self.timer);
-                    core.on_timer(self, activated_timer.unwrap());
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("events_rx shouldn't disconnect as long as the RealHardware lives.")
-                }
-            }
-        }
+/// Return the address that you can "connect" a UDP socket to to disconnect it, using the same IP
+/// protocol version as listen_addr
+pub(crate) fn disconnect_addr(listen_addr: SocketAddr) -> SocketAddr {
+    match listen_addr {
+        SocketAddr::V4(_) => SocketAddr::V4(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::from_bits(0),
+            0,
+        )),
+        SocketAddr::V6(_) => SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::from_bits(0),
+            0,
+            0,
+            0,
+        )),
     }
 }
 
-// HACK: The outgoing read thread does a blocking `recv` on the tun, and there's no way to add a
-// timeout. We could get the fd out of the tun, and then poll it using the `nix` package. However,
-// we avoid an extra dependency by just shutting down the TUN, which at least on my system does
-// cause the recv to be interrupted.
-impl Drop for RealHardware {
-    fn drop(&mut self) {
-        self.tun_is_shutdown
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.tun.shutdown().expect("Error closing TUN");
+pub(crate) struct TunConfig {
+    name: String,
+    mtu: Option<u16>,
+    ipv4_net: Option<ipnet::Ipv4Net>,
+    ipv6_net: Option<ipnet::Ipv6Net>,
+}
+
+pub(crate) fn tun_config_from_common_config_cli(common_config_cli: &CommonConfigCli) -> TunConfig {
+    TunConfig {
+        name: common_config_cli.tun_name.clone(),
+        mtu: common_config_cli.tun_mtu,
+        ipv4_net: common_config_cli
+            .tun_ipv4
+            .as_ref()
+            .map(|ipv4| ipv4.parse().expect("Failed to parse TUN IPv4 address")),
+        ipv6_net: common_config_cli
+            .tun_ipv6
+            .as_ref()
+            .map(|ipv6| ipv6.parse().expect("Failed to parse TUN IPv6 address")),
     }
 }
 
-/// Automatically joins thread on drop.
-struct JThread {
-    join_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl JThread {
-    fn spawn<F: FnOnce() -> () + Send + 'static>(f: F) -> Self {
-        Self {
-            join_handle: Some(std::thread::spawn(f)),
-        }
+/// Create tun, socket, and set scheduling policy.
+pub(crate) fn make_tun(tun_config: TunConfig) -> Result<tun_rs::SyncDevice> {
+    let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_config.name);
+    if let Some(mtu) = tun_config.mtu {
+        tun_builder = tun_builder.mtu(mtu);
     }
-}
-
-impl Drop for JThread {
-    fn drop(&mut self) {
-        if let Err(panic_payload) = std::mem::take(&mut self.join_handle).unwrap().join() {
-            std::panic::resume_unwind(panic_payload);
-        }
+    if let Some(ipv4_net) = tun_config.ipv4_net {
+        tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
     }
-}
-
-// A channel that we can send stuff to. This is designed for threads that have internal logic which
-// shuts down the thread once the channel closes; this way, as the ChannelThread is dropped, the
-// channel will close, then we attempt to join the thread, and then the thread will cooperatively
-// close, giving us a fully RAII-based cooperative thread closing mechanism.
-struct ChannelThread<TX> {
-    tx: mpsc::Sender<TX>,
-    _jthread: JThread,
-}
-
-impl<TX> ChannelThread<TX> {
-    fn spawn<F: FnOnce() -> () + Send + 'static>(tx: mpsc::Sender<TX>, f: F) -> Self {
-        Self {
-            tx,
-            _jthread: JThread::spawn(f),
-        }
+    if let Some(ipv6_net) = tun_config.ipv6_net {
+        tun_builder = tun_builder.ipv6(ipv6_net.addr(), ipv6_net.netmask());
     }
+    Ok(tun_builder.build_sync()?)
 }
 
-struct OutgoingReadRequest {
-    generation: u64,
-    no_earlier_than: Option<u64>,
-}
-
-struct OutgoingSend {
-    packet: IpPacketBuffer,
-    addr: SocketAddr,
-    timestamp: Option<u64>,
-}
-
-struct IncomingSend {
-    packet: IpPacketBuffer,
-    timestamp: Option<u64>,
-}
-
-enum Event {
-    OutgoingRead {
-        timestamp: u64,
-        packet: IpPacketBuffer,
-        generation: u64,
-    },
-    IncomingRead {
-        addr: SocketAddr,
-        packet: IpPacketBuffer,
-    },
-    Terminate,
-}
-
-fn outgoing_read_thread(
-    read_request_rx: mpsc::Receiver<OutgoingReadRequest>,
-    tx: mpsc::Sender<Event>,
-    tun: Arc<tun_rs::SyncDevice>,
-    tun_is_shutdown: Arc<AtomicBool>,
-    spin_sleep: bool,
-    epoch: Instant,
-) {
-    while let Ok(read_request) = read_request_rx.recv() {
-        let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
-        if let Some(no_earlier_than) = read_request.no_earlier_than {
-            precise_sleep(epoch + Duration::from_nanos(no_earlier_than), spin_sleep);
-        }
-        match tun.recv(&mut buf) {
-            Ok(len) => {
-                buf.shrink(len);
-                if tx
-                    .send(Event::OutgoingRead {
-                        generation: read_request.generation,
-                        packet: buf,
-                        timestamp: (Instant::now() - epoch).as_nanos().try_into().unwrap(),
-                    })
-                    .is_err()
-                {
-                    // the thread got disconnected
-                    return;
-                }
-            }
-            Err(err) => {
-                // if we are shutting down, ignore ConnectionAborted error -- that's normal.
-                if !(err.kind() == std::io::ErrorKind::ConnectionAborted
-                    && tun_is_shutdown.load(std::sync::atomic::Ordering::SeqCst))
-                {
-                    log::error!("Outgoing read error (from tun): {err:?}");
-                }
-            }
-        }
-    }
-    log::trace!("outgoing read thread quitting");
-}
-
-fn outgoing_send_thread(
-    rx: mpsc::Receiver<OutgoingSend>,
-    socket: Arc<UdpSocket>,
-    spin_sleep: bool,
-    epoch: Instant,
-) {
-    while let Ok(outgoing_send) = rx.recv() {
-        if let Some(timestamp) = outgoing_send.timestamp {
-            precise_sleep(epoch + Duration::from_nanos(timestamp), spin_sleep);
-        }
-        match socket.send_to(&outgoing_send.packet, outgoing_send.addr) {
-            Ok(len) => {
-                if len != outgoing_send.packet.len() {
-                    log::error!(
-                        "Length mismatch sending outgoing packet over udp socket: Actually sent {}, tried to send {} bytes",
-                        len,
-                        outgoing_send.packet.len(),
-                    );
-                }
-            }
-            Err(err) => log::error!("Outgoing send error (to udp socket): {err:?}"),
-        }
-    }
-    log::trace!("outgoing send thread quitting");
-}
-
-fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket: Arc<UdpSocket>) {
-    let mut last_block = Instant::now().checked_sub(SOCKET_READ_TIMEOUT).unwrap();
-    // keep reading packets until the channel disconnects
-    loop {
-        match rx.try_recv() {
-            Ok(()) => panic!("Should never receive actual data in incoming_read_thread"),
-            Err(mpsc::TryRecvError::Disconnected) => break,
-            Err(mpsc::TryRecvError::Empty) => {
-                let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
-                match socket.recv_from(&mut buf) {
-                    Ok((len_recvd, addr)) => {
-                        buf.shrink(len_recvd);
-                        tx.send(Event::IncomingRead { addr, packet: buf }).unwrap();
-                    }
-                    // TODO somehow signal the error more seriously?
-                    Err(err) => {
-                        if err.kind() == std::io::ErrorKind::WouldBlock {
-                            // this is fairly normal, just make we aren't somehow in fully non-blocking mode.
-                            let now = Instant::now();
-                            if now.saturating_duration_since(last_block) < SOCKET_READ_TIMEOUT / 8 {
-                                log::error!("WouldBlock too frequently!");
-                            }
-                            last_block = now;
-                        } else {
-                            log::error!("Incoming read error (from udp socket): {err:?}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    log::trace!("incoming read thread quitting");
-}
-
-fn incoming_send_thread(
-    rx: mpsc::Receiver<IncomingSend>,
-    tun: Arc<tun_rs::SyncDevice>,
-    spin_sleep: bool,
-    epoch: Instant,
-) {
-    while let Ok(incoming_send) = rx.recv() {
-        if let Some(timestamp) = incoming_send.timestamp {
-            precise_sleep(epoch + Duration::from_nanos(timestamp), spin_sleep);
-        }
-        match tun.send(&incoming_send.packet) {
-            Ok(len) => {
-                if len != incoming_send.packet.len() {
-                    log::error!(
-                        "Length mismatch sending incoming packet over tun: Actually sent {}, tried to send {} bytes",
-                        len,
-                        incoming_send.packet.len()
-                    );
-                }
-            }
-            Err(err) => log::error!("Incoming send error (over tun): {err:?}"),
-        }
-    }
-    log::trace!("incoming send thread quitting");
-}
-
-fn precise_sleep(wake_at: Instant, spin_sleep: bool) {
-    // this used to wake up N nanoseconds before wake_at and then do a spinloop the rest of the way,
-    // but real-world testing showed that packet intervals actually had substantially /higher/
-    // standard deviations.
-    let now = Instant::now();
-    if now < wake_at {
-        if spin_sleep {
-            while Instant::now() < wake_at {}
-        } else {
-            std::thread::sleep(wake_at.saturating_duration_since(now));
-        }
+pub(crate) fn set_sched_fifo() -> Result<()> {
+    let sched_param = libc::sched_param { sched_priority: 1 };
+    // SAFETY: fuck that
+    let setscheduler_ret = unsafe {
+        libc::sched_setscheduler(
+            0,
+            libc::SCHED_FIFO,
+            &sched_param as *const libc::sched_param,
+        )
+    };
+    if setscheduler_ret == 0 {
+        Ok(())
     } else {
-        log::warn!(
-            "precise_sleep called too late (by {})",
-            humantime::format_duration(now - wake_at)
-        );
-    }
-}
-
-impl Hardware for RealHardware {
-    fn timestamp(&self) -> u64 {
-        Instant::now()
-            .duration_since(self.epoch)
-            .as_nanos()
-            .try_into()
-            .unwrap()
-    }
-
-    fn set_timer(&mut self, timestamp: u64) -> Option<u64> {
-        std::mem::replace(&mut self.timer, Some(timestamp))
-    }
-
-    fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()> {
-        self.socket.connect(socket_addr)?;
-        Ok(())
-    }
-
-    fn socket_disconnect(&mut self) -> Result<()> {
-        self.socket.connect(self.disconnect_addr)?;
-        Ok(())
-    }
-
-    fn read_outgoing_packet(&mut self, no_earlier_than: Option<u64>) {
-        self.outgoing_read_thread
-            .tx
-            .send(OutgoingReadRequest {
-                generation: self.generation,
-                no_earlier_than,
-            })
-            .unwrap();
-    }
-
-    fn send_outgoing_packet(
-        &mut self,
-        packet: &[u8],
-        destination: std::net::SocketAddr,
-        timestamp: Option<u64>,
-    ) -> Result<()> {
-        // TODO consider changing signature to unconditionnal (), since errors are async anyway.
-        self.outgoing_send_thread
-            .tx
-            .send(OutgoingSend {
-                packet: IpPacketBuffer::new(packet),
-                addr: destination,
-                timestamp,
-            })
-            .unwrap();
-        Ok(())
-    }
-
-    // TODO like above, consider changing the signature, since this always succeeds.
-    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()> {
-        self.incoming_send_thread
-            .tx
-            .send(IncomingSend {
-                packet: IpPacketBuffer::new(packet),
-                timestamp,
-            })
-            .unwrap();
-        Ok(())
-    }
-
-    fn clear_event_listeners(&mut self) {
-        self.timer = None;
-        self.generation = self.generation.checked_add(1).unwrap();
-    }
-
-    fn mtu(&self, peer: SocketAddr) -> Result<u16> {
-        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1)
-            .map_err(|_| anyhow!("Interface MTU was wayy too large"))?)
+        Err(anyhow::Error::from(std::io::Error::last_os_error())
+            .context("Failed to set process scheduling mode to SCHED_FIFO; are you root?"))
     }
 }

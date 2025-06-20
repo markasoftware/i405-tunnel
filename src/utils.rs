@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use crate::constants::{IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH};
 
@@ -17,4 +20,16 @@ pub(crate) fn ip_mtu_to_dtls_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
     ip_mtu_to_udp_mtu(ip_mtu, peer)
         .checked_sub(UDP_HEADER_LENGTH)
         .unwrap()
+}
+
+pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {
+    epoch + Duration::from_nanos(timestamp)
+}
+
+pub(crate) fn instant_to_timestamp(epoch: Instant, instant: Instant) -> u64 {
+    return instant
+        .saturating_duration_since(epoch)
+        .as_nanos()
+        .try_into()
+        .unwrap();
 }

@@ -1,11 +1,10 @@
-use crate::{array_array::IpPacketBuffer, logical_ip_packet::LogicalIpPacket, messages};
+use crate::{array_array::IpPacketBuffer, messages};
 
 /// A logical IP packet that we are trying to send out, but haven't completely sent over the wire
 /// yet.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct QueuedIpPacket {
     packet: IpPacketBuffer,
-    schedule: Option<u64>,
     fragmentation: Option<Fragmentation>,
 }
 
@@ -16,26 +15,22 @@ struct Fragmentation {
     fragmentation_id: u16,
 }
 
-impl From<QueuedIpPacket> for LogicalIpPacket {
-    fn from(value: QueuedIpPacket) -> Self {
-        Self {
-            packet: value.packet,
-            schedule: value.schedule,
-        }
+impl From<IpPacketBuffer> for QueuedIpPacket {
+    fn from(value: IpPacketBuffer) -> Self {
+        Self::new(&value)
     }
 }
 
-impl From<LogicalIpPacket> for QueuedIpPacket {
-    fn from(value: LogicalIpPacket) -> Self {
-        Self::new(&value.packet[..], value.schedule)
+impl From<QueuedIpPacket> for IpPacketBuffer {
+    fn from(value: QueuedIpPacket) -> Self {
+        value.packet
     }
 }
 
 impl QueuedIpPacket {
-    pub(crate) fn new(packet: &[u8], schedule: Option<u64>) -> QueuedIpPacket {
+    pub(crate) fn new(packet: &[u8]) -> QueuedIpPacket {
         QueuedIpPacket {
             packet: IpPacketBuffer::new(packet),
-            schedule,
             fragmentation: None,
         }
     }
@@ -58,15 +53,14 @@ impl QueuedIpPacket {
                 // 2. If base size + inner packet length is <= max_size, make it and return
                 //    Else, set fragmented flag, make an initial packet, and return
                 let fragmented_base_length =
-                    messages::IpPacket::base_length(self.schedule, Some(unused_fragmentation_id));
+                    messages::IpPacket::base_length(Some(unused_fragmentation_id));
                 let min_useful_fragmented_length = fragmented_base_length.checked_add(1).unwrap();
-                let unfragmented_base_length = messages::IpPacket::base_length(self.schedule, None);
+                let unfragmented_base_length = messages::IpPacket::base_length(None);
                 let one_packet_length = unfragmented_base_length
                     .checked_add(self.packet.len())
                     .unwrap();
                 if one_packet_length <= max_length {
                     FragmentResult::Done(messages::Message::IpPacket(messages::IpPacket {
-                        schedule: self.schedule,
                         fragmentation_id: None,
                         packet: self.packet.clone(),
                     }))
@@ -76,7 +70,6 @@ impl QueuedIpPacket {
                     let fragment_inner_packet_length =
                         max_length.checked_sub(fragmented_base_length).unwrap();
                     let message = messages::Message::IpPacket(messages::IpPacket {
-                        schedule: self.schedule,
                         fragmentation_id: Some(unused_fragmentation_id),
                         packet: IpPacketBuffer::new(&self.packet[..fragment_inner_packet_length]),
                     });
@@ -171,13 +164,12 @@ mod test {
 
     #[test]
     fn doesnt_need_fragment() {
-        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4], None);
+        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4]);
         let fragment_result = queued_packet.fragment(1000, 42);
         assert_eq!(
             fragment_result,
             FragmentResult::Done(Message::IpPacket(IpPacket {
                 fragmentation_id: None,
-                schedule: None,
                 packet: IpPacketBuffer::new(&[1, 2, 3, 4]),
             }))
         );
@@ -186,23 +178,22 @@ mod test {
     // could theoretically change these to be based on the `base_length`, but prat of the point is
     // to test that lol.
 
-    // type byte, schedule, fragment ID, length
-    const IP_PACKET_START_FRAGMENT_BASE_LENGTH: usize = 1 + 8 + 2 + 2;
+    // type byte, fragment ID, length
+    const IP_PACKET_START_FRAGMENT_BASE_LENGTH: usize = 1 + 2 + 2;
     // same as above, but no fragment ID
-    const IP_PACKET_SOLO_BASE_LENGTH: usize = 1 + 8 + 2;
+    const IP_PACKET_SOLO_BASE_LENGTH: usize = 1 + 2;
     // type byte, fragment ID, offset, length.
     const IP_PACKET_FRAGMENT_BASE_LENGTH: usize = 1 + 2 + 2 + 2;
 
     #[test]
     fn needs_three_fragments() {
-        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9], Some(9299));
+        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let fragment_result = queued_packet.fragment(IP_PACKET_START_FRAGMENT_BASE_LENGTH + 3, 5);
         // is there any way to more ergonomically do a sort of "unwrap" on a custom type?
         if let FragmentResult::Partial(message, queued_packet) = fragment_result {
             assert_eq!(
                 message,
                 Message::IpPacket(IpPacket {
-                    schedule: Some(9299),
                     fragmentation_id: Some(5),
                     packet: IpPacketBuffer::new(&[1, 2, 3])
                 })
@@ -246,7 +237,7 @@ mod test {
     #[test]
     fn max_size_too_small_one_packet() {
         // first, test the first packet length
-        let queued_packet = QueuedIpPacket::new(&[1], Some(1100));
+        let queued_packet = QueuedIpPacket::new(&[1]);
         assert_eq!(
             queued_packet
                 .clone()
@@ -256,7 +247,6 @@ mod test {
         assert_eq!(
             queued_packet.fragment(IP_PACKET_SOLO_BASE_LENGTH + 1, 0),
             FragmentResult::Done(Message::IpPacket(IpPacket {
-                schedule: Some(1100),
                 fragmentation_id: None,
                 packet: IpPacketBuffer::new(&[1])
             }))
@@ -267,7 +257,7 @@ mod test {
     fn max_size_too_small_two_fragments() {
         // have to make it 4 long, because IP_PACKET_START_FRAGMENT_BASE_LENGTH+1 is long enough to
         // fit 3 bytes into a standalone IpPacket message.
-        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4], Some(1100));
+        let queued_packet = QueuedIpPacket::new(&[1, 2, 3, 4]);
         assert_eq!(
             queued_packet
                 .clone()
@@ -279,7 +269,6 @@ mod test {
             assert_eq!(
                 message,
                 Message::IpPacket(IpPacket {
-                    schedule: Some(1100),
                     fragmentation_id: Some(0),
                     packet: IpPacketBuffer::new(&[1])
                 })

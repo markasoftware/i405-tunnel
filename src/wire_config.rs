@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::config::{WireConfiguration, WireInterval};
+use crate::config_cli::{WireConfigCli, WireIntervalCli};
 use crate::constants::{
     DTLS_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH,
 };
@@ -27,7 +27,7 @@ fn to_wire_config(
     mtu: u16,
     max_packet_length: u16,
     packet_length: Option<u64>,
-    interval: &WireInterval,
+    interval: &WireIntervalCli,
     finalize_delta: u64,
 ) -> WireConfig {
     let packet_length: u16 = packet_length
@@ -49,8 +49,8 @@ fn to_wire_config(
     let packet_interval: u64 = match interval {
         // TODO print the computed speed from the interval. Or maybe, just print the whole goddamn
         // config for both directions as well as the speed, since we always need to print something.
-        WireInterval::Fixed(fixed_interval) => *fixed_interval,
-        WireInterval::Rate(bytes_per_second) => {
+        WireIntervalCli::Fixed(fixed_interval) => *fixed_interval,
+        WireIntervalCli::Rate(bytes_per_second) => {
             let interval = u64::from(packet_length)
                 .checked_mul(1_000_000_000)
                 .unwrap()
@@ -76,7 +76,7 @@ fn to_wire_config(
 
 pub(crate) fn to_wire_configs(
     peer: &SocketAddr,
-    wire_configuration: &WireConfiguration,
+    wire_configuration: &WireConfigCli,
 ) -> WireConfigs {
     let (interface_name, mtu_usize) =
         mtu::interface_and_mtu(peer.ip()).expect("Error computing interface MTU");

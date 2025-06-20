@@ -1,14 +1,14 @@
-use config::ContainsCommonConfiguration as _;
+use config_cli::ContainsCommonConfigCli as _;
+use hardware::{Hardware, real::set_sched_fifo};
 use wire_config::to_wire_configs;
 
 mod array_array;
-mod config;
+mod config_cli;
 mod constants;
 mod core;
 mod defragger;
 mod dtls;
 mod hardware;
-mod logical_ip_packet;
 mod messages;
 mod queued_ip_packet;
 mod utils;
@@ -17,30 +17,53 @@ mod wire_config;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let configuration = config::parse_args();
-    let common_config = configuration.common_configuration();
+    let configuration = config_cli::parse_args();
+    let common_config_cli = configuration.common_config_cli();
 
-    let mut hardware = hardware::real::RealHardware::new(
-        common_config
-            .listen_addr
-            .parse()
-            .expect("Failed to parse listen address"),
-        common_config.tun_name.clone(),
-        common_config.tun_mtu,
-        common_config
-            .tun_ipv4
-            .as_ref()
-            .map(|ipv4| ipv4.parse().expect("Failed to parse TUN IPv4 addr")),
-        common_config
-            .tun_ipv6
-            .as_ref()
-            .map(|ipv6| ipv6.parse().expect("Failed to parse TUN IPv6 addr")),
-        common_config.spin_sleep,
-    )
-    .expect("Failed to create tun and socket; are you root?");
+    let tun_config = hardware::real::tun_config_from_common_config_cli(common_config_cli);
+    let tun = hardware::real::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
+    let listen_addr = common_config_cli
+        .listen_addr
+        .parse()
+        .expect("Failed to parse listen address as IP:PORT");
 
-    let core = match &configuration {
-        config::Configuration::Client(client_configuration) => {
+    match common_config_cli.poll_mode {
+        config_cli::PollMode::Sleepy => {
+            let sched_fifo = !common_config_cli.force_no_sched_fifo;
+            if sched_fifo {
+                // TODO warn if there's only one core, this could get real bad
+                set_sched_fifo().expect("Failed to set SCHED_FIFO");
+            }
+
+            let mut hardware = hardware::sleepy::SleepyHardware::new(listen_addr, tun)
+                .expect("Failed to construct SleepyHardware");
+            let core = make_core(&configuration, &mut hardware);
+            log::info!("Starting I405 (sleepy)");
+            hardware.run(core);
+        }
+        config_cli::PollMode::Spinny => {
+            let sched_fifo = !common_config_cli.force_no_sched_fifo;
+            if sched_fifo {
+                set_sched_fifo().expect("Failed to set SCHED_FIFO");
+            }
+
+            let mut hardware = hardware::spinny::SpinnyHardware::new(listen_addr, tun)
+                .expect("Failed to construct SpinnyHardware");
+            let core = make_core(&configuration, &mut hardware);
+            log::info!("Starting I405 (spinny)");
+            hardware.run(core);
+        }
+    };
+}
+
+fn make_core(
+    configuration: &config_cli::ConfigCli,
+    hardware: &mut impl Hardware,
+) -> core::ConcreteCore {
+    let common_config_cli = configuration.common_config_cli();
+
+    match &configuration {
+        config_cli::ConfigCli::Client(client_configuration) => {
             // TODO do DNS resolving so we can use domains
             let peer: std::net::SocketAddr = client_configuration
                 .peer
@@ -51,24 +74,21 @@ fn main() {
                 c2s_wire_config: wire_configs.c2s,
                 s2c_wire_config: wire_configs.s2c,
                 peer_address: peer,
-                pre_shared_key: common_config.pre_shared_key.clone(),
+                pre_shared_key: common_config_cli.pre_shared_key.clone(),
             };
             core::ConcreteCore::Client(
-                core::client::Core::new(client_config, &mut hardware)
+                core::client::Core::new(client_config, hardware)
                     .expect("Failed to create client core"),
             )
         }
-        config::Configuration::Server(_) => {
+        config_cli::ConfigCli::Server(_) => {
             let server_config = core::server::Config {
-                pre_shared_key: common_config.pre_shared_key.clone(),
+                pre_shared_key: common_config_cli.pre_shared_key.clone(),
             };
             core::ConcreteCore::Server(
-                core::server::Core::new(server_config, &mut hardware)
+                core::server::Core::new(server_config, hardware)
                     .expect("Failed to create server core"),
             )
         }
-    };
-
-    log::info!("Starting I405");
-    hardware.run(core);
+    }
 }

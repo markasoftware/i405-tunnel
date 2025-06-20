@@ -26,7 +26,7 @@ struct OneSideInfo {
     outgoing_read_times: Vec<u64>,
     // The next time we should wake up this thread.
     timer: Option<u64>,
-    next_read_outgoing: MaybeTime,
+    should_read_outgoing: bool,
 }
 
 impl OneSideInfo {
@@ -39,7 +39,7 @@ impl OneSideInfo {
             sent_incoming_packets: Vec::new(),
             outgoing_read_times: Vec::new(),
             timer: None,
-            next_read_outgoing: MaybeTime::None,
+            should_read_outgoing: false,
         }
     }
 }
@@ -72,13 +72,6 @@ impl PartialOrd for WanPacket {
 pub(crate) struct LocalPacket {
     pub(crate) buffer: IpPacketBuffer,
     pub(crate) timestamp: u64,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-enum MaybeTime {
-    Scheduled(u64),
-    Immediate,
-    None,
 }
 
 /// Hardware implementation for testing only.
@@ -205,44 +198,20 @@ impl SimulatedHardware {
                 }
 
                 // scheduled read outgoing
-                match peer.next_read_outgoing {
-                    MaybeTime::Scheduled(scheduled_time) => {
-                        // it's acceptable for scheduled_time to be in the past because it might
-                        // have been scheduled in the past but no packets were available yet
-                        if scheduled_time <= timestamp {
-                            if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front()
-                            {
-                                self.debug(format!(
-                                    "Reading outgoing packet on {} at {}ns",
-                                    addr, timestamp
-                                ));
-                                core.on_read_outgoing_packet(
-                                    &mut self.hardware(addr),
-                                    &outgoing_packet,
-                                    timestamp,
-                                );
-                                continue 'main_loop;
-                            }
-                        } else {
-                            next_event_timestamp = min(next_event_timestamp, scheduled_time);
-                        }
+                if peer.should_read_outgoing {
+                    if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front() {
+                        peer.should_read_outgoing = false;
+                        self.debug(format!(
+                            "Reading outgoing packet on {} at {}ns",
+                            addr, timestamp
+                        ));
+                        core.on_read_outgoing_packet(
+                            &mut self.hardware(addr),
+                            &outgoing_packet,
+                            timestamp,
+                        );
+                        continue 'main_loop;
                     }
-                    MaybeTime::Immediate => {
-                        // this is copy pasted from above, maybe should dedupe
-                        if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front() {
-                            self.debug(format!(
-                                "Reading outgoing packet on {} at {}ns",
-                                addr, timestamp
-                            ));
-                            core.on_read_outgoing_packet(
-                                &mut self.hardware(addr),
-                                &outgoing_packet,
-                                timestamp,
-                            );
-                            continue 'main_loop;
-                        }
-                    }
-                    MaybeTime::None => (),
                 }
 
                 // read incoming
@@ -314,11 +283,8 @@ impl<'a> Hardware for OneSideHardware<'a> {
         self.simulated.timestamp.clone()
     }
 
-    fn read_outgoing_packet(&mut self, no_earlier_than: Option<u64>) {
-        self.our_side().next_read_outgoing = match no_earlier_than {
-            Some(no_earlier_than) => MaybeTime::Scheduled(no_earlier_than),
-            None => MaybeTime::Immediate,
-        }
+    fn read_outgoing_packet(&mut self) {
+        self.our_side().should_read_outgoing = true;
     }
 
     fn send_outgoing_packet(
@@ -382,19 +348,11 @@ impl<'a> Hardware for OneSideHardware<'a> {
         Ok(())
     }
 
-    fn send_incoming_packet(&mut self, packet: &[u8], timestamp: Option<u64>) -> Result<()> {
-        assert!(
-            self.our_side()
-                .sent_incoming_packets
-                .last()
-                .is_none_or(|last| timestamp.is_none_or(|ts| last.timestamp <= ts)),
-            "Sent incoming packets must be in ascending timestamp order"
-        );
-
-        let actual_timestamp = timestamp.unwrap_or(self.timestamp());
+    fn send_incoming_packet(&mut self, packet: &[u8]) -> Result<()> {
+        let timestamp = self.timestamp();
         self.our_side().sent_incoming_packets.push(LocalPacket {
             buffer: IpPacketBuffer::new(packet),
-            timestamp: actual_timestamp,
+            timestamp,
         });
         Ok(())
     }
@@ -410,7 +368,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
 
     fn clear_event_listeners(&mut self) {
         self.our_side().timer = None;
-        self.our_side().next_read_outgoing = MaybeTime::None;
+        self.our_side().should_read_outgoing = false;
     }
 
     fn mtu(&self, _peer: SocketAddr) -> Result<u16> {

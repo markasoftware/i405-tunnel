@@ -14,6 +14,7 @@ enumflags2 = "0.7.11"
 env_logger = "0.11"
 humantime = "2"
 ipnet = "2"
+libc = "0.2.174"
 log = "0.4"
 mtu = "0.2.9"
 tun-rs = { version = "2", features = [ "experimental"] }
@@ -22,6 +23,9 @@ wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 
 [dev-dependencies]
 test-case = "3"
+
+[profile.release]
+overflow-checks = true
 
 [features]
 wolfssl-debug = ["wolfssl/debug"]
