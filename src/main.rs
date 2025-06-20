@@ -9,6 +9,7 @@ mod core;
 mod defragger;
 mod dtls;
 mod hardware;
+mod jitter;
 mod messages;
 mod queued_ip_packet;
 mod utils;

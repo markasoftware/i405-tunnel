@@ -133,6 +133,8 @@ impl SleepyHardware {
                     }
                     let timeout_duration_from_now =
                         timeout_instant.saturating_duration_since(Instant::now());
+                    // TODO don't keep trying to recv events if we are late for the next timer, give
+                    // precedence to the timer. Probably want to do so even if we aren't quite at the timer time yet.
                     self.events_rx.recv_timeout(timeout_duration_from_now)
                 }
                 None => self

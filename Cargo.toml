@@ -17,6 +17,7 @@ ipnet = "2"
 libc = "0.2.174"
 log = "0.4"
 mtu = "0.2.9"
+rand_chacha = { version = "0.9.0", features = [ "os_rng" ] }
 tun-rs = { version = "2", features = [ "experimental"] }
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
