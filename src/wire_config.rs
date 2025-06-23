@@ -150,3 +150,154 @@ pub(crate) fn to_wire_configs(
         ),
     }
 }
+
+// ai generated tests, deal with it
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::config_cli::{AverageWireIntervalCli, WireIntervalCli};
+
+    fn fixed_interval(average_interval: u64, jitter: Option<u64>) -> WireIntervalCli {
+        WireIntervalCli {
+            average_interval: AverageWireIntervalCli::Fixed(average_interval),
+            jitter,
+        }
+    }
+
+    fn rate_interval(bytes_per_second: u64, jitter: Option<u64>) -> WireIntervalCli {
+        WireIntervalCli {
+            average_interval: AverageWireIntervalCli::Rate(bytes_per_second),
+            jitter,
+        }
+    }
+
+    #[test]
+    fn to_wire_config_default_packet_length() {
+        let config = to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            None,
+            &fixed_interval(1_000_000, None),
+            100_000,
+        );
+        assert_eq!(config.packet_length, 1400);
+        assert_eq!(config.packet_interval_min, 750_000); // 1_000_000 - 1_000_000 * 0.25
+        assert_eq!(config.packet_interval_max, 1_250_000); // 1_000_000 + 1_000_000 * 0.25
+        assert_eq!(config.packet_finalize_delta, 100_000);
+    }
+
+    #[test]
+    fn to_wire_config_specified_packet_length() {
+        let config = to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            Some(1000),
+            &fixed_interval(1_000_000, None),
+            100_000,
+        );
+        assert_eq!(config.packet_length, 1000);
+    }
+
+    #[test]
+    fn to_wire_config_fixed_interval_with_jitter() {
+        let config = to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            None,
+            &fixed_interval(1_000_000, Some(100_000)),
+            100_000,
+        );
+        assert_eq!(config.packet_interval_min, 900_000);
+        assert_eq!(config.packet_interval_max, 1_100_000);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Specified jitter of 1ms 100us is larger than the average inter-packet interval 1ms"
+    )]
+    fn to_wire_config_fixed_interval_jitter_too_large() {
+        to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            None,
+            &fixed_interval(1_000_000, Some(1_100_000)),
+            100_000,
+        );
+    }
+
+    #[test]
+    fn to_wire_config_rate_interval_no_jitter() {
+        // Rate: 1400 bytes / (target_interval_ns / 1_000_000_000) = bytes_per_second
+        // target_interval_ns = 1400 * 1_000_000_000 / bytes_per_second
+        // target_interval_ns = 1400 * 1_000_000_000 / 1_400_000 = 1_000_000 ns
+        let config = to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400, // used as default, derived from mtu
+            None,
+            &rate_interval(1_400_000, None), // 1.4 MB/s
+            100_000,
+        );
+        assert_eq!(config.packet_length, 1400);
+        assert_eq!(config.packet_interval_min, 750_000);
+        assert_eq!(config.packet_interval_max, 1_250_000);
+    }
+
+    #[test]
+    fn to_wire_config_rate_interval_with_jitter() {
+        let config = to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1000,
+            Some(500),
+            &rate_interval(250_000, Some(50_000)), // 0.25 MB/s
+            // average interval = 500 * 1_000_000_000 / 250_000 = 2_000_000 ns
+            100_000,
+        );
+        assert_eq!(config.packet_length, 500);
+        assert_eq!(config.packet_interval_min, 1_950_000); // 2_000_000 - 50_000
+        assert_eq!(config.packet_interval_max, 2_050_000); // 2_000_000 + 50_000
+    }
+
+    #[test]
+    #[should_panic(expected = "Min packet interval 40us is too small must be at least 50us.")]
+    fn to_wire_config_min_interval_too_small() {
+        to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            None,
+            // average 50_000, default jitter is 0.25 * 50_000 = 12_500
+            // min = 50_000 - 12_500 = 37_500. This is less than MIN_MIN_INTERVAL (50_000)
+            &fixed_interval(MIN_MIN_INTERVAL, Some(MIN_MIN_INTERVAL / 5)), // jitter 10_000 -> min 40_000
+            1_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Finalize delta 100us must be smaller than the min packet interval 75us"
+    )]
+    fn to_wire_config_finalize_delta_too_large() {
+        to_wire_config(
+            "test",
+            "lo",
+            1500,
+            1400,
+            None,
+            &fixed_interval(100_000, None), // min interval will be 75_000
+            100_000,
+        );
+    }
+}
