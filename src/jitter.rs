@@ -9,12 +9,15 @@
 // center-heavy, so that if a packet gets delayed, it's less likely the delay will put it entirely
 // outside the range of timestamps the jitterator can generate.
 
-// I don't feel like trying to formalize this problem or coming up with any sort of optimal solution, so instead we do a really silly distribution where the
+// I don't feel like trying to formalize this problem or coming up with any sort of optimal
+// solution, so instead we do a really silly distribution where the central part is just sampled way
+// more than the outer parts. Other options include beta and triangular distributions, but why?
 
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 
 const EXTRA_INNER_INTERVAL_LIKELIHOOD: u64 = 3;
 
+#[derive(Debug)]
 pub(crate) struct Jitterator {
     // all generated intervals will be within this (inclusive) range:
     min: u64,
@@ -51,6 +54,10 @@ impl Jitterator {
     }
 
     pub(crate) fn next_interval(&mut self) -> u64 {
+        if self.interval_width == 0 {
+            return self.min;
+        }
+
         let random = self.rng.next_u64() % self.rng_modulus;
         if random < self.interval_width {
             self.min + random
@@ -71,18 +78,31 @@ mod test {
         let inner = 2651..=4014;
         let num_iters: u64 = 100_000;
         let mut num_inners: u64 = 0;
+        let mut sum = 0;
         for _ in 0..num_iters {
-            let rng = jitterator.next_interval();
-            assert!(outer.contains(&rng));
-            if inner.contains(&rng) {
+            let interval = jitterator.next_interval();
+            assert!(outer.contains(&interval));
+            if inner.contains(&interval) {
                 num_inners += 1;
             }
+            sum += interval;
         }
-        let fraction_in_inner = num_inners as f32 / num_iters as f32;
+        let fraction_in_inner = num_inners as f64 / num_iters as f64;
         assert!(
             (0.88..0.96).contains(&fraction_in_inner),
             "Wrong fraction in inner interval: {}",
             fraction_in_inner
         );
+        // ideal average is 3333
+        let average = sum as f64 / num_iters as f64;
+        assert!((3200.0..3500.0).contains(&average));
+    }
+
+    #[test]
+    fn jitterator_trivial_interval() {
+        let mut jitterator = Jitterator::new(4455, 4455);
+        for _ in 0..10 {
+            assert_eq!(jitterator.next_interval(), 4455);
+        }
     }
 }

@@ -17,7 +17,12 @@ trait EzClap {
     fn from_match(matches: &ArgMatches) -> Self;
 }
 
-pub(crate) enum WireIntervalCli {
+pub(crate) struct WireIntervalCli {
+    pub(crate) average_interval: AverageWireIntervalCli,
+    pub(crate) jitter: Option<u64>,
+}
+
+pub(crate) enum AverageWireIntervalCli {
     Fixed(u64), // fixed interval in ns
     Rate(u64),  // bytes per second
 }
@@ -43,7 +48,12 @@ impl EzClap for WireConfigCli {
                 .long("outgoing-packet-interval")
                 .visible_alias("up-packet-interval")
                 .value_parser(humantime::parse_duration)
-                .help("Fixed upload packet interval, in nanoseconds"),
+                .help("Fixed upload packet interval. Eg \"8.5ms\""),
+            Arg::new("outgoing_packet_jitter")
+                .long("outgoing-packet-jitter")
+                .visible_alias("up-packet-jitter")
+                .value_parser(humantime::parse_duration)
+                .help("Max jitter around the upload packet interval. The interval will never be less than the outgoing packet interval minus the jitter, nor greater than the interval plus the jitter. The distribution of inter-packet intervals is a bit weird: With about 92.5% probability, the packet interval will be uniformly random within [interval - jitter*0.75, interval + jitter*0.75], and with about 7.5% probability, the packet interval will be in the remaining part of [interval-jitter, interval+jitter]. The default max jitter is 25% of the outgoing packet interval."),
             Arg::new("outgoing_bytes_per_second")
                 .long("outgoing-bytes-per-second")
                 .visible_alias("outgoing-speed")
@@ -67,6 +77,10 @@ impl EzClap for WireConfigCli {
                 .visible_alias("down-packet-interval")
                 .value_parser(humantime::parse_duration)
                 .help("Fixed download packet interval, in nanoseconds"),
+            Arg::new("incoming_packet_jitter")
+                .long("incoming-packet-jitter")
+                .value_parser(humantime::parse_duration)
+                .help("See the documentation for --outgoing-packet-jitter"),
             Arg::new("incoming_bytes_per_second")
                 .long("incoming-bytes-per-second")
                 .visible_alias("incoming-speed")
@@ -98,20 +112,34 @@ impl EzClap for WireConfigCli {
 
     fn from_match(matches: &ArgMatches) -> Self {
         let parse_interval = |in_or_out| -> WireIntervalCli {
-            match (
+            let jitter = matches
+                .get_one::<Duration>(&format!("{in_or_out}_packet_jitter"))
+                .map(|jitter| {
+                    jitter
+                        .as_nanos()
+                        .try_into()
+                        .expect("Don't put jitter longer than hundreds of years")
+                });
+            let average_interval = match (
                 matches.get_one::<Duration>(&format!("{in_or_out}_packet_interval")),
                 matches.get_one::<bytesize::ByteSize>(&format!("{in_or_out}_bytes_per_second")),
             ) {
-                (Some(interval), None) => WireIntervalCli::Fixed(
+                (Some(interval), None) => AverageWireIntervalCli::Fixed(
                     interval
                         .as_nanos()
                         .try_into()
                         .expect("Don't put intervals longer than hundreds of years."),
                 ),
-                (None, Some(bytes_per_second)) => WireIntervalCli::Rate(bytes_per_second.as_u64()),
+                (None, Some(bytes_per_second)) => {
+                    AverageWireIntervalCli::Rate(bytes_per_second.as_u64())
+                }
                 _ => unreachable!(
                     "Clap should enforce that either interval or bytes per second is set."
                 ),
+            };
+            WireIntervalCli {
+                average_interval,
+                jitter,
             }
         };
         WireConfigCli {

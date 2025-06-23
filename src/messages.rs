@@ -92,7 +92,8 @@ pub(crate) struct ClientToServerHandshake {
     pub(crate) protocol_version: u32,
     pub(crate) oldest_compatible_protocol_version: u32,
     pub(crate) s2c_packet_length: u16,
-    pub(crate) s2c_packet_interval: u64,
+    pub(crate) s2c_packet_interval_min: u64,
+    pub(crate) s2c_packet_interval_max: u64,
     pub(crate) s2c_packet_finalize_delta: u64,
 }
 
@@ -113,7 +114,8 @@ impl serdes::Serializable for ClientToServerHandshake {
         self.oldest_compatible_protocol_version
             .serialize(serializer);
         self.s2c_packet_length.serialize(serializer);
-        self.s2c_packet_interval.serialize(serializer);
+        self.s2c_packet_interval_min.serialize(serializer);
+        self.s2c_packet_interval_max.serialize(serializer);
         self.s2c_packet_finalize_delta.serialize(serializer);
     }
 }
@@ -143,7 +145,8 @@ impl serdes::Deserializable for ClientToServerHandshake {
             protocol_version: read_cursor.read()?,
             oldest_compatible_protocol_version: read_cursor.read()?,
             s2c_packet_length: read_cursor.read()?,
-            s2c_packet_interval: read_cursor.read()?,
+            s2c_packet_interval_min: read_cursor.read()?,
+            s2c_packet_interval_max: read_cursor.read()?,
             s2c_packet_finalize_delta: read_cursor.read()?,
         })
     }
@@ -519,7 +522,8 @@ mod test {
             protocol_version: 5502,
             oldest_compatible_protocol_version: 8322,
             s2c_packet_length: 2277,
-            s2c_packet_interval: 992828,
+            s2c_packet_interval_min: 992828,
+            s2c_packet_interval_max: 1002838,
             s2c_packet_finalize_delta: 1_000_000,
         }));
     }

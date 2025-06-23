@@ -465,9 +465,8 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 })?;
                 let s2c_wire_config = WireConfig {
                     packet_length: c2s_handshake.s2c_packet_length,
-                    packet_interval: c2s_handshake.s2c_packet_interval,
-                    // TODO randomize or specify in C2S handshake?
-                    packet_interval_offset: 0,
+                    packet_interval_min: c2s_handshake.s2c_packet_interval_min,
+                    packet_interval_max: c2s_handshake.s2c_packet_interval_max,
                     packet_finalize_delta: c2s_handshake.s2c_packet_finalize_delta,
                 };
                 log::info!(

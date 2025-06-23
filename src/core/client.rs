@@ -259,7 +259,8 @@ impl C2SHandshakeSent {
             protocol_version: PROTOCOL_VERSION,
             oldest_compatible_protocol_version: OLDEST_COMPATIBLE_PROTOCOL_VERSION,
             s2c_packet_length: config.s2c_wire_config.packet_length,
-            s2c_packet_interval: config.s2c_wire_config.packet_interval,
+            s2c_packet_interval_min: config.s2c_wire_config.packet_interval_min,
+            s2c_packet_interval_max: config.s2c_wire_config.packet_interval_max,
             s2c_packet_finalize_delta: config.s2c_wire_config.packet_finalize_delta,
         };
         let did_add =

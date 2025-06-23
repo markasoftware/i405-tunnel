@@ -3,6 +3,7 @@ use crate::{
     defragger::Defragger,
     dtls,
     hardware::Hardware,
+    jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     wire_config::WireConfig,
@@ -15,6 +16,7 @@ pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
     peer: std::net::SocketAddr,
     outgoing_wire_config: WireConfig,
+    jitterator: Jitterator,
     outgoing_connection: OutgoingConnection,
     partial_outgoing_packet: messages::WriteCursor<IpPacketBuffer>,
     defragger: Defragger,
@@ -110,12 +112,13 @@ impl EstablishedConnection {
         peer: std::net::SocketAddr,
         outgoing_wire_config: WireConfig,
     ) -> Result<Self> {
+        let mut jitterator = outgoing_wire_config.jitterator();
         // TODO this could return Self (can't fail)
         hardware.clear_event_listeners();
-        hardware.set_timer(next_outgoing_timer(
-            &outgoing_wire_config,
-            hardware.timestamp(),
-        ));
+        hardware.set_timer(
+            hardware.timestamp() + jitterator.next_interval()
+                - outgoing_wire_config.packet_finalize_delta,
+        );
         Ok(Self {
             session,
             peer,
@@ -125,6 +128,7 @@ impl EstablishedConnection {
             )),
             defragger: Defragger::new(),
             outgoing_wire_config,
+            jitterator,
         })
     }
 
@@ -139,6 +143,9 @@ impl EstablishedConnection {
     ) -> Result<()> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
+        let send_timestamp = timer_timestamp
+            .checked_add(self.outgoing_wire_config.packet_finalize_delta)
+            .unwrap();
         let outgoing_cleartext_packet = std::mem::replace(
             &mut self.partial_outgoing_packet,
             messages::WriteCursor::new(IpPacketBuffer::new_empty(
@@ -147,21 +154,19 @@ impl EstablishedConnection {
         )
         .into_inner();
         let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
-        hardware.send_outgoing_packet(
-            outgoing_packet.as_ref(),
-            self.peer,
-            Some(
-                timer_timestamp
-                    .checked_add(self.outgoing_wire_config.packet_finalize_delta)
-                    .unwrap(),
-            ),
-        )?;
+        hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
+        // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
+        // we don't forget to update here:
+        assert!(
+            hardware.timestamp() >= timer_timestamp,
+            "hardware.send_outgoing_packet returned too early"
+        );
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
-        hardware.set_timer(next_outgoing_timer(
-            &self.outgoing_wire_config,
-            hardware.timestamp(),
-        ));
+        hardware.set_timer(
+            send_timestamp + self.jitterator.next_interval()
+                - self.outgoing_wire_config.packet_finalize_delta,
+        );
         Ok(())
     }
 
@@ -246,76 +251,4 @@ impl EstablishedConnection {
 pub(crate) enum IsConnectionOpen {
     Yes,
     No,
-}
-
-/// Return the next packet send time strictly after `timestamp`
-fn next_outgoing_timestamp(wire_config: &WireConfig, timestamp: u64) -> u64 {
-    assert!(wire_config.packet_interval > wire_config.packet_interval_offset);
-    // for those of you who can't read checked_ math as quickly as real math:
-    // let x = timestamp + packet_interval - packet_interval_offset
-    // return x - (x%packet_interval) + packet_interval_offset
-    let x = timestamp
-        .checked_add(wire_config.packet_interval)
-        .unwrap()
-        .checked_sub(wire_config.packet_interval_offset)
-        .unwrap();
-    x.checked_sub(x.checked_rem(wire_config.packet_interval).unwrap())
-        .unwrap()
-        .checked_add(wire_config.packet_interval_offset)
-        .unwrap()
-}
-
-/// When should we next prepare a packet and submit it to the hardware?
-fn next_outgoing_timer(wire_config: &WireConfig, timestamp: u64) -> u64 {
-    next_outgoing_timestamp(
-        wire_config,
-        timestamp
-            .checked_add(wire_config.packet_finalize_delta.checked_mul(2).unwrap())
-            .unwrap(),
-    )
-    .checked_sub(wire_config.packet_finalize_delta)
-    .unwrap()
-}
-
-#[cfg(test)]
-mod test {
-    use crate::wire_config::WireConfig;
-
-    #[test]
-    fn next_outgoing_timestamp() {
-        let wire_config = WireConfig {
-            packet_length: 1500,
-            packet_interval: 10,
-            packet_interval_offset: 3,
-            packet_finalize_delta: 100_000,
-        };
-
-        assert_eq!(super::next_outgoing_timestamp(&wire_config, 0), 3);
-        assert_eq!(super::next_outgoing_timestamp(&wire_config, 2), 3);
-        assert_eq!(super::next_outgoing_timestamp(&wire_config, 3), 13);
-        assert_eq!(super::next_outgoing_timestamp(&wire_config, 12), 13);
-        assert_eq!(super::next_outgoing_timestamp(&wire_config, 13), 23);
-    }
-
-    #[test]
-    fn next_outgoing_timer() {
-        let wire_config = WireConfig {
-            packet_length: 1500,
-            packet_interval: 1_400_000,
-            packet_interval_offset: 3,
-            packet_finalize_delta: 100_000,
-        };
-        assert_eq!(
-            super::next_outgoing_timer(&wire_config, 2_000_000),
-            2_700_003
-        );
-        assert_eq!(
-            super::next_outgoing_timer(&wire_config, 2_600_002),
-            2_700_003
-        );
-        assert_eq!(
-            super::next_outgoing_timer(&wire_config, 2_600_003),
-            4_100_003
-        );
-    }
 }

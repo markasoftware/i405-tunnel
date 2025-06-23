@@ -16,26 +16,26 @@ use test_case::test_matrix;
 const PSK: &[u8] = b"password";
 const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
-    packet_interval: 1_423_000, // 1.423ms
-    packet_interval_offset: 0,
+    packet_interval_min: 1_423_000, // 1.423ms
+    packet_interval_max: 1_423_000, // 1.423ms
     packet_finalize_delta: 100_000,
 };
 const DEFAULT_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
-    packet_interval: 1_411_000, // 1.411ms
-    packet_interval_offset: 0,
+    packet_interval_min: 1_411_000, // 1.411ms
+    packet_interval_max: 1_411_000, // 1.411ms
     packet_finalize_delta: 100_000,
 };
 const LONGER_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
-    packet_interval: 142_300_000, // 142.3ms
-    packet_interval_offset: 0,
+    packet_interval_min: 142_300_000, // 142.3ms
+    packet_interval_max: 142_300_000, // 142.3ms
     packet_finalize_delta: 100_000,
 };
 const LONGER_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
-    packet_interval: 141_100_000, // 141.1ms
-    packet_interval_offset: 0,
+    packet_interval_min: 141_100_000, // 141.1ms
+    packet_interval_max: 141_100_000, // 141.1ms
     packet_finalize_delta: 100_000,
 };
 
@@ -126,7 +126,8 @@ fn simple() {
         simulated_hardware.incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[4, 3, 2, 1]),
-            timestamp: ms(1.411 * 2.0),
+            // 1.423 = time for the initial handshake, then 1.411 = interval after that
+            timestamp: ms(1.423 + 1.411),
         }]
     );
     assert_eq!(
@@ -170,7 +171,7 @@ fn fragmentation() {
         simulated_hardware.incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: packet,
-            timestamp: ms(1.411 * 3.0),
+            timestamp: ms(1.423 + 1.411 * 2.0),
         }]
     );
 }
