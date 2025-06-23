@@ -4,7 +4,7 @@
 use crate::array_array::IpPacketBuffer;
 use crate::constants::DTLS_HEADER_LENGTH;
 use crate::core::{self, Core};
-use crate::hardware::simulated::{LocalPacket, SimulatedHardware};
+use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
 use crate::wire_config::WireConfig;
 
 use std::collections::BTreeMap;
@@ -36,6 +36,18 @@ const LONGER_S2C_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 141_100_000, // 141.1ms
     packet_interval_max: 141_100_000, // 141.1ms
+    packet_finalize_delta: 100_000,
+};
+const JITTERED_C2S_WIRE_CONFIG: WireConfig = WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval_min: 1_400_000,
+    packet_interval_max: 1_500_000,
+    packet_finalize_delta: 100_000,
+};
+const JITTERED_S2C_WIRE_CONFIG: WireConfig = WireConfig {
+    packet_length: DEFAULT_PACKET_LENGTH,
+    packet_interval_min: 1_700_000,
+    packet_interval_max: 1_800_000,
     packet_finalize_delta: 100_000,
 };
 
@@ -123,7 +135,7 @@ fn simple() {
     simulated_hardware.run_until(&mut cores, ms(3.0));
 
     assert_eq!(
-        simulated_hardware.incoming_packets(&client_addr()),
+        simulated_hardware.sent_incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[4, 3, 2, 1]),
             // 1.423 = time for the initial handshake, then 1.411 = interval after that
@@ -131,7 +143,7 @@ fn simple() {
         }]
     );
     assert_eq!(
-        simulated_hardware.incoming_packets(&server_addr()),
+        simulated_hardware.sent_incoming_packets(&server_addr()),
         &vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[1, 4, 0, 5]),
             timestamp: ms(1.423),
@@ -141,9 +153,14 @@ fn simple() {
     simulated_hardware.make_outgoing_packet(&client_addr(), &[7]);
     simulated_hardware.run_until(&mut cores, ms(4.5));
 
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
     assert_eq!(
-        simulated_hardware.incoming_packets(&server_addr())[1],
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
+    assert_eq!(
+        simulated_hardware.sent_incoming_packets(&server_addr())[1],
         LocalPacket {
             buffer: IpPacketBuffer::new(&[7]),
             timestamp: ms(1.423 * 3.0),
@@ -163,12 +180,12 @@ fn fragmentation() {
     simulated_hardware.run_until(&mut cores, ms(3.0));
     assert!(
         simulated_hardware
-            .incoming_packets(&client_addr())
+            .sent_incoming_packets(&client_addr())
             .is_empty()
     );
     simulated_hardware.run_until(&mut cores, ms(4.5));
     assert_eq!(
-        simulated_hardware.incoming_packets(&client_addr()),
+        simulated_hardware.sent_incoming_packets(&client_addr()),
         &vec![LocalPacket {
             buffer: packet,
             timestamp: ms(1.423 + 1.411 * 2.0),
@@ -258,7 +275,7 @@ fn packing() {
     simulated_hardware.run_until(&mut cores, 1);
     assert!(
         simulated_hardware
-            .incoming_packets(&server_addr())
+            .sent_incoming_packets(&server_addr())
             .is_empty()
     );
     // this is just FUD to make sure it somehow doesn't send multiple packets TODO consider adding
@@ -271,7 +288,12 @@ fn packing() {
         num_handshake_wan_packets.checked_add(3).unwrap()
     );
     // we'll verify the actual contents later
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
 
     // now test that it /doesn't/ work when we make it one larger
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
@@ -281,11 +303,16 @@ fn packing() {
     );
     simulated_hardware.run_until(&mut cores, ms(5.0));
     // just fud because I don't fully trust the SimulatedHardware yet
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 3);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        3
+    );
     simulated_hardware.run_until(&mut cores, ms(6.0));
 
     assert_eq!(
-        simulated_hardware.incoming_packets(&server_addr()),
+        simulated_hardware.sent_incoming_packets(&server_addr()),
         &vec![
             LocalPacket {
                 buffer: long_packet(first_message_length),
@@ -304,6 +331,76 @@ fn packing() {
                 timestamp: ms(1.423 * 4.0),
             },
         ]
+    );
+}
+
+fn inter_packet_intervals(packets: &[WanPacket]) -> Vec<u64> {
+    let mut result = Vec::new();
+    let mut last_time = None;
+    for packet in packets {
+        if let Some(last_time) = last_time {
+            result.push(packet.sent_timestamp - last_time);
+        }
+        last_time = Some(packet.sent_timestamp);
+    }
+    result
+}
+
+/// Assert that the min of vec is at least as small as `min`, similarly for `max`, and that the
+/// average is within the given range.
+fn assert_statistics(vec: Vec<u64>, min: u64, max: u64, average_range: std::ops::Range<f64>) {
+    let actual_min = vec.iter().min().unwrap();
+    let actual_max = vec.iter().max().unwrap();
+    let actual_avg = vec.iter().sum::<u64>() as f64 / vec.len() as f64;
+    assert!(
+        actual_min <= &min,
+        "Expected min: {min}, Actual min: {actual_min}"
+    );
+    assert!(
+        actual_max >= &max,
+        "Expected max: {max}, Actual max: {actual_max}"
+    );
+    assert!(
+        average_range.contains(&actual_avg),
+        "Actual average {actual_avg} was not in range {average_range:?}"
+    );
+}
+
+#[test]
+fn jitter() {
+    setup_logging();
+    let (mut simulated_hardware, mut cores) =
+        simulated_pair(JITTERED_C2S_WIRE_CONFIG, JITTERED_S2C_WIRE_CONFIG, 0);
+
+    // should involve on the order of 10,000 packets going either way, which is a large enough N
+    // that jitter stats should be good
+    simulated_hardware.run_until(&mut cores, ms(10_000.0));
+
+    // skip first 100 on either side so we make sure not to capture the handshake in our statistics
+    let c2s_intervals =
+        inter_packet_intervals(&simulated_hardware.sent_outgoing_packets(&client_addr())[100..]);
+    let s2c_intervals =
+        inter_packet_intervals(&simulated_hardware.sent_outgoing_packets(&server_addr())[100..]);
+
+    log::info!(
+        "c2s packet count: {}, c2s_intervals length: {}",
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        c2s_intervals.len()
+    );
+
+    assert_statistics(
+        c2s_intervals,
+        1_410_000,
+        1_490_000,
+        1_445_000.0..1_455_000.0,
+    );
+    assert_statistics(
+        s2c_intervals,
+        1_710_000,
+        1_790_000,
+        1_745_000.0..1_755_000.0,
     );
 }
 
@@ -348,19 +445,19 @@ fn drop_and_reorder() {
     simulated_hardware.run_until(&mut cores, ms(1500.1));
     assert!(
         simulated_hardware
-            .incoming_packets(&client_addr())
+            .sent_incoming_packets(&client_addr())
             .is_empty()
     );
     assert!(
         simulated_hardware
-            .incoming_packets(&server_addr())
+            .sent_incoming_packets(&server_addr())
             .is_empty()
     );
 
     std::thread::sleep(Duration::from_millis(1010));
     simulated_hardware.run_until(&mut cores, ms(6000.0));
-    let client_incoming_packets = simulated_hardware.incoming_packets(&client_addr());
-    let server_incoming_packets = simulated_hardware.incoming_packets(&server_addr());
+    let client_incoming_packets = simulated_hardware.sent_incoming_packets(&client_addr());
+    let server_incoming_packets = simulated_hardware.sent_incoming_packets(&server_addr());
     assert_eq!(client_incoming_packets.len(), 1);
     assert_eq!(server_incoming_packets.len(), 1);
     assert_eq!(&client_incoming_packets[0].buffer[..], &[4, 3, 2, 1]);
@@ -482,12 +579,14 @@ fn multiple_ongoing_negotiations() {
     simulated_hardware.make_outgoing_packet(&server_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, ms(20.0));
     assert_eq!(
-        simulated_hardware.incoming_packets(&good_client_addr).len(),
+        simulated_hardware
+            .sent_incoming_packets(&good_client_addr)
+            .len(),
         1
     );
     assert!(
         simulated_hardware
-            .incoming_packets(&evil_client_addr)
+            .sent_incoming_packets(&evil_client_addr)
             .is_empty()
     );
 }
@@ -521,7 +620,12 @@ fn client_termination_and_reconnect() {
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, ms(2.0));
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        1
+    );
 
     let original_client_core = cores.insert(
         client_addr(),
@@ -545,7 +649,12 @@ fn client_termination_and_reconnect() {
     simulated_hardware.run_until(&mut cores, ms(2.001));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
     simulated_hardware.run_until(&mut cores, ms(4.0));
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -577,7 +686,12 @@ fn server_termination_and_reconnect() {
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, ms(2.0));
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        1
+    );
 
     let original_server_core = cores.insert(
         server_addr(),
@@ -602,7 +716,12 @@ fn server_termination_and_reconnect() {
     simulated_hardware.run_until(&mut cores, ms(2.001));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
     simulated_hardware.run_until(&mut cores, ms(4.0));
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 2);
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
 }
 
 // TODO more tests:

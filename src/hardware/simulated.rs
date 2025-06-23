@@ -14,7 +14,6 @@ struct OneSideInfo {
     addr: SocketAddr,
 
     /// Packets already sent out by the side
-    // At some point we may not want this to be a LogicalIpPacket and instead include more information
     sent_outgoing_packets: Vec<WanPacket>,
     /// Packets to be read by this side, along with the time they'll become available.
     unread_outgoing_packets: VecDeque<IpPacketBuffer>,
@@ -49,6 +48,7 @@ pub(crate) struct WanPacket {
     pub(crate) buffer: IpPacketBuffer,
     pub(crate) source: SocketAddr,
     pub(crate) dest: SocketAddr,
+    pub(crate) sent_timestamp: u64,
     pub(crate) receipt_timestamp: u64,
 }
 
@@ -121,8 +121,12 @@ impl SimulatedHardware {
             .push_back(IpPacketBuffer::new(packet));
     }
 
-    pub(crate) fn incoming_packets(&self, addr: &SocketAddr) -> &Vec<LocalPacket> {
+    pub(crate) fn sent_incoming_packets(&self, addr: &SocketAddr) -> &Vec<LocalPacket> {
         &self.peers[addr].sent_incoming_packets
+    }
+
+    pub(crate) fn sent_outgoing_packets(&self, addr: &SocketAddr) -> &Vec<WanPacket> {
+        &self.peers[addr].sent_outgoing_packets
     }
 
     pub(crate) fn all_wan_packets(&self) -> &Vec<WanPacket> {
@@ -332,6 +336,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
         ));
         let wan_packet = WanPacket {
             buffer: IpPacketBuffer::new(packet),
+            sent_timestamp,
             receipt_timestamp,
             source: self.our_addr,
             dest: destination,

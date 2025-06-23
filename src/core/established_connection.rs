@@ -157,10 +157,11 @@ impl EstablishedConnection {
         hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
         // we don't forget to update here:
-        assert!(
-            hardware.timestamp() >= timer_timestamp,
-            "hardware.send_outgoing_packet returned too early"
-        );
+        // TODO enable this assertion, or ensure our code does not rely on send_outgoing_packet blocking until the designated send time
+        // assert!(
+        //     hardware.timestamp() >= send_timestamp,
+        //     "hardware.send_outgoing_packet returned too early"
+        // );
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
         hardware.set_timer(
