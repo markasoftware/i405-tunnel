@@ -42,4 +42,8 @@ pub(crate) trait Hardware {
     /// mtu, including ip and udp headers, in bytes. This isn't used by any business logic, it is
     /// just needed to configure the MTU for wolfSSL
     fn mtu(&self, peer: SocketAddr) -> Result<u16>;
+
+    /// Report to the hardware the planned duration from the last sent packet (send_outgoing_packet
+    /// called before this) until the next sent packet. Not used functionally, just for reporting.
+    fn register_interval(&mut self, duration: u64);
 }

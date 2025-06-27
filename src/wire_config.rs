@@ -85,7 +85,8 @@ fn to_wire_config(
         }
     };
     log::info!(
-        "Computed packet intervals (w/ jitter) will be between {} and {}",
+        "Computed {} packet intervals (w/ jitter) will be between {} and {}",
+        c2s_or_s2c,
         ns_to_str(packet_interval_min),
         ns_to_str(packet_interval_max)
     );

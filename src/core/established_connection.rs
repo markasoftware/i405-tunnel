@@ -162,11 +162,12 @@ impl EstablishedConnection {
         //     hardware.timestamp() >= send_timestamp,
         //     "hardware.send_outgoing_packet returned too early"
         // );
+        let next_interval = self.jitterator.next_interval();
+        hardware.register_interval(next_interval);
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
         hardware.set_timer(
-            send_timestamp + self.jitterator.next_interval()
-                - self.outgoing_wire_config.packet_finalize_delta,
+            send_timestamp + next_interval - self.outgoing_wire_config.packet_finalize_delta,
         );
         Ok(())
     }

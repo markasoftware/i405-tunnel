@@ -439,6 +439,9 @@ impl ConnectionStateTrait for EstablishedConnection {
         match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)? {
             IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
             IsConnectionOpen::No => {
+                log::info!(
+                    "Server informed us that it shut down normally -- will attempt to reconnect, in case it's restarting."
+                );
                 // TODO this should be handled by some global policy on whether to retry or shut
                 // down after errors, rather than always retrying by resetting to NoConnection.
                 return Ok(ConnectionState::NoConnection(NoConnection::new(

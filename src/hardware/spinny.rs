@@ -11,6 +11,7 @@ use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
     core,
+    deviation_stats::DeviationStatsThread,
     utils::{instant_to_timestamp, timestamp_to_instant},
 };
 
@@ -26,12 +27,19 @@ pub(crate) struct SpinnyHardware {
     // set to true if we should shut down when able
     shutting_down: Arc<AtomicBool>,
 
+    next_outgoing_packet_id: u64,
+    deviation_stats_thread: Option<DeviationStatsThread>,
+
     socket: UdpSocket,
     tun: tun_rs::SyncDevice,
 }
 
 impl SpinnyHardware {
-    pub(crate) fn new(listen_addr: SocketAddr, tun: tun_rs::SyncDevice) -> Result<Self> {
+    pub(crate) fn new(
+        listen_addr: SocketAddr,
+        tun: tun_rs::SyncDevice,
+        deviation_stats: Option<Duration>,
+    ) -> Result<Self> {
         let socket = UdpSocket::bind(listen_addr)?;
         socket
             .set_nonblocking(true)
@@ -58,6 +66,10 @@ impl SpinnyHardware {
             timer: None,
             read_outgoing: false,
             shutting_down,
+
+            next_outgoing_packet_id: 0,
+            deviation_stats_thread: deviation_stats
+                .map(|duration| DeviationStatsThread::spawn(duration)),
 
             socket,
             tun,
@@ -118,6 +130,9 @@ impl SpinnyHardware {
             // I suspect an std::hint::spin_loop() would be kinda useless here because the syscalls
             // above already make this into not quite a busy loop.
         }
+
+        // we got shutting down signal, finish up here.
+        core.on_terminate(self);
     }
 }
 
@@ -159,9 +174,17 @@ impl Hardware for SpinnyHardware {
         if let Some(timestamp) = timestamp {
             precise_sleep(timestamp_to_instant(self.epoch, timestamp));
         }
+        let socket_send_instant = Instant::now();
         if let Err(err) = self.socket.send_to(packet, destination) {
             log::error!("Error sending outgoing packet (over UdpSocket): {err:?}");
         }
+        if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            deviation_stats_thread.register_packet(
+                self.next_outgoing_packet_id,
+                instant_to_timestamp(self.epoch, socket_send_instant),
+            );
+        }
+        self.next_outgoing_packet_id += 1;
         Ok(())
     }
 
@@ -178,8 +201,21 @@ impl Hardware for SpinnyHardware {
     }
 
     fn mtu(&self, peer: SocketAddr) -> Result<u16> {
-        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1)
-            .map_err(|err| anyhow!(err).context("Interface MTU was wayy too large"))?)
+        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1).unwrap_or(u16::MAX))
+    }
+
+    fn register_interval(&mut self, duration: u64) {
+        assert!(
+            self.next_outgoing_packet_id > 0,
+            "Must send an outgoing packet before registering an interval"
+        );
+        if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            deviation_stats_thread.register_interval(
+                self.next_outgoing_packet_id - 1,
+                self.next_outgoing_packet_id,
+                duration,
+            );
+        }
     }
 }
 

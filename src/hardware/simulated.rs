@@ -379,4 +379,6 @@ impl<'a> Hardware for OneSideHardware<'a> {
     fn mtu(&self, _peer: SocketAddr) -> Result<u16> {
         Ok(MAX_IP_PACKET_LENGTH.try_into().unwrap())
     }
+
+    fn register_interval(&mut self, _duration: u64) {}
 }

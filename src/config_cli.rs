@@ -176,6 +176,7 @@ pub(crate) struct CommonConfigCli {
     pub(crate) tun_ipv6: Option<String>,
     pub(crate) force_sched_fifo: bool,
     pub(crate) force_no_sched_fifo: bool,
+    pub(crate) outgoing_send_deviation_stats: Option<Duration>,
     pub(crate) poll_mode: PollMode,
 }
 
@@ -211,6 +212,10 @@ impl EzClap for CommonConfigCli {
             Arg::new("tun_ipv6")
                 .long("tun-ipv6")
                 .help("IPv6 address (optionall with netmask) to automatically assign and route to the TUN device."),
+            Arg::new("outgoing_send_deviation_stats")
+                .long("outgoing-send-deviation-stats")
+                .value_parser(humantime::parse_duration)
+                .help("If set, keep track of actual vs. expected outgoing send timestamps for packets and print a report this often (eg, 10s)"),
             Arg::new("poll_mode")
                 .long("poll-mode")
                 .value_parser(["sleepy", "spinny"])
@@ -245,6 +250,9 @@ impl EzClap for CommonConfigCli {
                 .get_one::<bool>("force_no_sched_fifo")
                 .unwrap()
                 .clone(),
+            outgoing_send_deviation_stats: matches
+                .get_one::<Duration>("outgoing_send_deviation_stats")
+                .cloned(),
             poll_mode: match matches.get_one::<String>("poll_mode").unwrap().as_ref() {
                 "sleepy" => PollMode::Sleepy,
                 "spinny" => PollMode::Spinny,

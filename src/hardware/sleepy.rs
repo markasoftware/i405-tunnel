@@ -10,8 +10,9 @@ use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
     core,
+    deviation_stats::DeviationStatsThread,
     hardware::Hardware,
-    utils::{instant_to_timestamp, timestamp_to_instant},
+    utils::{ChannelThread, instant_to_timestamp, timestamp_to_instant},
 };
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -23,6 +24,8 @@ pub(crate) struct SleepyHardware {
     // we increment this when event listeners are cleared, and include it in all requests to other
     // threads, so that we can identify when an event is from a "previous" generation
     generation: u64,
+    // for interval tracking
+    next_outgoing_packet_id: u64,
     // we'll "connect" to this address to disconnect:
     disconnect_addr: SocketAddr,
 
@@ -35,6 +38,7 @@ pub(crate) struct SleepyHardware {
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
     incoming_read_thread: ChannelThread<()>,
+    deviation_stats_thread: Option<DeviationStatsThread>,
 
     // events_rx should be listed after the threads, because if it's dropped before the threads are
     // dropped, then the threads may try to send to their events_txs after the receiver has been
@@ -43,7 +47,11 @@ pub(crate) struct SleepyHardware {
 }
 
 impl SleepyHardware {
-    pub(crate) fn new(listen_addr: SocketAddr, tun: tun_rs::SyncDevice) -> Result<Self> {
+    pub(crate) fn new(
+        listen_addr: SocketAddr,
+        tun: tun_rs::SyncDevice,
+        deviation_stats: Option<Duration>,
+    ) -> Result<Self> {
         let (outgoing_read_requests_tx, outgoing_read_requests_rx) = mpsc::channel();
         let (incoming_reads_tx, incoming_reads_rx) = mpsc::channel();
 
@@ -82,6 +90,7 @@ impl SleepyHardware {
         Ok(Self {
             epoch,
             generation: 0,
+            next_outgoing_packet_id: 0,
             disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
             timer: None,
@@ -107,6 +116,8 @@ impl SleepyHardware {
                     incoming_read_socket,
                 )
             }),
+            deviation_stats_thread: deviation_stats
+                .map(|duration| DeviationStatsThread::spawn(duration)),
         })
     }
 
@@ -183,45 +194,6 @@ impl Drop for SleepyHardware {
         self.tun_is_shutdown
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.tun.shutdown().expect("Error closing TUN");
-    }
-}
-
-/// Automatically joins thread on drop.
-struct JThread {
-    join_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl JThread {
-    fn spawn<F: FnOnce() -> () + Send + 'static>(f: F) -> Self {
-        Self {
-            join_handle: Some(std::thread::spawn(f)),
-        }
-    }
-}
-
-impl Drop for JThread {
-    fn drop(&mut self) {
-        if let Err(panic_payload) = std::mem::take(&mut self.join_handle).unwrap().join() {
-            std::panic::resume_unwind(panic_payload);
-        }
-    }
-}
-
-// A channel that we can send stuff to. This is designed for threads that have internal logic which
-// shuts down the thread once the channel closes; this way, as the ChannelThread is dropped, the
-// channel will close, then we attempt to join the thread, and then the thread will cooperatively
-// close, giving us a fully RAII-based cooperative thread closing mechanism.
-struct ChannelThread<TX> {
-    tx: mpsc::Sender<TX>,
-    _jthread: JThread,
-}
-
-impl<TX> ChannelThread<TX> {
-    fn spawn<F: FnOnce() -> () + Send + 'static>(tx: mpsc::Sender<TX>, f: F) -> Self {
-        Self {
-            tx,
-            _jthread: JThread::spawn(f),
-        }
     }
 }
 
@@ -353,7 +325,7 @@ impl Hardware for SleepyHardware {
 
     fn read_outgoing_packet(&mut self) {
         self.outgoing_read_thread
-            .tx
+            .tx()
             .send(OutgoingReadRequest {
                 generation: self.generation,
             })
@@ -371,6 +343,7 @@ impl Hardware for SleepyHardware {
         if let Some(timestamp) = timestamp {
             precise_sleep(timestamp_to_instant(self.epoch, timestamp));
         }
+        let actual_socket_send_instant = Instant::now();
         match self.socket.send_to(packet, destination) {
             Ok(len) => {
                 if len != packet.len() {
@@ -383,6 +356,13 @@ impl Hardware for SleepyHardware {
             }
             Err(err) => log::error!("Outgoing send error (to udp socket): {err:?}"),
         }
+        if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            deviation_stats_thread.register_packet(
+                self.next_outgoing_packet_id,
+                instant_to_timestamp(self.epoch, actual_socket_send_instant),
+            );
+        }
+        self.next_outgoing_packet_id += 1;
         Ok(())
     }
 
@@ -409,7 +389,20 @@ impl Hardware for SleepyHardware {
     }
 
     fn mtu(&self, peer: SocketAddr) -> Result<u16> {
-        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1)
-            .map_err(|_| anyhow!("Interface MTU was wayy too large"))?)
+        Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1).unwrap_or(u16::MAX))
+    }
+
+    fn register_interval(&mut self, duration: u64) {
+        assert!(
+            self.next_outgoing_packet_id > 0,
+            "Must send an outgoing packet before calling register_interval"
+        );
+        if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            deviation_stats_thread.register_interval(
+                self.next_outgoing_packet_id - 1,
+                self.next_outgoing_packet_id,
+                duration,
+            );
+        }
     }
 }
