@@ -9,6 +9,8 @@ turn on the software when you're using it, so attackers can correlate based on s
 any network traffic over the anonymization protocol, padding or otherwise (TODO elaborate, also how
 is I405 different than running eg a tor relay 24/7 in this respect?).
 
+![A bastardized version of the I405 interstate highway sign](logo.svg)
+
 ## Using I405 as a Tor alternative: "Interstate Circuits"
 
 I405 can be (carefully!) used to anonymously accessing clearnet websites.
@@ -22,7 +24,7 @@ An Interstate Circuit consists of (at least) three network hops:
    from Western governments, you might choose this hop to be between two servers in Russia;
    conversely, if you're trying to hide from the Russian government, you should make this hop
    between two servers in the Western world.
-3. The final egress hop from your "exit" server to the final clearnet site you're connecting to.
+3. The final egress hop from your "exit" server to the ultimate clearnet site you're connecting to.
 
 The attacker you're hiding from will be able to observe hops 1 and 3, but not 2. Because hops 1 and
 3 do not involve the same servers, the attacker will not be able to simply use IP addresses to
@@ -30,13 +32,7 @@ correlate them. Furthermore, the observable network traffic on hop 1 is uniform 
 the actual data being tunnelled, so the attacker cannot determine that the traffic on hops 1 and 3
 are correlated with any amount of statistical analysis.
 
-An attacker might be able to correlate the time between packets ("packet intervals") between hops 1
-and 3. For example, if your tunnel sends a packet every 27 milliseconds, and the hop 3 packet
-intervals are always approximately multiples of 27ms, the attacker might know what's up. I405 has
-a robust "scheduling" protection against this attack, at the cost of latency.
-
 For more details on how to securely set up an Interstate Circuit, see docs/interstate-circuits.md
-
 
 ## Building and Testing
 
