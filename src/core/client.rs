@@ -299,16 +299,10 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             )?));
         }
 
-        self.num_timeouts_happened = self.num_timeouts_happened.checked_add(1).unwrap();
-        self.current_timeout_interval = self
-            .current_timeout_interval
-            .checked_mul(2)
-            .unwrap()
-            .clamp(0, C2S_MAX_TIMEOUT);
-        let next_timeout_instant = hardware
-            .timestamp()
-            .checked_add(self.current_timeout_interval)
-            .unwrap();
+        self.num_timeouts_happened += 1;
+        self.current_timeout_interval =
+            (self.current_timeout_interval * 2).clamp(0, C2S_MAX_TIMEOUT);
+        let next_timeout_instant = hardware.timestamp() + self.current_timeout_interval;
         hardware.set_timer(next_timeout_instant);
         Ok(ConnectionState::C2SHandshakeSent(self))
     }

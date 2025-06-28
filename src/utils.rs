@@ -12,15 +12,13 @@ pub(crate) fn ns_to_str(ns: u64) -> String {
 
 pub(crate) fn ip_mtu_to_udp_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
     match peer {
-        SocketAddr::V4(_) => ip_mtu.checked_sub(IPV4_HEADER_LENGTH).unwrap(),
-        SocketAddr::V6(_) => ip_mtu.checked_sub(IPV6_HEADER_LENGTH).unwrap(),
+        SocketAddr::V4(_) => ip_mtu - IPV4_HEADER_LENGTH,
+        SocketAddr::V6(_) => ip_mtu - IPV6_HEADER_LENGTH,
     }
 }
 
 pub(crate) fn ip_mtu_to_dtls_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
-    ip_mtu_to_udp_mtu(ip_mtu, peer)
-        .checked_sub(UDP_HEADER_LENGTH)
-        .unwrap()
+    ip_mtu_to_udp_mtu(ip_mtu, peer) - UDP_HEADER_LENGTH
 }
 
 pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {

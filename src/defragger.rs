@@ -86,9 +86,7 @@ impl Defragger {
 
     fn remove_expired_defrag_packets(&mut self) {
         if self.counter > MAX_FRAGMENTATION_ID_AGE {
-            while self.remove_oldest_defrag_packet(Some(
-                self.counter.checked_sub(MAX_FRAGMENTATION_ID_AGE).unwrap(),
-            )) {}
+            while self.remove_oldest_defrag_packet(Some(self.counter - MAX_FRAGMENTATION_ID_AGE)) {}
         }
     }
 
@@ -180,9 +178,7 @@ impl Defragger {
         message: &IpPacketFragment,
     ) -> Option<IpPacketBuffer> {
         // actually one past the end
-        let message_offset_past_end = usize::from(message.offset)
-            .checked_add(message.fragment.len())
-            .unwrap();
+        let message_offset_past_end = usize::from(message.offset) + message.fragment.len();
 
         let defrag_packet = self.ensure_defrag_packet(message.fragmentation_id);
 

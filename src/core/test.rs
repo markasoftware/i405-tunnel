@@ -14,6 +14,7 @@ use std::time::Duration;
 use test_case::test_matrix;
 
 const PSK: &[u8] = b"password";
+const DEFAULT_PACKET_LENGTH: u16 = 1000;
 const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_423_000, // 1.423ms
@@ -93,8 +94,6 @@ fn simulated_pair(
     ]);
     (simulated_hardware, cores)
 }
-
-const DEFAULT_PACKET_LENGTH: u16 = 1000;
 
 fn default_simulated_pair(
     default_delay: u64,
@@ -199,9 +198,8 @@ fn wan_packet_length() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
-    let wan_packet_length: usize = usize::from(DTLS_HEADER_LENGTH)
-        .checked_add(DEFAULT_PACKET_LENGTH.into())
-        .unwrap();
+    let wan_packet_length: usize =
+        usize::from(DTLS_HEADER_LENGTH) + usize::from(DEFAULT_PACKET_LENGTH);
 
     simulated_hardware.run_until(&mut cores, 1);
     let handshake = simulated_hardware.all_wan_packets();
@@ -260,13 +258,9 @@ fn packing() {
 
     // type byte and length only
     const MESSAGE_HEADER_LENGTH: usize = 1 + 2;
-    // I really need to stop doing the checked arithmetic, don't I?
-    let first_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH).checked_div(2).unwrap();
-    let second_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH)
-        .checked_sub(MESSAGE_HEADER_LENGTH.checked_mul(2).unwrap())
-        .unwrap()
-        .checked_sub(first_message_length)
-        .unwrap();
+    let first_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH) / 2;
+    let second_message_length: usize =
+        usize::from(DEFAULT_PACKET_LENGTH) - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
 
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
@@ -285,7 +279,7 @@ fn packing() {
     simulated_hardware.run_until(&mut cores, ms(3.0));
     assert_eq!(
         simulated_hardware.all_wan_packets().len(),
-        num_handshake_wan_packets.checked_add(3).unwrap()
+        num_handshake_wan_packets + 3
     );
     // we'll verify the actual contents later
     assert_eq!(
@@ -297,10 +291,8 @@ fn packing() {
 
     // now test that it /doesn't/ work when we make it one larger
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
-    simulated_hardware.make_outgoing_packet(
-        &client_addr(),
-        &long_packet(second_message_length.checked_add(1).unwrap()),
-    );
+    simulated_hardware
+        .make_outgoing_packet(&client_addr(), &long_packet(second_message_length + 1));
     simulated_hardware.run_until(&mut cores, ms(5.0));
     // just fud because I don't fully trust the SimulatedHardware yet
     assert_eq!(

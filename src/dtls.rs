@@ -235,7 +235,7 @@ impl EstablishedSession {
                 // checks all around that only packets of the correct size can get passed through to
                 // here.
                 assert!(
-                    result.len() == len.checked_add(DTLS_HEADER_LENGTH.into()).unwrap(),
+                    result.len() == len + usize::from(DTLS_HEADER_LENGTH),
                     "Ciphertext length {} is not {}+(dtls header length: {})",
                     result.len(),
                     len,

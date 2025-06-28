@@ -277,7 +277,7 @@ where
     fn read_exact_comptime<const NUM: usize>(&mut self) -> Option<[u8; NUM]> {
         let result = self.peek_exact_comptime::<NUM>();
         if result.is_some() {
-            self.position = self.position.checked_add(NUM).unwrap();
+            self.position = self.position + NUM;
         }
         result
     }
@@ -288,7 +288,7 @@ where
     fn read_exact_runtime(&mut self, len: usize) -> Option<&[u8]> {
         if self.num_bytes_left() >= len {
             let start_position = self.position;
-            self.position = start_position.checked_add(len).unwrap();
+            self.position = start_position + len;
             Some(&self.underlying.as_ref()[start_position..self.position])
         } else {
             None
@@ -336,7 +336,7 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 
     fn write_exact(&mut self, buf: &[u8]) -> bool {
         if self.num_bytes_left() >= buf.len() {
-            self.position = self.position.checked_add(buf.len()).unwrap();
+            self.position = self.position + buf.len();
             self.underlying[self.position - buf.len()..self.position].copy_from_slice(buf);
             true
         } else {
@@ -398,7 +398,7 @@ mod serdes {
 
     impl Serializer for LengthDeterminingSerializer {
         fn serialize(&mut self, data: &[u8]) {
-            self.length = self.length.checked_add(data.len()).unwrap();
+            self.length = self.length + data.len();
         }
     }
 

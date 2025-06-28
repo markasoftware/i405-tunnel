@@ -54,11 +54,9 @@ impl QueuedIpPacket {
                 //    Else, set fragmented flag, make an initial packet, and return
                 let fragmented_base_length =
                     messages::IpPacket::base_length(Some(unused_fragmentation_id));
-                let min_useful_fragmented_length = fragmented_base_length.checked_add(1).unwrap();
+                let min_useful_fragmented_length = fragmented_base_length + 1;
                 let unfragmented_base_length = messages::IpPacket::base_length(None);
-                let one_packet_length = unfragmented_base_length
-                    .checked_add(self.packet.len())
-                    .unwrap();
+                let one_packet_length = unfragmented_base_length + self.packet.len();
                 if one_packet_length <= max_length {
                     FragmentResult::Done(messages::Message::IpPacket(messages::IpPacket {
                         fragmentation_id: None,
@@ -67,8 +65,7 @@ impl QueuedIpPacket {
                 } else if max_length < min_useful_fragmented_length {
                     FragmentResult::MaxLengthTooShort(self)
                 } else {
-                    let fragment_inner_packet_length =
-                        max_length.checked_sub(fragmented_base_length).unwrap();
+                    let fragment_inner_packet_length = max_length - fragmented_base_length;
                     let message = messages::Message::IpPacket(messages::IpPacket {
                         fragmentation_id: Some(unused_fragmentation_id),
                         packet: IpPacketBuffer::new(&self.packet[..fragment_inner_packet_length]),
@@ -95,12 +92,8 @@ impl QueuedIpPacket {
                 // 2. If base size + remaining inner packet length <= max_size, make it and return.
                 //    Else, don't!
                 let base_length = messages::IpPacketFragment::base_length();
-                let min_useful_length = base_length.checked_add(1).unwrap();
-                let one_packet_length = base_length
-                    .checked_add(self.packet.len())
-                    .unwrap()
-                    .checked_sub(num_bytes_sent)
-                    .unwrap();
+                let min_useful_length = base_length + 1;
+                let one_packet_length = base_length + self.packet.len() - num_bytes_sent;
                 if one_packet_length <= max_length {
                     FragmentResult::Done(messages::Message::IpPacketFragment(
                         messages::IpPacketFragment {
@@ -113,10 +106,8 @@ impl QueuedIpPacket {
                 } else if max_length < min_useful_length {
                     FragmentResult::MaxLengthTooShort(self)
                 } else {
-                    let fragment_inner_packet_length = max_length.checked_sub(base_length).unwrap();
-                    let fragment_past_end = num_bytes_sent
-                        .checked_add(fragment_inner_packet_length)
-                        .unwrap();
+                    let fragment_inner_packet_length = max_length - base_length;
+                    let fragment_past_end = num_bytes_sent + fragment_inner_packet_length;
                     let message = messages::Message::IpPacketFragment(messages::IpPacketFragment {
                         is_last: false,
                         fragmentation_id,
@@ -129,9 +120,7 @@ impl QueuedIpPacket {
                         message,
                         Self {
                             fragmentation: Some(Fragmentation {
-                                num_bytes_sent: num_bytes_sent
-                                    .checked_add(fragment_inner_packet_length)
-                                    .unwrap(),
+                                num_bytes_sent: num_bytes_sent + fragment_inner_packet_length,
                                 fragmentation_id,
                             }),
                             ..self

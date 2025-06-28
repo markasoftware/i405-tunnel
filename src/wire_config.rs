@@ -64,11 +64,9 @@ fn to_wire_config(
         // TODO print the computed speed from the interval. Or maybe, just print the whole goddamn
         // config for both directions as well as the speed, since we always need to print something.
         AverageWireIntervalCli::Fixed(fixed_interval) => fixed_interval,
-        AverageWireIntervalCli::Rate(bytes_per_second) => u64::from(packet_length)
-            .checked_mul(1_000_000_000)
-            .unwrap()
-            .checked_div(bytes_per_second)
-            .unwrap(),
+        AverageWireIntervalCli::Rate(bytes_per_second) => {
+            u64::from(packet_length) * 1_000_000_000 / bytes_per_second
+        }
     };
     let (packet_interval_min, packet_interval_max) = match interval.jitter {
         Some(jitter) => (
@@ -123,11 +121,7 @@ pub(crate) fn to_wire_configs(
         SocketAddr::V4(_) => IPV4_HEADER_LENGTH,
         SocketAddr::V6(_) => IPV6_HEADER_LENGTH,
     };
-    let all_headers_length = ip_packet_header_length
-        .checked_add(UDP_HEADER_LENGTH)
-        .unwrap()
-        .checked_add(DTLS_HEADER_LENGTH)
-        .unwrap();
+    let all_headers_length = ip_packet_header_length + UDP_HEADER_LENGTH + DTLS_HEADER_LENGTH;
     let max_packet_length = mtu.checked_sub(all_headers_length).expect(&format!("Interface {interface_name} has an MTU of {mtu}, which is too short to fit a useful I405 packet"));
 
     WireConfigs {

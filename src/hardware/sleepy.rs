@@ -252,7 +252,7 @@ fn outgoing_read_thread(
 }
 
 fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket: Arc<UdpSocket>) {
-    let mut last_block = Instant::now().checked_sub(SOCKET_READ_TIMEOUT).unwrap();
+    let mut last_block = Instant::now() - SOCKET_READ_TIMEOUT;
     // keep reading packets until the channel disconnects
     loop {
         match rx.try_recv() {
@@ -385,7 +385,7 @@ impl Hardware for SleepyHardware {
 
     fn clear_event_listeners(&mut self) {
         self.timer = None;
-        self.generation = self.generation.checked_add(1).unwrap();
+        self.generation += 1;
     }
 
     fn mtu(&self, peer: SocketAddr) -> Result<u16> {

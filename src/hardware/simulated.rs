@@ -134,7 +134,7 @@ impl SimulatedHardware {
     }
 
     pub(crate) fn drop_packet(&mut self, nth: u64) {
-        let counter_to_drop = self.packet_counter.checked_add(nth).unwrap();
+        let counter_to_drop = self.packet_counter + nth;
         assert!(
             !self.packets_to_drop.contains(&counter_to_drop),
             "Already were gonna drop packet {} (nth: {})",
@@ -145,7 +145,7 @@ impl SimulatedHardware {
     }
 
     pub(crate) fn delay_packet(&mut self, nth: u64, duration: u64) {
-        let counter_to_delay = self.packet_counter.checked_add(nth).unwrap();
+        let counter_to_delay = self.packet_counter + nth;
         assert!(
             !self.packets_to_delay.contains_key(&counter_to_delay),
             "Already were gonna delay packet {} (nth: {})",
@@ -313,18 +313,14 @@ impl<'a> Hardware for OneSideHardware<'a> {
             return Ok(());
         }
 
-        let delay = self
-            .simulated
-            .default_delay
-            .checked_add(
-                self.simulated
-                    .packets_to_delay
-                    .get(&packet_counter)
-                    .unwrap_or(&0)
-                    .clone(),
-            )
-            .unwrap();
-        let receipt_timestamp = sent_timestamp.checked_add(delay).unwrap();
+        let delay = self.simulated.default_delay
+            + self
+                .simulated
+                .packets_to_delay
+                .get(&packet_counter)
+                .unwrap_or(&0)
+                .clone();
+        let receipt_timestamp = sent_timestamp + delay;
         self.simulated.debug(format!(
             "Sending packet from {} to {} of size {} at {}ns (delay {}ns, to be received at {}ns)",
             self.our_addr,

@@ -143,9 +143,7 @@ impl EstablishedConnection {
     ) -> Result<()> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
-        let send_timestamp = timer_timestamp
-            .checked_add(self.outgoing_wire_config.packet_finalize_delta)
-            .unwrap();
+        let send_timestamp = timer_timestamp + self.outgoing_wire_config.packet_finalize_delta;
         let outgoing_cleartext_packet = std::mem::replace(
             &mut self.partial_outgoing_packet,
             messages::WriteCursor::new(IpPacketBuffer::new_empty(
