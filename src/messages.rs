@@ -173,7 +173,6 @@ impl serdes::Serializable for ServerToClientHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         MAGIC_VALUE.serialize(serializer);
-        SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
         self.success.serialize(serializer);
     }
@@ -187,14 +186,6 @@ impl serdes::Deserializable for ServerToClientHandshake {
         if magic_value != MAGIC_VALUE {
             bail!(
                 "Wrong magic value in handshake message: Got {magic_value:#x}, wanted {MAGIC_VALUE:#x}"
-            );
-        }
-
-        // TODO do we really need to check in this direction?
-        let serdes_version: u32 = read_cursor.read()?;
-        if serdes_version != SERDES_VERSION {
-            bail!(
-                "Unsupported serdes version; peer has {serdes_version}, but we have {SERDES_VERSION}"
             );
         }
 
@@ -484,6 +475,7 @@ mod test {
         },
     };
     use anyhow::anyhow;
+    use test_case::test_case;
 
     pub(crate) fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
@@ -532,12 +524,13 @@ mod test {
 
     /// Ensure that s2c and c2s handshakes error out if the magic values or serdes versions are not
     /// equal
-    #[test]
-    fn magic_value_error() {
+    #[test_case(ClientToServerHandshake::TYPE_BYTE)]
+    #[test_case(ServerToClientHandshake::TYPE_BYTE)]
+    fn magic_value_error(type_byte: u8) {
         let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
         let mut write_cursor = WriteCursor::new(arr_arr);
         // TODO Test both handshakes
-        write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
+        write_cursor.write(type_byte);
         write_cursor.write(MAGIC_VALUE + 1 as u32);
         let buf = write_cursor.into_inner();
 
@@ -563,7 +556,6 @@ mod test {
     fn serdes_version_error() {
         let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
         let mut write_cursor = WriteCursor::new(arr_arr);
-        // TODO Test both handshakes
         write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
         write_cursor.write(MAGIC_VALUE as u32);
         write_cursor.write(SERDES_VERSION + 1 as u32);

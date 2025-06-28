@@ -1,5 +1,5 @@
 #[cfg(not(feature = "jumbo-packets"))]
-pub(crate) const MAX_IP_PACKET_LENGTH: usize = 1500; // TODO may want to remove this to support jumbo frames?
+pub(crate) const MAX_IP_PACKET_LENGTH: usize = 1500;
 #[cfg(feature = "jumbo-packets")]
 pub(crate) const MAX_IP_PACKET_LENGTH: usize = 9000;
 

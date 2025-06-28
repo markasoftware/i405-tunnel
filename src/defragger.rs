@@ -170,9 +170,6 @@ impl Defragger {
 
     /// Given an IP packet fragment message, if it completes a packet, return the packet, else just
     /// update internal data structures and return None.
-    // TODO on both this and `handle_ip_packet`: Indicate warnings such as a IpPacketFragment that
-    // doesn't have any entry, or when we kick an incomplete fragment out of the ring buffer (which
-    // indicates drop), or when we receive an extra fragment for an already-completed packet.
     pub(crate) fn handle_ip_packet_fragment(
         &mut self,
         message: &IpPacketFragment,
@@ -351,9 +348,6 @@ mod test {
         );
     }
 
-    // When a fragment is at least MAX_FRAGMENTATION_ID_AGE old, it should be dropped. TODO add a
-    // test case with one fewer fid so that we can test that it doesn't get dropped prematurely.
-    // (have already checked this manually)
     #[test]
     fn defrag_drop_old_fragment() {
         let mut defragger = Defragger::new();

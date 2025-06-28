@@ -352,7 +352,6 @@ fn terminate(mut session: wolfssl::Session<IOCallbacks>) -> Result<Vec<IpPacketB
             Ok(wolfssl::Poll::PendingWrite) => {
                 add_written_packet(&mut session, &mut written_packets)
             }
-            // TODO
             Ok(wolfssl::Poll::AppData(_)) => bail!("Unexpected AppData during termination"),
             Err(err) => return Err(err.into()),
         }
