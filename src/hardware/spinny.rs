@@ -155,11 +155,6 @@ impl Hardware for SpinnyHardware {
         Ok(())
     }
 
-    fn socket_disconnect(&mut self) -> Result<()> {
-        self.socket.connect(self.disconnect_addr)?;
-        Ok(())
-    }
-
     // remaining are different than in SleepyHardware
     fn read_outgoing_packet(&mut self) {
         self.read_outgoing = true;
@@ -195,9 +190,11 @@ impl Hardware for SpinnyHardware {
         Ok(())
     }
 
-    fn clear_event_listeners(&mut self) {
+    fn clear_event_listeners(&mut self) -> Result<()> {
         self.timer = None;
         self.read_outgoing = false;
+        self.socket.connect(self.disconnect_addr)?;
+        Ok(())
     }
 
     fn mtu(&self, peer: SocketAddr) -> Result<u16> {

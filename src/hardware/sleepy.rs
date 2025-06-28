@@ -318,11 +318,6 @@ impl Hardware for SleepyHardware {
         Ok(())
     }
 
-    fn socket_disconnect(&mut self) -> Result<()> {
-        self.socket.connect(self.disconnect_addr)?;
-        Ok(())
-    }
-
     fn read_outgoing_packet(&mut self) {
         self.outgoing_read_thread
             .tx()
@@ -383,9 +378,11 @@ impl Hardware for SleepyHardware {
         Ok(())
     }
 
-    fn clear_event_listeners(&mut self) {
+    fn clear_event_listeners(&mut self) -> Result<()> {
         self.timer = None;
         self.generation += 1;
+        self.socket.connect(self.disconnect_addr)?;
+        Ok(())
     }
 
     fn mtu(&self, peer: SocketAddr) -> Result<u16> {

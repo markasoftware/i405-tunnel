@@ -15,8 +15,9 @@ I405-specific policies to be aware of:
   100`. We use ignored tests to indicate tests that don't finish instantly, rather than broken
   tests. At the time of writing, the slow tests are slow because they have to `sleep` because
   wolfSSL uses the system time for certain timeouts (see
-  https://github.com/expressvpn/lightway/issues/203). (If you have to introduce a test that doesn't
-  pass yet for some reason, use `#cfg[any()]` instead of `#[ignore]`).
+  https://github.com/expressvpn/lightway/issues/203). All non-ignored tests should pass in no more
+  than 1 second on single-threaded modern hardware. If you have to introduce a test that doesn't
+  pass yet for some reason, use `#cfg[any()]` instead of `#[ignore]`.
   
   Also, end-to-end test must pass: `end-to-end-tests/e2e_test.py`.
 + Add tests for important parts of all "pure" behavior. Changes to the "hardware" implementations

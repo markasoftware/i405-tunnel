@@ -295,16 +295,6 @@ where
         }
     }
 
-    fn read_exact_runtime_to(&mut self, dest: &mut [u8]) -> bool {
-        match self.read_exact_runtime(dest.len()) {
-            Some(read_bytes) => {
-                dest.copy_from_slice(read_bytes);
-                true
-            }
-            None => false,
-        }
-    }
-
     pub(crate) fn read<D: serdes::Deserializable>(&mut self) -> Result<D> {
         D::deserialize(self)
     }

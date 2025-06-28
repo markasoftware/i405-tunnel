@@ -33,11 +33,9 @@ pub(crate) trait Hardware {
 
     /// Filter out future traffic from addrs other than the one specified.
     fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()>;
-    /// Remove restrictions on which addrs we receive traffic from.
-    fn socket_disconnect(&mut self) -> Result<()>;
 
-    /// delete any timers and read_outgoing_
-    fn clear_event_listeners(&mut self);
+    /// delete any running timers, and disconnect the socket if connected.
+    fn clear_event_listeners(&mut self) -> Result<()>;
 
     /// mtu, including ip and udp headers, in bytes. This isn't used by any business logic, it is
     /// just needed to configure the MTU for wolfSSL

@@ -174,7 +174,7 @@ pub(crate) struct CommonConfigCli {
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
-    pub(crate) force_sched_fifo: bool,
+    pub(crate) _force_sched_fifo: bool,
     pub(crate) force_no_sched_fifo: bool,
     pub(crate) outgoing_send_deviation_stats: Option<Duration>,
     pub(crate) poll_mode: PollMode,
@@ -245,7 +245,7 @@ impl EzClap for CommonConfigCli {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
-            force_sched_fifo: matches.get_one::<bool>("force_sched_fifo").unwrap().clone(),
+            _force_sched_fifo: matches.get_one::<bool>("force_sched_fifo").unwrap().clone(),
             force_no_sched_fifo: matches
                 .get_one::<bool>("force_no_sched_fifo")
                 .unwrap()

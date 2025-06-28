@@ -113,8 +113,7 @@ impl EstablishedConnection {
         outgoing_wire_config: WireConfig,
     ) -> Result<Self> {
         let mut jitterator = outgoing_wire_config.jitterator();
-        // TODO this could return Self (can't fail)
-        hardware.clear_event_listeners();
+        hardware.clear_event_listeners()?;
         hardware.set_timer(
             hardware.timestamp() + jitterator.next_interval()
                 - outgoing_wire_config.packet_finalize_delta,

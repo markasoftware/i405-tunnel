@@ -544,7 +544,8 @@ fn multiple_ongoing_negotiations() {
         &mut simulated_hardware.hardware(evil_client_addr),
     )
     .unwrap();
-    let noop_core = core::noop::Core::new(&mut simulated_hardware.hardware(good_client_addr));
+    let noop_core =
+        core::noop::Core::new(&mut simulated_hardware.hardware(good_client_addr)).unwrap();
     let mut cores = BTreeMap::from([
         (evil_client_addr, evil_client_core.into()),
         (good_client_addr, noop_core.into()),
@@ -621,7 +622,9 @@ fn client_termination_and_reconnect() {
 
     let original_client_core = cores.insert(
         client_addr(),
-        core::noop::Core::new(&mut simulated_hardware.hardware(client_addr())).into(),
+        core::noop::Core::new(&mut simulated_hardware.hardware(client_addr()))
+            .unwrap()
+            .into(),
     );
     original_client_core
         .unwrap()
@@ -687,7 +690,9 @@ fn server_termination_and_reconnect() {
 
     let original_server_core = cores.insert(
         server_addr(),
-        core::noop::Core::new(&mut simulated_hardware.hardware(server_addr())).into(),
+        core::noop::Core::new(&mut simulated_hardware.hardware(server_addr()))
+            .unwrap()
+            .into(),
     );
     original_server_core
         .unwrap()

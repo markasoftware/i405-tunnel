@@ -12,6 +12,8 @@ use crate::{core, hardware::Hardware};
 #[derive(Debug, Clone)]
 struct OneSideInfo {
     addr: SocketAddr,
+    // if socket_connect has been called, then only accept incoming packets from this address
+    connected_addr: Option<SocketAddr>,
 
     /// Packets already sent out by the side
     sent_outgoing_packets: Vec<WanPacket>,
@@ -32,6 +34,7 @@ impl OneSideInfo {
     fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
+            connected_addr: None,
             sent_outgoing_packets: Vec::new(),
             unread_outgoing_packets: VecDeque::new(),
             unread_incoming_packets: BinaryHeap::new(),
@@ -222,12 +225,16 @@ impl SimulatedHardware {
                 if let Some(incoming_packet) = peer.unread_incoming_packets.peek() {
                     if timestamp >= incoming_packet.receipt_timestamp {
                         let incoming_packet = peer.unread_incoming_packets.pop().unwrap();
+                        if let Some(connected_addr) = peer.connected_addr {
+                            if connected_addr != incoming_packet.source {
+                                self.debug(format!("Connected to {} but got packet from {} of size {}, on {}. Dropping.", connected_addr, incoming_packet.source, incoming_packet.buffer.len(), addr));
+                            }
+                        }
                         self.debug(format!(
-                            "Reading incoming packet of size {} on {}, from {}, at {}ns",
+                            "Reading incoming packet of size {} on {}, from {}",
                             incoming_packet.buffer.len(),
                             addr,
                             incoming_packet.source,
-                            timestamp
                         ));
                         assert_eq!(
                             incoming_packet.receipt_timestamp, timestamp,
@@ -358,18 +365,16 @@ impl<'a> Hardware for OneSideHardware<'a> {
         Ok(())
     }
 
-    fn socket_connect(&mut self, _socket_addr: &SocketAddr) -> Result<()> {
-        unimplemented!("TODO");
+    fn socket_connect(&mut self, addr: &SocketAddr) -> Result<()> {
+        self.our_side().connected_addr = Some(*addr);
+        Ok(())
     }
 
-    // TODO rethink this fn more generally: Should it perhaps be part of clear_event_listeners?
-    fn socket_disconnect(&mut self) -> Result<()> {
-        unimplemented!("TODO");
-    }
-
-    fn clear_event_listeners(&mut self) {
+    fn clear_event_listeners(&mut self) -> Result<()> {
         self.our_side().timer = None;
         self.our_side().should_read_outgoing = false;
+        self.our_side().connected_addr = None;
+        Ok(())
     }
 
     fn mtu(&self, _peer: SocketAddr) -> Result<u16> {

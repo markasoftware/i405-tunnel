@@ -19,7 +19,7 @@ pub(crate) struct Core {
 impl Core {
     pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
         Ok(Self {
-            state: Some(ConnectionState::NoConnection(NoConnection::new(hardware))),
+            state: Some(ConnectionState::NoConnection(NoConnection::new(hardware)?)),
             config,
         })
     }
@@ -127,12 +127,12 @@ struct Negotiation {
 }
 
 impl NoConnection {
-    fn new(hardware: &mut impl Hardware) -> Self {
-        hardware.clear_event_listeners();
+    fn new(hardware: &mut impl Hardware) -> Result<Self> {
+        hardware.clear_event_listeners()?;
         NoConnection::set_timer(hardware);
-        NoConnection {
+        Ok(NoConnection {
             negotiations: Vec::new(),
-        }
+        })
     }
 
     fn set_timer(hardware: &mut impl Hardware) {
@@ -250,7 +250,7 @@ impl ServerConnectionStateTrait for NoConnection {
                             hardware.send_outgoing_packet(&packet, peer, None)?;
                         }
                         return Ok(ConnectionState::InProtocolHandshake(
-                            InProtocolHandshake::new(hardware, new_session, peer),
+                            InProtocolHandshake::new(hardware, new_session, peer)?,
                         ));
                     }
                     dtls::NegotiateResult::NeedRead(new_session, to_send, next_timeout) => {
@@ -335,13 +335,13 @@ impl InProtocolHandshake {
         hardware: &mut impl Hardware,
         session: dtls::EstablishedSession,
         peer: SocketAddr,
-    ) -> InProtocolHandshake {
-        hardware.clear_event_listeners();
-        InProtocolHandshake {
+    ) -> Result<InProtocolHandshake> {
+        hardware.clear_event_listeners()?;
+        Ok(InProtocolHandshake {
             session,
             peer,
             c2s_handshake: None,
-        }
+        })
     }
 
     fn send_s2c_handshake(
@@ -433,7 +433,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 return Ok(ConnectionState::InProtocolHandshake(self));
             }
             dtls::DecryptResult::Terminated => {
-                return Ok(ConnectionState::NoConnection(NoConnection::new(hardware)));
+                return Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?));
             }
             dtls::DecryptResult::Err(err) => return Err(err.into()),
         };
@@ -483,7 +483,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                         established_connection,
                     )),
                     IsConnectionOpen::No => {
-                        Ok(ConnectionState::NoConnection(NoConnection::new(hardware)))
+                        Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
                     }
                 }
             }
@@ -539,7 +539,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
                 log::info!(
                     "Client terminated connection normally -- returning to NoConnection state"
                 );
-                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)))
+                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
             }
         }
     }
