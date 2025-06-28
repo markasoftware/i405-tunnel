@@ -337,6 +337,7 @@ impl InProtocolHandshake {
         peer: SocketAddr,
     ) -> Result<InProtocolHandshake> {
         hardware.clear_event_listeners()?;
+        hardware.socket_connect(&peer)?;
         Ok(InProtocolHandshake {
             session,
             peer,

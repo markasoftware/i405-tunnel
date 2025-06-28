@@ -114,6 +114,7 @@ impl EstablishedConnection {
     ) -> Result<Self> {
         let mut jitterator = outgoing_wire_config.jitterator();
         hardware.clear_event_listeners()?;
+        hardware.socket_connect(&peer)?;
         hardware.set_timer(
             hardware.timestamp() + jitterator.next_interval()
                 - outgoing_wire_config.packet_finalize_delta,

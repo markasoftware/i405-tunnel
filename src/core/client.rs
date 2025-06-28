@@ -132,6 +132,7 @@ fn send_packets(
 impl NoConnection {
     fn new(config: &Config, hardware: &mut impl Hardware) -> Result<NoConnection> {
         hardware.clear_event_listeners()?;
+        hardware.socket_connect(&config.peer_address)?;
         let dtls_mtu = ip_mtu_to_dtls_mtu(hardware.mtu(config.peer_address)?, config.peer_address);
         let (new_session, initial_packets, timeout) = dtls::NegotiatingSession::new_client(
             &config.pre_shared_key,
@@ -242,6 +243,7 @@ impl C2SHandshakeSent {
         session: dtls::EstablishedSession,
     ) -> Result<C2SHandshakeSent> {
         hardware.clear_event_listeners()?;
+        hardware.socket_connect(&config.peer_address)?;
         let next_timeout_instant = hardware.timestamp() + C2S_RETRANSMIT_TIMEOUT;
         hardware.set_timer(next_timeout_instant);
         let mut result = C2SHandshakeSent {
