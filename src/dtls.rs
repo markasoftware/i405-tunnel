@@ -20,7 +20,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::{
     array_array::IpPacketBuffer,
-    constants::{DTLS_HEADER_LENGTH, MAX_IP_PACKET_LENGTH},
+    constants::{DTLS_TYPICAL_HEADER_LENGTH, MAX_IP_PACKET_LENGTH},
 };
 
 pub(crate) struct NegotiatingSession {
@@ -47,6 +47,10 @@ impl NegotiatingSession {
         mtu: u16,
         timestamp: u64,
     ) -> Result<(Self, Vec<IpPacketBuffer>, u64)> {
+        // strictly less because dtls mtu is exclusive of the IP and UDP headers.
+        assert!(mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(), "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
+        log::debug!("Setting wolfSSL MTU to {mtu}");
+
         let wolf_session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsClientV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
@@ -70,6 +74,9 @@ impl NegotiatingSession {
 
     /// There's no initial timeout for the server, since it's just waiting for a client.
     pub(crate) fn new_server(pre_shared_key: &[u8], mtu: u16) -> Result<Self> {
+        assert!(mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(), "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
+        log::debug!("Setting wolfSSL MTU to {mtu}");
+
         let session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsServerV1_3)?
             .with_pre_shared_key(pre_shared_key)
             .build()
@@ -235,11 +242,11 @@ impl EstablishedSession {
                 // checks all around that only packets of the correct size can get passed through to
                 // here.
                 assert!(
-                    result.len() == len + usize::from(DTLS_HEADER_LENGTH),
+                    result.len() == len + usize::from(DTLS_TYPICAL_HEADER_LENGTH),
                     "Ciphertext length {} is not {}+(dtls header length: {})",
                     result.len(),
                     len,
-                    DTLS_HEADER_LENGTH,
+                    DTLS_TYPICAL_HEADER_LENGTH,
                 );
                 Ok(result)
             }
@@ -293,8 +300,7 @@ impl EstablishedSession {
                     add_written_packet(&mut self.underlying, &mut written_packets);
                 }
                 Ok(wolfssl::Poll::AppData(_)) => {
-                    // TODO this shouldn't panic, just return an error. Waiting until we switch to anyhow.
-                    panic!("Unexpected AppData during decryption");
+                    return DecryptResult::Err(anyhow!("Unexpected AppData during decrypt packet"));
                 }
                 Err(wolfssl::Error::Fatal(wolfssl::ErrorKind::PeerClosed)) => {
                     log::info!("Remote peer terminated normally");
@@ -304,7 +310,7 @@ impl EstablishedSession {
                 // caller has to discard the session object. Can someone random (even accidentally)
                 // send us udp packets that would cause wolfssl errors and effectively reset the
                 // session?
-                Err(err) => return DecryptResult::Err(err),
+                Err(err) => return DecryptResult::Err(anyhow!(err)),
             }
         }
     }
@@ -328,7 +334,7 @@ pub(crate) enum DecryptResult {
     SendThese(Vec<IpPacketBuffer>),
     /// Connection terminated normally by peer
     Terminated,
-    Err(wolfssl::Error),
+    Err(anyhow::Error),
 }
 
 fn terminate(mut session: wolfssl::Session<IOCallbacks>) -> Result<Vec<IpPacketBuffer>> {

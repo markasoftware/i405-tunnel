@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::constants::{IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH};
+use crate::constants::{DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH};
 
 pub(crate) fn ns_to_str(ns: u64) -> String {
     humantime::format_duration(Duration::from_nanos(ns)).to_string()
@@ -19,6 +19,10 @@ pub(crate) fn ip_mtu_to_udp_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
 
 pub(crate) fn ip_mtu_to_dtls_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
     ip_mtu_to_udp_mtu(ip_mtu, peer) - UDP_HEADER_LENGTH
+}
+
+pub(crate) fn ip_mtu_to_i405_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
+    ip_mtu_to_dtls_mtu(ip_mtu, peer) - DTLS_MAX_HEADER_LENGTH
 }
 
 pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {

@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use declarative_enum_dispatch::enum_dispatch;
 
 use crate::array_array::IpPacketBuffer;
+use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::hardware::Hardware;
 use crate::utils::{ip_mtu_to_dtls_mtu, ns_to_str};
@@ -133,7 +134,12 @@ impl NoConnection {
     fn new(config: &Config, hardware: &mut impl Hardware) -> Result<NoConnection> {
         hardware.clear_event_listeners()?;
         hardware.socket_connect(&config.peer_address)?;
-        let dtls_mtu = ip_mtu_to_dtls_mtu(hardware.mtu(config.peer_address)?, config.peer_address);
+        let dtls_mtu = ip_mtu_to_dtls_mtu(
+            hardware
+                .mtu(config.peer_address)?
+                .clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap()),
+            config.peer_address,
+        );
         let (new_session, initial_packets, timeout) = dtls::NegotiatingSession::new_client(
             &config.pre_shared_key,
             dtls_mtu,

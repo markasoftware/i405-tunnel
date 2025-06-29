@@ -2,7 +2,7 @@
 /// super fast and reproducible. We also have some true integration tests that set up Linux network
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
-use crate::constants::DTLS_HEADER_LENGTH;
+use crate::constants::DTLS_MAX_HEADER_LENGTH;
 use crate::core::{self, Core};
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
 use crate::wire_config::WireConfig;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use test_case::test_matrix;
 
 const PSK: &[u8] = b"password";
-const DEFAULT_PACKET_LENGTH: u16 = 1000;
+const DEFAULT_PACKET_LENGTH: u16 = 1400;
 const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_423_000, // 1.423ms
@@ -199,7 +199,7 @@ fn wan_packet_length() {
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     let wan_packet_length: usize =
-        usize::from(DTLS_HEADER_LENGTH) + usize::from(DEFAULT_PACKET_LENGTH);
+        usize::from(DTLS_MAX_HEADER_LENGTH) + usize::from(DEFAULT_PACKET_LENGTH);
 
     simulated_hardware.run_until(&mut cores, 1);
     let handshake = simulated_hardware.all_wan_packets();

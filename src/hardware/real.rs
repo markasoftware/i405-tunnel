@@ -1,9 +1,9 @@
+/// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
 use std::net::SocketAddr;
 
-/// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
-use anyhow::Result;
+use anyhow::{Result, bail};
 
-use crate::config_cli::CommonConfigCli;
+use crate::{config_cli::CommonConfigCli, constants::MAX_IP_PACKET_LENGTH};
 
 /// Return the address that you can "connect" a UDP socket to to disconnect it, using the same IP
 /// protocol version as listen_addr
@@ -47,9 +47,11 @@ pub(crate) fn tun_config_from_common_config_cli(common_config_cli: &CommonConfig
 /// Create tun, socket, and set scheduling policy.
 pub(crate) fn make_tun(tun_config: TunConfig) -> Result<tun_rs::SyncDevice> {
     let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_config.name);
-    if let Some(mtu) = tun_config.mtu {
-        tun_builder = tun_builder.mtu(mtu);
+    let mtu = tun_config.mtu.unwrap_or(MAX_IP_PACKET_LENGTH.try_into().unwrap());
+    if mtu > MAX_IP_PACKET_LENGTH.try_into().unwrap() {
+        bail!("tun configured MTU {mtu} must not be greater than MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
     }
+    tun_builder = tun_builder.mtu(mtu);
     if let Some(ipv4_net) = tun_config.ipv4_net {
         tun_builder = tun_builder.ipv4(ipv4_net.addr(), ipv4_net.netmask(), None);
     }

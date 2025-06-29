@@ -24,8 +24,14 @@ fn main() {
 
     let tun_config = hardware::real::tun_config_from_common_config_cli(common_config_cli);
     let tun = hardware::real::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
+    let default_listen_addr = match configuration {
+        config_cli::ConfigCli::Client(_) => "0.0.0.0:0",
+        config_cli::ConfigCli::Server(_) => "0.0.0.0:1405",
+    };
     let listen_addr = common_config_cli
         .listen_addr
+        .clone()
+        .unwrap_or(default_listen_addr.to_string())
         .parse()
         .expect("Failed to parse listen address as IP:PORT");
 

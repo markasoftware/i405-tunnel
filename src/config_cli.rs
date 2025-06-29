@@ -3,7 +3,6 @@ use std::time::Duration;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 use declarative_enum_dispatch::enum_dispatch;
 
-const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:1405";
 const DEFAULT_TUN_NAME: &str = "tun-i405";
 // TODO ensure there are no issues when this is greater than the inter-packet interval
 const DEFAULT_FINALIZE_DELTA: &str = "1ms";
@@ -169,7 +168,7 @@ impl EzClap for WireConfigCli {
 
 pub(crate) struct CommonConfigCli {
     pub(crate) pre_shared_key: Vec<u8>,
-    pub(crate) listen_addr: String,
+    pub(crate) listen_addr: Option<String>,
     pub(crate) tun_name: String,
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
@@ -196,8 +195,7 @@ impl EzClap for CommonConfigCli {
                 .help("Encryption password that both client and server must share"),
             Arg::new("listen_addr")
                 .long("listen-addr")
-                .default_value(DEFAULT_LISTEN_ADDR)
-                .help("Address and port to listen on."),
+                .help("Address and port to listen on. Default for server is 0.0.0.0:1405, client is 0.0.0.0:0 (the OS chooses the port)"),
 	    Arg::new("tun_name")
 		.long("tun-name")
 		.default_value(DEFAULT_TUN_NAME)
@@ -240,7 +238,7 @@ impl EzClap for CommonConfigCli {
                 .unwrap()
                 .clone(),
             // TODO rename to bind_addr so it makes more sense on the client?
-            listen_addr: matches.get_one::<String>("listen_addr").unwrap().clone(),
+            listen_addr: matches.get_one::<String>("listen_addr").cloned(),
             tun_name: matches.get_one::<String>("tun_name").unwrap().clone(),
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),

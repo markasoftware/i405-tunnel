@@ -22,8 +22,6 @@ const OVERSLEEP_WARNING: Duration = Duration::from_micros(250);
 pub(crate) struct SleepyHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
-    // threads, so that we can identify when an event is from a "previous" generation
-    generation: u64,
     // for interval tracking
     next_outgoing_packet_id: u64,
     // we'll "connect" to this address to disconnect:
@@ -34,7 +32,7 @@ pub(crate) struct SleepyHardware {
     tun: Arc<tun_rs::SyncDevice>,
     tun_is_shutdown: Arc<AtomicBool>,
 
-    outgoing_read_thread: ChannelThread<OutgoingReadRequest>,
+    outgoing_read_thread: ChannelThread<()>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
     incoming_read_thread: ChannelThread<()>,
@@ -89,7 +87,6 @@ impl SleepyHardware {
 
         Ok(Self {
             epoch,
-            generation: 0,
             next_outgoing_packet_id: 0,
             disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
@@ -157,17 +154,14 @@ impl SleepyHardware {
                 Ok(Event::OutgoingRead {
                     timestamp,
                     packet,
-                    generation,
                 }) => {
-                    if generation == self.generation {
-                        // TODO the packet comes to us as &[u8], then we wrap it in an
-                        // IpPacketBuffer, then we deref it here, then it'll almost certainly be
-                        // made back into an IpPacketBuffer again later. Does explicitly converting
-                        // it back and forth between a slice and an IpPacketBuffer cause even more
-                        // copying than necessary? Probably depends on inlining and stuff but I'm
-                        // not sure!
-                        core.on_read_outgoing_packet(self, &packet, timestamp);
-                    }
+                    // TODO the packet comes to us as &[u8], then we wrap it in an
+                    // IpPacketBuffer, then we deref it here, then it'll almost certainly be
+                    // made back into an IpPacketBuffer again later. Does explicitly converting
+                    // it back and forth between a slice and an IpPacketBuffer cause even more
+                    // copying than necessary? Probably depends on inlining and stuff but I'm
+                    // not sure!
+                    core.on_read_outgoing_packet(self, &packet, timestamp);
                 }
                 Ok(Event::IncomingRead { addr, packet }) => {
                     core.on_read_incoming_packet(self, &packet, addr);
@@ -197,15 +191,10 @@ impl Drop for SleepyHardware {
     }
 }
 
-struct OutgoingReadRequest {
-    generation: u64,
-}
-
 enum Event {
     OutgoingRead {
         timestamp: u64,
         packet: IpPacketBuffer,
-        generation: u64,
     },
     IncomingRead {
         addr: SocketAddr,
@@ -215,7 +204,7 @@ enum Event {
 }
 
 fn outgoing_read_thread(
-    read_request_rx: mpsc::Receiver<OutgoingReadRequest>,
+    read_request_rx: mpsc::Receiver<()>,
     tx: mpsc::Sender<Event>,
     tun: Arc<tun_rs::SyncDevice>,
     tun_is_shutdown: Arc<AtomicBool>,
@@ -228,7 +217,6 @@ fn outgoing_read_thread(
                 buf.shrink(len);
                 if tx
                     .send(Event::OutgoingRead {
-                        generation: read_request.generation,
                         packet: buf,
                         timestamp: instant_to_timestamp(epoch, Instant::now()),
                     })
@@ -313,17 +301,16 @@ impl Hardware for SleepyHardware {
         std::mem::replace(&mut self.timer, Some(timestamp))
     }
 
-    fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()> {
-        self.socket.connect(socket_addr)?;
+    fn socket_connect(&mut self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
+        // TODO disconnection doesn't work right now so we don't connect at all:
+        // self.socket.connect(socket_addr)?;
         Ok(())
     }
 
     fn read_outgoing_packet(&mut self) {
         self.outgoing_read_thread
             .tx()
-            .send(OutgoingReadRequest {
-                generation: self.generation,
-            })
+            .send(())
             .unwrap();
     }
 
@@ -380,8 +367,7 @@ impl Hardware for SleepyHardware {
 
     fn clear_event_listeners(&mut self) -> Result<()> {
         self.timer = None;
-        self.generation += 1;
-        self.socket.connect(self.disconnect_addr)?;
+        // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
 

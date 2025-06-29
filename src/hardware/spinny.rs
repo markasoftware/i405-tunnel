@@ -150,8 +150,9 @@ impl Hardware for SpinnyHardware {
         std::mem::replace(&mut self.timer, Some(timestamp))
     }
 
-    fn socket_connect(&mut self, socket_addr: &std::net::SocketAddr) -> Result<()> {
-        self.socket.connect(socket_addr)?;
+    fn socket_connect(&mut self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
+        // Socket disconnection doesn't work right now so we don't connect at all:
+        // self.socket.connect(socket_addr)?;
         Ok(())
     }
 
@@ -193,7 +194,7 @@ impl Hardware for SpinnyHardware {
     fn clear_event_listeners(&mut self) -> Result<()> {
         self.timer = None;
         self.read_outgoing = false;
-        self.socket.connect(self.disconnect_addr)?;
+        // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
 

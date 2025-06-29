@@ -2,7 +2,8 @@ use std::net::SocketAddr;
 
 use crate::config_cli::{AverageWireIntervalCli, WireConfigCli, WireIntervalCli};
 use crate::constants::{
-    DTLS_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH,
+    DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, MAX_IP_PACKET_LENGTH,
+    UDP_HEADER_LENGTH,
 };
 use crate::jitter::Jitterator;
 use crate::utils::ns_to_str;
@@ -116,12 +117,15 @@ pub(crate) fn to_wire_configs(
 ) -> WireConfigs {
     let (interface_name, mtu_usize) =
         mtu::interface_and_mtu(peer.ip()).expect("Error computing interface MTU");
-    let mtu = mtu_usize.try_into().unwrap_or(u16::MAX);
+    let mtu = mtu_usize
+        .try_into()
+        .unwrap_or(u16::MAX)
+        .clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap());
     let ip_packet_header_length = match peer {
         SocketAddr::V4(_) => IPV4_HEADER_LENGTH,
         SocketAddr::V6(_) => IPV6_HEADER_LENGTH,
     };
-    let all_headers_length = ip_packet_header_length + UDP_HEADER_LENGTH + DTLS_HEADER_LENGTH;
+    let all_headers_length = ip_packet_header_length + UDP_HEADER_LENGTH + DTLS_MAX_HEADER_LENGTH;
     let max_packet_length = mtu.checked_sub(all_headers_length).expect(&format!("Interface {interface_name} has an MTU of {mtu}, which is too short to fit a useful I405 packet"));
 
     WireConfigs {
