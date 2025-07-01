@@ -87,8 +87,8 @@ fn make_core(
                 .expect("Invalid peer syntax; use host:port");
             let wire_configs = to_wire_configs(&peer, &client_configuration.wire_configuration);
             let client_config = core::client::Config {
-                c2s_wire_config: wire_configs.c2s,
-                s2c_wire_config: wire_configs.s2c,
+                client_wire_config: wire_configs.client,
+                server_wire_config: wire_configs.server,
                 peer_address: peer,
                 pre_shared_key: common_config_cli.pre_shared_key.clone(),
             };

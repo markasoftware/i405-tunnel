@@ -25,7 +25,7 @@ pub(crate) struct SleepyHardware {
     // for interval tracking
     next_outgoing_packet_id: u64,
     // we'll "connect" to this address to disconnect:
-    disconnect_addr: SocketAddr,
+    _disconnect_addr: SocketAddr,
 
     timer: Option<u64>,
     socket: Arc<UdpSocket>,
@@ -35,7 +35,7 @@ pub(crate) struct SleepyHardware {
     outgoing_read_thread: ChannelThread<()>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
-    incoming_read_thread: ChannelThread<()>,
+    _incoming_read_thread: ChannelThread<()>,
     deviation_stats_thread: Option<DeviationStatsThread>,
 
     // events_rx should be listed after the threads, because if it's dropped before the threads are
@@ -88,7 +88,7 @@ impl SleepyHardware {
         Ok(Self {
             epoch,
             next_outgoing_packet_id: 0,
-            disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
+            _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
             timer: None,
             socket,
@@ -106,7 +106,7 @@ impl SleepyHardware {
                     epoch,
                 )
             }),
-            incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, move || {
+            _incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, move || {
                 incoming_read_thread(
                     incoming_reads_rx,
                     tx_for_incoming_read_thread,
@@ -207,7 +207,7 @@ fn outgoing_read_thread(
     tun_is_shutdown: Arc<AtomicBool>,
     epoch: Instant,
 ) {
-    while let Ok(read_request) = read_request_rx.recv() {
+    while let Ok(()) = read_request_rx.recv() {
         let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
         match tun.recv(&mut buf) {
             Ok(len) => {

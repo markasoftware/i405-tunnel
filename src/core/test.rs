@@ -2,10 +2,10 @@
 /// super fast and reproducible. We also have some true integration tests that set up Linux network
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
-use crate::constants::{DTLS_MAX_HEADER_LENGTH, DTLS_TYPICAL_HEADER_LENGTH, IPV4_HEADER_LENGTH, UDP_HEADER_LENGTH};
+use crate::constants::{IPV4_HEADER_LENGTH, UDP_HEADER_LENGTH};
 use crate::core::{self, Core};
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
-use crate::utils::{ip_to_dtls_length, ip_to_i405_length};
+use crate::utils::ip_to_i405_length;
 use crate::wire_config::WireConfig;
 
 use std::collections::BTreeMap;
@@ -15,44 +15,51 @@ use std::time::Duration;
 use test_case::test_matrix;
 
 const PSK: &[u8] = b"password";
+const TIMEOUT: u64 = 1_000_000_000;
 // in case this cursed knowledge is useful when the fragmentation test some day fails: This used to
 // be the inner, i405 packet length rather than the outer ip packet length that it is now.
 const DEFAULT_PACKET_LENGTH: u16 = 1000;
-const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
+const DEFAULT_CLIENT_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_423_000, // 1.423ms
     packet_interval_max: 1_423_000, // 1.423ms
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
-const DEFAULT_S2C_WIRE_CONFIG: WireConfig = WireConfig {
+const DEFAULT_SERVER_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_411_000, // 1.411ms
     packet_interval_max: 1_411_000, // 1.411ms
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
-const LONGER_C2S_WIRE_CONFIG: WireConfig = WireConfig {
+const LONGER_CLIENT_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 142_300_000, // 142.3ms
     packet_interval_max: 142_300_000, // 142.3ms
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
-const LONGER_S2C_WIRE_CONFIG: WireConfig = WireConfig {
+const LONGER_SERVER_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 141_100_000, // 141.1ms
     packet_interval_max: 141_100_000, // 141.1ms
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
-const JITTERED_C2S_WIRE_CONFIG: WireConfig = WireConfig {
+const JITTERED_CLIENT_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_400_000,
     packet_interval_max: 1_500_000,
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
-const JITTERED_S2C_WIRE_CONFIG: WireConfig = WireConfig {
+const JITTERED_SERVER_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_700_000,
     packet_interval_max: 1_800_000,
     packet_finalize_delta: 100_000,
+    timeout: TIMEOUT,
 };
 
 fn ms(ms: f64) -> u64 {
@@ -68,8 +75,8 @@ fn server_addr() -> SocketAddr {
 }
 
 fn simulated_pair(
-    c2s_wire_config: WireConfig,
-    s2c_wire_config: WireConfig,
+    client_wire_config: WireConfig,
+    server_wire_config: WireConfig,
     default_delay: u64,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
     let mut simulated_hardware =
@@ -85,8 +92,8 @@ fn simulated_pair(
         core::client::Config {
             pre_shared_key: PSK.into(),
             peer_address: server_addr(),
-            c2s_wire_config,
-            s2c_wire_config,
+            client_wire_config,
+            server_wire_config,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -102,8 +109,8 @@ fn default_simulated_pair(
     default_delay: u64,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
     simulated_pair(
-        DEFAULT_C2S_WIRE_CONFIG,
-        DEFAULT_S2C_WIRE_CONFIG,
+        DEFAULT_CLIENT_WIRE_CONFIG,
+        DEFAULT_SERVER_WIRE_CONFIG,
         default_delay,
     )
 }
@@ -201,7 +208,8 @@ fn wan_packet_length() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
-    let dtls_packet_length: usize = usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH - 12);
+    let dtls_packet_length: usize =
+        usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH - 12);
 
     simulated_hardware.run_until(&mut cores, 1);
     let handshake = simulated_hardware.all_wan_packets();
@@ -365,7 +373,7 @@ fn assert_statistics(vec: Vec<u64>, min: u64, max: u64, average_range: std::ops:
 fn jitter() {
     setup_logging();
     let (mut simulated_hardware, mut cores) =
-        simulated_pair(JITTERED_C2S_WIRE_CONFIG, JITTERED_S2C_WIRE_CONFIG, 0);
+        simulated_pair(JITTERED_CLIENT_WIRE_CONFIG, JITTERED_SERVER_WIRE_CONFIG, 0);
 
     // should involve on the order of 10,000 packets going either way, which is a large enough N
     // that jitter stats should be good
@@ -420,8 +428,8 @@ fn drop_and_reorder() {
         core::client::Config {
             pre_shared_key: PSK.into(),
             peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -491,8 +499,8 @@ fn long_distance_reorder(packet_1: u64, packet_2: u64, reorder_1st_instead_of_dr
         core::client::Config {
             pre_shared_key: PSK.into(),
             peer_address: server_addr(),
-            c2s_wire_config: LONGER_C2S_WIRE_CONFIG,
-            s2c_wire_config: LONGER_S2C_WIRE_CONFIG,
+            client_wire_config: LONGER_CLIENT_WIRE_CONFIG,
+            server_wire_config: LONGER_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -535,8 +543,8 @@ fn wrong_psk() {
         core::client::Config {
             pre_shared_key: "wrong password".into(),
             peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -582,8 +590,8 @@ fn multiple_ongoing_negotiations() {
         core::client::Config {
             pre_shared_key: "wrong password".into(),
             peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(evil_client_addr),
     )
@@ -603,8 +611,8 @@ fn multiple_ongoing_negotiations() {
         core::client::Config {
             pre_shared_key: PSK.into(),
             peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(good_client_addr),
     )
@@ -631,28 +639,7 @@ fn multiple_ongoing_negotiations() {
 #[test]
 fn client_termination_and_reconnect() {
     setup_logging();
-    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
-    let server_core = core::server::Core::new(
-        core::server::Config {
-            pre_shared_key: PSK.into(),
-        },
-        &mut simulated_hardware.hardware(server_addr()),
-    )
-    .unwrap();
-    let client_core = core::client::Core::new(
-        core::client::Config {
-            pre_shared_key: PSK.into(),
-            peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
-        },
-        &mut simulated_hardware.hardware(client_addr()),
-    )
-    .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
@@ -677,8 +664,8 @@ fn client_termination_and_reconnect() {
         core::client::Config {
             pre_shared_key: PSK.into(),
             peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -699,28 +686,7 @@ fn client_termination_and_reconnect() {
 #[test]
 fn server_termination_and_reconnect() {
     setup_logging();
-    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
-    let server_core = core::server::Core::new(
-        core::server::Config {
-            pre_shared_key: PSK.into(),
-        },
-        &mut simulated_hardware.hardware(server_addr()),
-    )
-    .unwrap();
-    let client_core = core::client::Core::new(
-        core::client::Config {
-            pre_shared_key: PSK.into(),
-            peer_address: server_addr(),
-            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
-            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
-        },
-        &mut simulated_hardware.hardware(client_addr()),
-    )
-    .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
@@ -765,14 +731,146 @@ fn server_termination_and_reconnect() {
     );
 }
 
+// If the server restarts without sending the termination packets, will the client time out and
+// reconnect?
+#[test]
+fn server_not_responding() {
+    let (mut simulated_hardware, mut cores) =
+        simulated_pair(LONGER_CLIENT_WIRE_CONFIG, LONGER_SERVER_WIRE_CONFIG, 0);
+
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
+    simulated_hardware.run_until(&mut cores, ms(500.0));
+    // ensure that they are actually connected to prevent this test from falling out of date
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        1
+    );
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&client_addr())
+            .len(),
+        1
+    );
+
+    // replace the old server without properly terminating it
+    let num_outgoing_packets_before_destruction = simulated_hardware
+        .sent_outgoing_packets(&server_addr())
+        .len();
+    cores.remove(&server_addr());
+    // ensure that it isn't somehow sending packets during destruction
+    assert_eq!(
+        num_outgoing_packets_before_destruction,
+        simulated_hardware
+            .sent_outgoing_packets(&server_addr())
+            .len()
+    );
+
+    cores.insert(
+        server_addr(),
+        core::server::Core::new(
+            core::server::Config {
+                pre_shared_key: PSK.into(),
+            },
+            &mut simulated_hardware.hardware(server_addr()),
+        )
+        .unwrap()
+        .into(),
+    );
+
+    simulated_hardware.run_until(&mut cores, ms(11_000.0));
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
+    simulated_hardware.run_until(&mut cores, ms(11_500.0));
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&client_addr())
+            .len(),
+        2
+    );
+}
+
+// If the client restarts without sending the termination packets, will the server time out and
+// allow the client to reconnect?
+#[test]
+fn client_not_responding() {
+    let (mut simulated_hardware, mut cores) =
+        simulated_pair(LONGER_CLIENT_WIRE_CONFIG, LONGER_SERVER_WIRE_CONFIG, 0);
+
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
+    simulated_hardware.run_until(&mut cores, ms(500.0));
+    // ensure that they are actually connected to prevent this test from falling out of date
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        1
+    );
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&client_addr())
+            .len(),
+        1
+    );
+
+    // replace the old client without properly terminating it
+    let num_outgoing_packets_before_destruction = simulated_hardware
+        .sent_outgoing_packets(&client_addr())
+        .len();
+    cores.remove(&client_addr());
+    // ensure that it isn't somehow sending packets during destruction
+    assert_eq!(
+        num_outgoing_packets_before_destruction,
+        simulated_hardware
+            .sent_outgoing_packets(&client_addr())
+            .len()
+    );
+
+    cores.insert(
+        client_addr(),
+        core::client::Core::new(
+            core::client::Config {
+                pre_shared_key: PSK.into(),
+                client_wire_config: LONGER_CLIENT_WIRE_CONFIG,
+                server_wire_config: LONGER_SERVER_WIRE_CONFIG,
+                peer_address: server_addr(),
+            },
+            &mut simulated_hardware.hardware(client_addr()),
+        )
+        .unwrap()
+        .into(),
+    );
+
+    simulated_hardware.run_until(&mut cores, ms(11_000.0));
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
+    simulated_hardware.run_until(&mut cores, ms(11_500.0));
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        2
+    );
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&client_addr())
+            .len(),
+        2
+    );
+}
+
 // TODO more tests:
 // + DTLS handshake from a client when another client already has an established connection
-// + Packet drops and timeouts, esp. during in-protocol handshake (could theoretically abstract the in-protocol handshake even more in order to make it more openssl-like and then test it more isolated-ly, but it's simpler not to for now)
 // + Packet finalization time (ie, submitted to hardware with the right buffer before they /need/ to be sent)
 // + SSL Alerts
-// + Packet retransmissions and reorderings, esp. between stages of the state machine. Specifically:
-//   - DTLS handshake messages during in-protocol and established, and in-protocol handshake messages during established.
-//   - After server disconnect/reconnect, messages from the previous connection. These should fail DTLS decryption.
-//   - C2S post-handshake messages arriving before handshake (shouldn't actually crash it)
 // + Differing protocol versions
 // + Deserialization failures

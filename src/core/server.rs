@@ -481,6 +481,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     packet_interval_min: c2s_handshake.s2c_packet_interval_min,
                     packet_interval_max: c2s_handshake.s2c_packet_interval_max,
                     packet_finalize_delta: c2s_handshake.s2c_packet_finalize_delta,
+                    timeout: c2s_handshake.server_timeout,
                 };
                 log::info!(
                     "Handshake complete with {}, proceeding to established connection with {:?}",
@@ -489,16 +490,11 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 );
                 let mut established_connection =
                     EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
-                match established_connection
-                    .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?
-                {
-                    IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(
-                        established_connection,
-                    )),
-                    IsConnectionOpen::No => {
-                        Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
-                    }
-                }
+                established_connection
+                    .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
+                Ok(ConnectionState::EstablishedConnection(
+                    established_connection,
+                ))
             }
         }
     }
@@ -511,6 +507,31 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     }
 }
 
+impl EstablishedConnection {
+    // stupid naming _s because enum_dispatch won't let us use the same name here and in client
+    fn handle_is_connection_open_s(
+        self,
+        hardware: &mut impl Hardware,
+        is_connection_open: IsConnectionOpen,
+    ) -> Result<ConnectionState> {
+        match is_connection_open {
+            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
+            IsConnectionOpen::TimedOut => {
+                log::warn!(
+                    "Received no packets from client in a while -- returning to NoConnection state"
+                );
+                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
+            }
+            IsConnectionOpen::TerminatedNormally => {
+                log::info!(
+                    "Client terminated connection normally -- returning to NoConnection state"
+                );
+                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
+            }
+        }
+    }
+}
+
 impl ServerConnectionStateTrait for EstablishedConnection {
     fn on_timer(
         mut self,
@@ -518,8 +539,9 @@ impl ServerConnectionStateTrait for EstablishedConnection {
         hardware: &mut impl Hardware,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
-        EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
-        Ok(ConnectionState::EstablishedConnection(self))
+        let is_connection_open =
+            EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
+        self.handle_is_connection_open_s(hardware, is_connection_open)
     }
 
     fn on_read_outgoing_packet(
@@ -546,15 +568,9 @@ impl ServerConnectionStateTrait for EstablishedConnection {
             self.peer(),
             "should only be receiving from the correct peer once established"
         );
-        match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)? {
-            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
-            IsConnectionOpen::No => {
-                log::info!(
-                    "Client terminated connection normally -- returning to NoConnection state"
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
-            }
-        }
+        let is_connection_open =
+            EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
+        self.handle_is_connection_open_s(hardware, is_connection_open)
     }
 
     fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {

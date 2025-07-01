@@ -15,7 +15,9 @@ struct OneSideInfo {
     // if socket_connect has been called, then only accept incoming packets from this address
     connected_addr: Option<SocketAddr>,
 
-    /// Packets already sent out by the side
+    /// Packets already sent out by the side. A little bit cursed because it's in the order that
+    /// send_outgoing_packet is called, rather than by send_timestamp, so it's possible for
+    /// send_timestamps to not be in ascending order here.
     sent_outgoing_packets: Vec<WanPacket>,
     /// Packets to be read by this side, along with the time they'll become available.
     unread_outgoing_packets: VecDeque<IpPacketBuffer>,

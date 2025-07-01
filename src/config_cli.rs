@@ -1,7 +1,10 @@
 use std::time::Duration;
 
+use crate::wire_config::{MIN_DEFAULT_TIMEOUT, MIN_DEFAULT_TIMEOUT_PACKETS};
+
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 use declarative_enum_dispatch::enum_dispatch;
+use humantime::format_duration;
 
 const DEFAULT_TUN_NAME: &str = "tun-i405";
 // TODO ensure there are no issues when this is greater than the inter-packet interval
@@ -30,9 +33,11 @@ pub(crate) struct WireConfigCli {
     pub(crate) outgoing_packet_length: Option<u64>,
     pub(crate) outgoing_finalize_delta: u64,
     pub(crate) outgoing_interval: WireIntervalCli,
+    pub(crate) client_timeout: Option<Duration>,
     pub(crate) incoming_packet_length: Option<u64>,
     pub(crate) incoming_finalize_delta: u64,
     pub(crate) incoming_interval: WireIntervalCli,
+    pub(crate) server_timeout: Option<Duration>,
 }
 
 impl EzClap for WireConfigCli {
@@ -64,6 +69,10 @@ impl EzClap for WireConfigCli {
                 .default_value(DEFAULT_FINALIZE_DELTA)
                 .value_parser(humantime::parse_duration)
                 .help("How long to finalize the contents of a packet to be sent before actually sending it. If too short, then packets may frequently be delayed and not sent at the intended times. This is most likely to happen under system load, and those delayed packets could indicate to an attacker that your system is under load. Warnings are logged whenever this happens, so increase this value if you see those warnings frequently."),
+            Arg::new("client_timeout")
+                .long("client-timeout")
+                .value_parser(humantime::parse_duration)
+                .help(format!("The client will disconnect if no packet is received from the server within this amount of time. Defaults to max({}, {MIN_DEFAULT_TIMEOUT_PACKETS}*incoming_packet_interval), ie, will disconnect after at least 10 seconds have elapsed and at least {MIN_DEFAULT_TIMEOUT_PACKETS} packets are dropped/delayed.", format_duration(MIN_DEFAULT_TIMEOUT))),
             Arg::new("incoming_packet_length")
                 .long("incoming-packet-length")
                 .visible_alias("down-packet-length")
@@ -91,6 +100,10 @@ impl EzClap for WireConfigCli {
                 // TODO make sure we print warnings for delayed finalization on the server, on the
                 // client (via statistics).
                 .help("See the documentation for --outgoing-finalize-delta"),
+            Arg::new("server_timeout")
+                .long("server-timeout")
+                .value_parser(humantime::parse_duration)
+                .help("See --client-timeout"),
         ]
     }
 
@@ -148,6 +161,7 @@ impl EzClap for WireConfigCli {
                 .as_nanos()
                 .try_into()
                 .unwrap(),
+            client_timeout: matches.get_one::<Duration>("client_timeout").cloned(),
             incoming_packet_length: matches
                 .get_one::<bytesize::ByteSize>("incoming_packet_length")
                 .map(|x| x.as_u64()),
@@ -158,6 +172,7 @@ impl EzClap for WireConfigCli {
                 .as_nanos()
                 .try_into()
                 .unwrap(),
+            server_timeout: matches.get_one::<Duration>("server_timeout").cloned(),
         }
     }
 }

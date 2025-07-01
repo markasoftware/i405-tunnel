@@ -263,15 +263,16 @@ impl C2SHandshakeSent {
 
     fn send_one_handshake(&mut self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
         let mut builder = messages::PacketBuilder::new(
-            ip_to_i405_length(config.c2s_wire_config.packet_length, config.peer_address).into(),
+            ip_to_i405_length(config.client_wire_config.packet_length, config.peer_address).into(),
         );
         let c2s_handshake = messages::ClientToServerHandshake {
             protocol_version: PROTOCOL_VERSION,
             oldest_compatible_protocol_version: OLDEST_COMPATIBLE_PROTOCOL_VERSION,
-            s2c_packet_length: config.s2c_wire_config.packet_length,
-            s2c_packet_interval_min: config.s2c_wire_config.packet_interval_min,
-            s2c_packet_interval_max: config.s2c_wire_config.packet_interval_max,
-            s2c_packet_finalize_delta: config.s2c_wire_config.packet_finalize_delta,
+            s2c_packet_length: config.server_wire_config.packet_length,
+            s2c_packet_interval_min: config.server_wire_config.packet_interval_min,
+            s2c_packet_interval_max: config.server_wire_config.packet_interval_max,
+            s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
+            server_timeout: config.server_wire_config.timeout,
         };
         let did_add =
             builder.try_add_message(&messages::Message::ClientToServerHandshake(c2s_handshake));
@@ -393,7 +394,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                         hardware,
                         self.session,
                         config.peer_address,
-                        config.c2s_wire_config.clone(),
+                        config.client_wire_config.clone(),
                     )?,
                 ))
             }
@@ -412,15 +413,46 @@ impl ConnectionStateTrait for C2SHandshakeSent {
     }
 }
 
+impl EstablishedConnection {
+    // stupid naming _s because enum_dispatch won't let us use the same name here and in server
+    fn handle_is_connection_open_c(
+        self,
+        config: &Config,
+        hardware: &mut impl Hardware,
+        is_connection_open: IsConnectionOpen,
+    ) -> Result<ConnectionState> {
+        match is_connection_open {
+            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
+            IsConnectionOpen::TimedOut => {
+                log::warn!(
+                    "Received no packets from server in a while -- returning to NoConnection state"
+                );
+                Ok(ConnectionState::NoConnection(NoConnection::new(
+                    config, hardware,
+                )?))
+            }
+            IsConnectionOpen::TerminatedNormally => {
+                log::info!(
+                    "Client terminated connection normally -- returning to NoConnection state"
+                );
+                Ok(ConnectionState::NoConnection(NoConnection::new(
+                    config, hardware,
+                )?))
+            }
+        }
+    }
+}
+
 impl ConnectionStateTrait for EstablishedConnection {
     fn on_timer(
         mut self,
-        _config: &Config,
+        config: &Config,
         hardware: &mut impl Hardware,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
-        EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
-        Ok(ConnectionState::EstablishedConnection(self))
+        let is_connection_open =
+            EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
+        return self.handle_is_connection_open_c(config, hardware, is_connection_open);
     }
 
     fn on_read_outgoing_packet(
@@ -440,19 +472,9 @@ impl ConnectionStateTrait for EstablishedConnection {
         hardware: &mut impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
-        match EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)? {
-            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
-            IsConnectionOpen::No => {
-                log::info!(
-                    "Server informed us that it shut down normally -- will attempt to reconnect, in case it's restarting."
-                );
-                // TODO this should be handled by some global policy on whether to retry or shut
-                // down after errors, rather than always retrying by resetting to NoConnection.
-                return Ok(ConnectionState::NoConnection(NoConnection::new(
-                    config, hardware,
-                )?));
-            }
-        }
+        let is_connection_open =
+            EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
+        self.handle_is_connection_open_c(config, hardware, is_connection_open)
     }
 
     fn on_terminate(self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
@@ -465,8 +487,8 @@ impl ConnectionStateTrait for EstablishedConnection {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Config {
-    pub(crate) c2s_wire_config: WireConfig,
-    pub(crate) s2c_wire_config: WireConfig,
+    pub(crate) client_wire_config: WireConfig,
+    pub(crate) server_wire_config: WireConfig,
     pub(crate) peer_address: SocketAddr,
     pub(crate) pre_shared_key: Vec<u8>,
 }

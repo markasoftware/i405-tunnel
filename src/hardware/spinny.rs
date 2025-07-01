@@ -19,7 +19,7 @@ const OVERSLEEP_WARNING: Duration = Duration::from_micros(10);
 
 pub(crate) struct SpinnyHardware {
     epoch: Instant,
-    disconnect_addr: SocketAddr,
+    _disconnect_addr: SocketAddr,
 
     timer: Option<u64>,
     // whether we are actively polling for an outgoing read
@@ -61,7 +61,7 @@ impl SpinnyHardware {
 
         Ok(Self {
             epoch,
-            disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
+            _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
             timer: None,
             read_outgoing: false,
