@@ -1,10 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::config_cli::{AverageWireIntervalCli, WireConfigCli, WireIntervalCli};
-use crate::constants::{
-    DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, MAX_IP_PACKET_LENGTH,
-    UDP_HEADER_LENGTH,
-};
+use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::jitter::Jitterator;
 use crate::utils::ns_to_str;
 
@@ -16,11 +13,11 @@ const MIN_MIN_INTERVAL: u64 = 50_000;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct WireConfig {
+    /// This is the length of the inner I405 packets, not IP packets
     pub(crate) packet_length: u16,
-    // interval will be in [min, max]
     pub(crate) packet_interval_min: u64,
     pub(crate) packet_interval_max: u64,
-    // How long to send the packet to the sending thread before the actual scheduled send time.
+    /// How long to send the packet to the sending thread before the actual scheduled send time.
     pub(crate) packet_finalize_delta: u64,
 }
 
@@ -40,25 +37,24 @@ fn to_wire_config(
     c2s_or_s2c: &str,
     interface_name: &str,
     mtu: u16,
-    max_packet_length: u16,
-    packet_length: Option<u64>,
+    user_ip_packet_length: Option<u64>,
     interval: &WireIntervalCli,
     packet_finalize_delta: u64,
 ) -> WireConfig {
-    let packet_length: u16 = packet_length
+    let packet_length: u16 = user_ip_packet_length
         .map(|pl| {
             pl.try_into()
                 .expect(&format!("Packet length {pl} is too long; must be <={}", u16::MAX))
         })
         .unwrap_or_else(|| {
             log::info!(
-                "Using default packet length {max_packet_length} derived from MTU {mtu} of interface {interface_name} in place of omitted {c2s_or_s2c} packet length"
+                "Using MTU as packet length: {mtu} (on interface {interface_name}), because no explicit {c2s_or_s2c} packet length was specified"
             );
-            max_packet_length
+            mtu
         });
-    if packet_length > max_packet_length {
+    if packet_length > mtu {
         log::warn!(
-            "Specified {c2s_or_s2c} packet length {packet_length} bytes is greater than automatic maximum based on MTU of {max_packet_length} bytes, so IP fragmentation may occur -- please reconsider"
+            "Specified {c2s_or_s2c} packet length {packet_length} bytes is greater than the MTU of {mtu} (on interface {interface_name}), so IP fragmentation may occur -- we'll continue anyway, but choose a smaller packet length for better performance."
         );
     }
     let average_interval: u64 = match interval.average_interval {
@@ -121,19 +117,12 @@ pub(crate) fn to_wire_configs(
         .try_into()
         .unwrap_or(u16::MAX)
         .clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap());
-    let ip_packet_header_length = match peer {
-        SocketAddr::V4(_) => IPV4_HEADER_LENGTH,
-        SocketAddr::V6(_) => IPV6_HEADER_LENGTH,
-    };
-    let all_headers_length = ip_packet_header_length + UDP_HEADER_LENGTH + DTLS_MAX_HEADER_LENGTH;
-    let max_packet_length = mtu.checked_sub(all_headers_length).expect(&format!("Interface {interface_name} has an MTU of {mtu}, which is too short to fit a useful I405 packet"));
 
     WireConfigs {
         c2s: to_wire_config(
             "client-to-server",
             &interface_name,
             mtu,
-            max_packet_length,
             wire_configuration.outgoing_packet_length,
             &wire_configuration.outgoing_interval,
             wire_configuration.outgoing_finalize_delta,
@@ -142,7 +131,6 @@ pub(crate) fn to_wire_configs(
             "server-to-client",
             &interface_name,
             mtu,
-            max_packet_length,
             wire_configuration.incoming_packet_length,
             &wire_configuration.incoming_interval,
             wire_configuration.incoming_finalize_delta,
@@ -176,12 +164,11 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             None,
             &fixed_interval(1_000_000, None),
             100_000,
         );
-        assert_eq!(config.packet_length, 1400);
+        assert_eq!(config.packet_length, 1500);
         assert_eq!(config.packet_interval_min, 750_000); // 1_000_000 - 1_000_000 * 0.25
         assert_eq!(config.packet_interval_max, 1_250_000); // 1_000_000 + 1_000_000 * 0.25
         assert_eq!(config.packet_finalize_delta, 100_000);
@@ -193,7 +180,6 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             Some(1000),
             &fixed_interval(1_000_000, None),
             100_000,
@@ -207,7 +193,6 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             None,
             &fixed_interval(1_000_000, Some(100_000)),
             100_000,
@@ -225,7 +210,6 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             None,
             &fixed_interval(1_000_000, Some(1_100_000)),
             100_000,
@@ -241,12 +225,10 @@ mod test {
             "test",
             "lo",
             1500,
-            1400, // used as default, derived from mtu
             None,
-            &rate_interval(1_400_000, None), // 1.4 MB/s
+            &rate_interval(1_500_000, None), // 1.4 MB/s
             100_000,
         );
-        assert_eq!(config.packet_length, 1400);
         assert_eq!(config.packet_interval_min, 750_000);
         assert_eq!(config.packet_interval_max, 1_250_000);
     }
@@ -257,13 +239,11 @@ mod test {
             "test",
             "lo",
             1500,
-            1000,
             Some(500),
             &rate_interval(250_000, Some(50_000)), // 0.25 MB/s
             // average interval = 500 * 1_000_000_000 / 250_000 = 2_000_000 ns
             100_000,
         );
-        assert_eq!(config.packet_length, 500);
         assert_eq!(config.packet_interval_min, 1_950_000); // 2_000_000 - 50_000
         assert_eq!(config.packet_interval_max, 2_050_000); // 2_000_000 + 50_000
     }
@@ -275,7 +255,6 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             None,
             // average 50_000, default jitter is 0.25 * 50_000 = 12_500
             // min = 50_000 - 12_500 = 37_500. This is less than MIN_MIN_INTERVAL (50_000)
@@ -293,7 +272,6 @@ mod test {
             "test",
             "lo",
             1500,
-            1400,
             None,
             &fixed_interval(100_000, None), // min interval will be 75_000
             100_000,

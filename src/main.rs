@@ -37,7 +37,7 @@ fn main() {
 
     match common_config_cli.poll_mode {
         config_cli::PollMode::Sleepy => {
-            let sched_fifo = !common_config_cli.force_no_sched_fifo;
+            let sched_fifo = !common_config_cli.no_sched_fifo;
             if sched_fifo {
                 // TODO warn if there's only one core, this could get real bad
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
@@ -54,7 +54,7 @@ fn main() {
             hardware.run(core);
         }
         config_cli::PollMode::Spinny => {
-            let sched_fifo = !common_config_cli.force_no_sched_fifo;
+            let sched_fifo = !common_config_cli.no_sched_fifo;
             if sched_fifo {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }

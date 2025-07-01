@@ -19,7 +19,7 @@ I405-specific policies to be aware of:
   than 1 second on single-threaded modern hardware. If you have to introduce a test that doesn't
   pass yet for some reason, use `#cfg[any()]` instead of `#[ignore]`.
   
-  Also, end-to-end test must pass: `end-to-end-tests/e2e_test.py`.
+  Also, end-to-end test must pass: `sudo ./e2e_test.py`.
 + Add tests for important parts of all "pure" behavior. Changes to the "hardware" implementations
   can be difficult to test (apart from e2e-tests), please describe what you've done to verify your
   implementation is correct because we don't test the hardware implementations (outside of the

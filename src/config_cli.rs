@@ -42,7 +42,12 @@ impl EzClap for WireConfigCli {
                 .long("outgoing-packet-length")
                 .visible_alias("up-packet-length")
                 .value_parser(value_parser!(bytesize::ByteSize))
-                .help("Fixed upload packet length, in bytes"),
+                .help("Fixed upload packet length, in bytes. This is the ultimate size of the IP packets that will be sent over the network, not the encrypted I405 payload. See also --tun-mtu, which is different, and permitted to even be larger than the packet length! (in that case, the larger packets will be fragmented across I405 packets -- but that's a typical part of I405's operation anyway)"),
+            Arg::new("outgoing_bytes_per_second")
+                .long("outgoing-speed")
+                .visible_alias("up-speed")
+                .value_parser(value_parser!(bytesize::ByteSize))
+                .help("Bytes per second to upload. This is the \"outer\" bandwidth measured by the sum of IP packet lengths; the actual amount of data that can be transmitted inside the tunnel is smaller (at the time of writing, the overhead is 5-10%). Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the upload packet length."),
             Arg::new("outgoing_packet_interval")
                 .long("outgoing-packet-interval")
                 .visible_alias("up-packet-interval")
@@ -52,14 +57,7 @@ impl EzClap for WireConfigCli {
                 .long("outgoing-packet-jitter")
                 .visible_alias("up-packet-jitter")
                 .value_parser(humantime::parse_duration)
-                .help("Max jitter around the upload packet interval. The interval will never be less than the outgoing packet interval minus the jitter, nor greater than the interval plus the jitter. The distribution of inter-packet intervals is a bit weird: With about 92.5% probability, the packet interval will be uniformly random within [interval - jitter*0.75, interval + jitter*0.75], and with about 7.5% probability, the packet interval will be in the remaining part of [interval-jitter, interval+jitter]. The default max jitter is 25% of the outgoing packet interval."),
-            Arg::new("outgoing_bytes_per_second")
-                .long("outgoing-bytes-per-second")
-                .visible_alias("outgoing-speed")
-                .visible_alias("up-bytes-per-second")
-                .visible_alias("up-speed")
-                .value_parser(value_parser!(bytesize::ByteSize))
-                .help("Bytes per second to upload. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the upload packet length."),
+                .help("Max jitter around the upload packet interval. The interval will never be less than the outgoing packet interval minus the jitter, nor greater than the interval plus the jitter. By default, the jitter is 25% of the packet interval. (However, if you explicitly specify a jitter, it's an absolute value, not a percentage of the packet interval).\n\nThe distribution of inter-packet intervals is a bit weird: With about 92.5% probability, the packet interval will be uniformly random within [interval - jitter*0.75, interval + jitter*0.75], and with about 7.5% probability, the packet interval will be in the remaining part of [interval-jitter, interval+jitter]. The default max jitter is 25% of the outgoing packet interval."),
             Arg::new("outgoing_finalize_delta")
                 .long("outgoing-finalize-delta")
                 .visible_alias("up-finalize-delta")
@@ -71,6 +69,11 @@ impl EzClap for WireConfigCli {
                 .visible_alias("down-packet-length")
                 .value_parser(value_parser!(bytesize::ByteSize))
                 .help("Fixed download packet length, in bytes"),
+            Arg::new("incoming_bytes_per_second")
+                .long("incoming-speed")
+                .visible_alias("down-speed")
+                .value_parser(value_parser!(bytesize::ByteSize))
+                .help("See the documentation for --outgoing-speed"),
             Arg::new("incoming_packet_interval")
                 .long("incoming-packet-interval")
                 .visible_alias("down-packet-interval")
@@ -80,13 +83,6 @@ impl EzClap for WireConfigCli {
                 .long("incoming-packet-jitter")
                 .value_parser(humantime::parse_duration)
                 .help("See the documentation for --outgoing-packet-jitter"),
-            Arg::new("incoming_bytes_per_second")
-                .long("incoming-bytes-per-second")
-                .visible_alias("incoming-speed")
-                .visible_alias("down-bytes-per-second")
-                .visible_alias("down-speed")
-                .value_parser(value_parser!(bytesize::ByteSize))
-                .help("Bytes per second to download. Typical suffixes are supported, eg, 5k. When specified, the packet interval is determined automatically from this and the download packet length."),
             Arg::new("incoming_finalize_delta")
                 .long("incoming-finalize-delta")
                 .visible_alias("down-finalize-delta")
@@ -94,7 +90,7 @@ impl EzClap for WireConfigCli {
                 .value_parser(humantime::parse_duration)
                 // TODO make sure we print warnings for delayed finalization on the server, on the
                 // client (via statistics).
-                .help("See --outgoing-finalize-delta docs"),
+                .help("See the documentation for --outgoing-finalize-delta"),
         ]
     }
 
@@ -173,8 +169,7 @@ pub(crate) struct CommonConfigCli {
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
-    pub(crate) _force_sched_fifo: bool,
-    pub(crate) force_no_sched_fifo: bool,
+    pub(crate) no_sched_fifo: bool,
     pub(crate) outgoing_send_deviation_stats: Option<Duration>,
     pub(crate) poll_mode: PollMode,
 }
@@ -203,7 +198,7 @@ impl EzClap for CommonConfigCli {
             Arg::new("tun_mtu")
                 .long("tun-mtu")
                 .value_parser(value_parser!(u16))
-                .help("MTU for the TUN device. It's okay for this to be larger than the packet length; I405 will fragment and reassemble packets as necessary. Defaults to the system default, usually 1500. I405 does not make any attempt to calculate the max TUN MTU such that the wrapped packets can also be sent out in one I405 packet; setting tun mtu to be substantially less than 1500 (eg, 1400) should be enough, and may improve latency a bit. However, because I405 tries to pack multiple wrapped packets into I405 packets, even a smaller MTU does not guarantee that sent packets will not be fragmented by I405."),
+                .help("MTU for the TUN device. It's okay for this to be larger than the packet length; I405 will fragment and reassemble packets as necessary. By default, let the system decide (usually 1500).\n\nI405 does not make any attempt to calculate the max TUN MTU such that the wrapped packets can also be sent out in one I405 packet; setting tun mtu to be substantially less than 1500 (eg, 1400) should be enough, and may improve latency a bit. However, because I405 tries to pack multiple wrapped packets into I405 packets, even a smaller MTU does not guarantee that sent packets will not be fragmented by I405."),
 	    Arg::new("tun_ipv4")
 		.long("tun-ipv4")
 		.help("IPv4 address (optionally with netmask) to automatically assign and route to the TUN device."),
@@ -220,14 +215,10 @@ impl EzClap for CommonConfigCli {
                 // TODO consider changing to spinny:
                 .default_value("sleepy")
                 .help("Control how we poll/wait for network events. The default is `sleepy`, which uses the OS' timers to schedule wakeups whenthere is nothing to do immediately (eg, to wait until the next time that an outgoing packet is scheduled to be sent). This is power-efficient and keeps CPU usage low. However, the time it takes to wake up after a sleep varies under system load, so outgoing packet timings may sligthly vary based on system load and leak information about whether the system is busy. In `spinny` mode, spin loops/busy loops are used for timing, which keeps the CPU hot and has more consistent wake-up times, at the cost of 100% CPU usage on one core. In spinny mode, you'll also probably want to "),
-            Arg::new("force_sched_fifo")
-                .long("sched-fifo")
-                .action(ArgAction::SetTrue)
-                .help("Set the main thread's scheduling to SCHED_FIFO, which will cause it to take precedence over most other threads on your system when it's time for it to be scheduled. On by default in spinny poll mode, off by default in sleepy poll mode."),
             Arg::new("force_no_sched_fifo")
                 .long("no-sched-fifo")
                 .action(ArgAction::SetTrue)
-                .help("Force opposite of --sched-fifo"),
+                .help("I405 by default sets the scheduling policy its main thread to SCHED_FIFO. Specify this option to use the default scheduling policy instead. Don't specify this option unless you really know what you're doing; SCHED_FIFO is the single most helpful thing to improve the precision of the times at which I405 sends outgoing packets!"),
         ]
     }
 
@@ -243,8 +234,7 @@ impl EzClap for CommonConfigCli {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
-            _force_sched_fifo: matches.get_one::<bool>("force_sched_fifo").unwrap().clone(),
-            force_no_sched_fifo: matches
+            no_sched_fifo: matches
                 .get_one::<bool>("force_no_sched_fifo")
                 .unwrap()
                 .clone(),

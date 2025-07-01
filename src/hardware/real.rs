@@ -47,9 +47,13 @@ pub(crate) fn tun_config_from_common_config_cli(common_config_cli: &CommonConfig
 /// Create tun, socket, and set scheduling policy.
 pub(crate) fn make_tun(tun_config: TunConfig) -> Result<tun_rs::SyncDevice> {
     let mut tun_builder = tun_rs::DeviceBuilder::new().name(tun_config.name);
-    let mtu = tun_config.mtu.unwrap_or(MAX_IP_PACKET_LENGTH.try_into().unwrap());
+    let mtu = tun_config
+        .mtu
+        .unwrap_or(MAX_IP_PACKET_LENGTH.try_into().unwrap());
     if mtu > MAX_IP_PACKET_LENGTH.try_into().unwrap() {
-        bail!("tun configured MTU {mtu} must not be greater than MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
+        bail!(
+            "tun configured MTU {mtu} must not be greater than MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}"
+        );
     }
     tun_builder = tun_builder.mtu(mtu);
     if let Some(ipv4_net) = tun_config.ipv4_net {

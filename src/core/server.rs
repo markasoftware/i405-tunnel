@@ -4,7 +4,13 @@ use anyhow::{Result, anyhow, bail};
 use declarative_enum_dispatch::enum_dispatch;
 
 use crate::{
-    constants::MAX_IP_PACKET_LENGTH, core::established_connection::IsConnectionOpen, dtls, hardware::Hardware, messages, utils::ip_mtu_to_dtls_mtu, wire_config::WireConfig
+    constants::MAX_IP_PACKET_LENGTH,
+    core::established_connection::IsConnectionOpen,
+    dtls,
+    hardware::Hardware,
+    messages,
+    utils::{ip_to_dtls_length, ip_to_i405_length},
+    wire_config::WireConfig,
 };
 
 use super::{PROTOCOL_VERSION, established_connection::EstablishedConnection};
@@ -219,7 +225,12 @@ impl ServerConnectionStateTrait for NoConnection {
         {
             // start a negotiation
             log::info!("New DTLS handshake started with {}", peer);
-            let dtls_mtu = ip_mtu_to_dtls_mtu(hardware.mtu(peer)?.clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap()), peer);
+            let dtls_mtu = ip_to_dtls_length(
+                hardware
+                    .mtu(peer)?
+                    .clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap()),
+                peer,
+            );
             self.negotiations.push(Negotiation {
                 peer,
                 session: dtls::NegotiatingSession::new_server(&config.pre_shared_key, dtls_mtu)?,
@@ -354,7 +365,9 @@ impl InProtocolHandshake {
                 protocol_version: PROTOCOL_VERSION,
                 success,
             };
-            let mut builder = messages::PacketBuilder::new(c2s_handshake.s2c_packet_length.into());
+            let mut builder = messages::PacketBuilder::new(
+                ip_to_i405_length(c2s_handshake.s2c_packet_length, self.peer).into(),
+            );
             let did_add =
                 builder.try_add_message(&messages::Message::ServerToClientHandshake(response));
             if !did_add {

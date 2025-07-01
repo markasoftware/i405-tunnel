@@ -6,6 +6,7 @@ use crate::{
     jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
+    utils::ip_to_i405_length,
     wire_config::WireConfig,
 };
 
@@ -124,7 +125,7 @@ impl EstablishedConnection {
             peer,
             outgoing_connection: OutgoingConnection::new(hardware),
             partial_outgoing_packet: messages::WriteCursor::new(IpPacketBuffer::new_empty(
-                outgoing_wire_config.packet_length.into(),
+                ip_to_i405_length(outgoing_wire_config.packet_length, peer).into(),
             )),
             defragger: Defragger::new(),
             outgoing_wire_config,
@@ -147,7 +148,7 @@ impl EstablishedConnection {
         let outgoing_cleartext_packet = std::mem::replace(
             &mut self.partial_outgoing_packet,
             messages::WriteCursor::new(IpPacketBuffer::new_empty(
-                self.outgoing_wire_config.packet_length.into(),
+                ip_to_i405_length(self.outgoing_wire_config.packet_length, self.peer).into(),
             )),
         )
         .into_inner();

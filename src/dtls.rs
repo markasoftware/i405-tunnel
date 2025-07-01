@@ -48,7 +48,10 @@ impl NegotiatingSession {
         timestamp: u64,
     ) -> Result<(Self, Vec<IpPacketBuffer>, u64)> {
         // strictly less because dtls mtu is exclusive of the IP and UDP headers.
-        assert!(mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(), "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
+        assert!(
+            mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(),
+            "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}"
+        );
         log::debug!("Setting wolfSSL MTU to {mtu}");
 
         let wolf_session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsClientV1_3)?
@@ -74,7 +77,10 @@ impl NegotiatingSession {
 
     /// There's no initial timeout for the server, since it's just waiting for a client.
     pub(crate) fn new_server(pre_shared_key: &[u8], mtu: u16) -> Result<Self> {
-        assert!(mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(), "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}");
+        assert!(
+            mtu < MAX_IP_PACKET_LENGTH.try_into().unwrap(),
+            "Tried to construct DTLS client with MTU {mtu}, but MAX_IP_PACKET_LENGTH = {MAX_IP_PACKET_LENGTH}"
+        );
         log::debug!("Setting wolfSSL MTU to {mtu}");
 
         let session = wolfssl::ContextBuilder::new(wolfssl::Method::DtlsServerV1_3)?

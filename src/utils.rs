@@ -4,25 +4,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::constants::{DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH};
+use crate::constants::{
+    DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH,
+};
 
 pub(crate) fn ns_to_str(ns: u64) -> String {
     humantime::format_duration(Duration::from_nanos(ns)).to_string()
 }
 
-pub(crate) fn ip_mtu_to_udp_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
+pub(crate) fn ip_to_udp_length(ip_mtu: u16, peer: SocketAddr) -> u16 {
     match peer {
         SocketAddr::V4(_) => ip_mtu - IPV4_HEADER_LENGTH,
         SocketAddr::V6(_) => ip_mtu - IPV6_HEADER_LENGTH,
     }
 }
 
-pub(crate) fn ip_mtu_to_dtls_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
-    ip_mtu_to_udp_mtu(ip_mtu, peer) - UDP_HEADER_LENGTH
+pub(crate) fn ip_to_dtls_length(ip_mtu: u16, peer: SocketAddr) -> u16 {
+    ip_to_udp_length(ip_mtu, peer) - UDP_HEADER_LENGTH
 }
 
-pub(crate) fn ip_mtu_to_i405_mtu(ip_mtu: u16, peer: SocketAddr) -> u16 {
-    ip_mtu_to_dtls_mtu(ip_mtu, peer) - DTLS_MAX_HEADER_LENGTH
+pub(crate) fn ip_to_i405_length(ip_mtu: u16, peer: SocketAddr) -> u16 {
+    ip_to_dtls_length(ip_mtu, peer) - DTLS_MAX_HEADER_LENGTH
 }
 
 pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {
@@ -122,5 +124,22 @@ impl<TX> ChannelThread<TX> {
 
     pub(crate) fn tx(&self) -> &mpsc::Sender<TX> {
         &self.tx
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn basic_ip_to_i405_length() {
+        assert_eq!(
+            ip_to_i405_length(1000 + 12 + 22 + 8 + 20, "127.0.0.1:1405".parse().unwrap()),
+            1000
+        );
+        assert_eq!(
+            ip_to_i405_length(1000 + 12 + 22 + 8 + 20, "[fe80::]:1405".parse().unwrap()),
+            980
+        );
     }
 }

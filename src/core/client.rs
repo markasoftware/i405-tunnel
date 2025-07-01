@@ -7,7 +7,7 @@ use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::hardware::Hardware;
-use crate::utils::{ip_mtu_to_dtls_mtu, ns_to_str};
+use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
@@ -134,7 +134,7 @@ impl NoConnection {
     fn new(config: &Config, hardware: &mut impl Hardware) -> Result<NoConnection> {
         hardware.clear_event_listeners()?;
         hardware.socket_connect(&config.peer_address)?;
-        let dtls_mtu = ip_mtu_to_dtls_mtu(
+        let dtls_mtu = ip_to_dtls_length(
             hardware
                 .mtu(config.peer_address)?
                 .clamp(0, MAX_IP_PACKET_LENGTH.try_into().unwrap()),
@@ -262,7 +262,9 @@ impl C2SHandshakeSent {
     }
 
     fn send_one_handshake(&mut self, config: &Config, hardware: &mut impl Hardware) -> Result<()> {
-        let mut builder = messages::PacketBuilder::new(config.c2s_wire_config.packet_length.into());
+        let mut builder = messages::PacketBuilder::new(
+            ip_to_i405_length(config.c2s_wire_config.packet_length, config.peer_address).into(),
+        );
         let c2s_handshake = messages::ClientToServerHandshake {
             protocol_version: PROTOCOL_VERSION,
             oldest_compatible_protocol_version: OLDEST_COMPATIBLE_PROTOCOL_VERSION,

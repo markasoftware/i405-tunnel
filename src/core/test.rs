@@ -2,9 +2,10 @@
 /// super fast and reproducible. We also have some true integration tests that set up Linux network
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
-use crate::constants::DTLS_MAX_HEADER_LENGTH;
+use crate::constants::{DTLS_MAX_HEADER_LENGTH, DTLS_TYPICAL_HEADER_LENGTH, IPV4_HEADER_LENGTH, UDP_HEADER_LENGTH};
 use crate::core::{self, Core};
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
+use crate::utils::{ip_to_dtls_length, ip_to_i405_length};
 use crate::wire_config::WireConfig;
 
 use std::collections::BTreeMap;
@@ -14,7 +15,9 @@ use std::time::Duration;
 use test_case::test_matrix;
 
 const PSK: &[u8] = b"password";
-const DEFAULT_PACKET_LENGTH: u16 = 1400;
+// in case this cursed knowledge is useful when the fragmentation test some day fails: This used to
+// be the inner, i405 packet length rather than the outer ip packet length that it is now.
+const DEFAULT_PACKET_LENGTH: u16 = 1000;
 const DEFAULT_C2S_WIRE_CONFIG: WireConfig = WireConfig {
     packet_length: DEFAULT_PACKET_LENGTH,
     packet_interval_min: 1_423_000, // 1.423ms
@@ -198,23 +201,22 @@ fn wan_packet_length() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
-    let wan_packet_length: usize =
-        usize::from(DTLS_MAX_HEADER_LENGTH) + usize::from(DEFAULT_PACKET_LENGTH);
+    let dtls_packet_length: usize = usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH - 12);
 
     simulated_hardware.run_until(&mut cores, 1);
     let handshake = simulated_hardware.all_wan_packets();
     let num_handshake_packets = handshake.len();
     // for sanity, check that the first packet is smaller than we requested, because it should just
     // be a ClientHello.
-    assert!(handshake[0].buffer.len() < wan_packet_length);
+    assert!(handshake[0].buffer.len() < dtls_packet_length);
     // the last two should be handshakes, and of the correct size
     assert_eq!(
         handshake[handshake.len() - 1].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
     assert_eq!(
         handshake[handshake.len() - 2].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
 
     simulated_hardware.run_until(&mut cores, ms(3.0));
@@ -225,15 +227,15 @@ fn wan_packet_length() {
     // make sure actual data packets
     assert_eq!(
         empty_packets[empty_packets.len() - 1].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
     assert_eq!(
         empty_packets[empty_packets.len() - 2].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
     assert_eq!(
         empty_packets[empty_packets.len() - 3].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
 
     // now send an actual, large packet and make sure the size is the same
@@ -243,11 +245,11 @@ fn wan_packet_length() {
     assert_eq!(num_empty_packets + 2, full_packets.len());
     assert_eq!(
         full_packets[full_packets.len() - 1].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
     assert_eq!(
         full_packets[full_packets.len() - 2].buffer.len(),
-        wan_packet_length
+        dtls_packet_length
     );
 }
 
@@ -258,9 +260,10 @@ fn packing() {
 
     // type byte and length only
     const MESSAGE_HEADER_LENGTH: usize = 1 + 2;
-    let first_message_length: usize = usize::from(DEFAULT_PACKET_LENGTH) / 2;
+    let i405_packet_length = usize::from(ip_to_i405_length(DEFAULT_PACKET_LENGTH, server_addr()));
+    let first_message_length: usize = i405_packet_length / 2;
     let second_message_length: usize =
-        usize::from(DEFAULT_PACKET_LENGTH) - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
+        i405_packet_length - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
 
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
@@ -514,6 +517,47 @@ fn long_distance_reorder(packet_1: u64, packet_2: u64, reorder_1st_instead_of_dr
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, next_time);
     assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+}
+
+#[test]
+fn wrong_psk() {
+    setup_logging();
+    let mut simulated_hardware =
+        SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: "wrong password".into(),
+            peer_address: server_addr(),
+            c2s_wire_config: DEFAULT_C2S_WIRE_CONFIG,
+            s2c_wire_config: DEFAULT_S2C_WIRE_CONFIG,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+
+    simulated_hardware.run_until(&mut cores, ms(1.0));
+
+    assert!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .is_empty()
+    );
+    assert!(
+        simulated_hardware
+            .sent_incoming_packets(&client_addr())
+            .is_empty()
+    );
 }
 
 // Test one client connecting with the wrong password, and another who starts later, with the

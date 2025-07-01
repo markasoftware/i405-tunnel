@@ -44,4 +44,4 @@ With Nix you can run `nix build` to compile using the included `flake.nix`. Simi
 `nix develop` to get a development environment.
 
 Before a PR will be accepted, you must pass `cargo test -- --include-ignored` (slow tests are marked
-with `#[ignore]`) and `sudo end-to-end-tests/e2e_test.py`.
+with `#[ignore]`) and `sudo e2e_test.py`.

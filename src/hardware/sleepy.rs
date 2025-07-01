@@ -151,10 +151,7 @@ impl SleepyHardware {
                     .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
             };
             match event_or_timeout {
-                Ok(Event::OutgoingRead {
-                    timestamp,
-                    packet,
-                }) => {
+                Ok(Event::OutgoingRead { timestamp, packet }) => {
                     // TODO the packet comes to us as &[u8], then we wrap it in an
                     // IpPacketBuffer, then we deref it here, then it'll almost certainly be
                     // made back into an IpPacketBuffer again later. Does explicitly converting
@@ -308,10 +305,7 @@ impl Hardware for SleepyHardware {
     }
 
     fn read_outgoing_packet(&mut self) {
-        self.outgoing_read_thread
-            .tx()
-            .send(())
-            .unwrap();
+        self.outgoing_read_thread.tx().send(()).unwrap();
     }
 
     // TODO consider remove Result from signature since it always succeeds (or, at least, we don't
