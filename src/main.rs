@@ -91,6 +91,7 @@ fn make_core(
                 server_wire_config: wire_configs.server,
                 peer_address: peer,
                 pre_shared_key: common_config_cli.pre_shared_key.clone(),
+                should_configure_qdisc: !common_config_cli.no_tun_qdisc,
             };
             core::ConcreteCore::Client(
                 core::client::Core::new(client_config, hardware)
@@ -100,6 +101,7 @@ fn make_core(
         config_cli::ConfigCli::Server(_) => {
             let server_config = core::server::Config {
                 pre_shared_key: common_config_cli.pre_shared_key.clone(),
+                should_configure_qdisc: !common_config_cli.no_tun_qdisc,
             };
             core::ConcreteCore::Server(
                 core::server::Core::new(server_config, hardware)

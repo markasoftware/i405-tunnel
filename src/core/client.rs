@@ -26,10 +26,12 @@ pub(crate) struct Core {
 
 impl Core {
     pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
-        hardware.configure_qdisc(&QdiscSettings::new(
-            Duration::from_nanos(config.client_wire_config.packet_interval_max),
-            Duration::from_nanos(config.server_wire_config.packet_interval_max),
-        ))?;
+        if config.should_configure_qdisc {
+            hardware.configure_qdisc(&QdiscSettings::new(
+                Duration::from_nanos(config.client_wire_config.packet_interval_max),
+                Duration::from_nanos(config.server_wire_config.packet_interval_max),
+            ))?;
+        }
         Ok(Self {
             state: Some(ConnectionState::NoConnection(NoConnection::new(
                 &config, hardware,
@@ -498,4 +500,5 @@ pub(crate) struct Config {
     pub(crate) server_wire_config: WireConfig,
     pub(crate) peer_address: SocketAddr,
     pub(crate) pre_shared_key: Vec<u8>,
+    pub(crate) should_configure_qdisc: bool,
 }

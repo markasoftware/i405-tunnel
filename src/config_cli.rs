@@ -184,6 +184,7 @@ pub(crate) struct CommonConfigCli {
     pub(crate) tun_mtu: Option<u16>,
     pub(crate) tun_ipv4: Option<String>,
     pub(crate) tun_ipv6: Option<String>,
+    pub(crate) no_tun_qdisc: bool,
     pub(crate) no_sched_fifo: bool,
     pub(crate) outgoing_send_deviation_stats: Option<Duration>,
     pub(crate) poll_mode: PollMode,
@@ -220,6 +221,10 @@ impl EzClap for CommonConfigCli {
             Arg::new("tun_ipv6")
                 .long("tun-ipv6")
                 .help("IPv6 address (optionall with netmask) to automatically assign and route to the TUN device."),
+            Arg::new("no_tun_qdisc")
+                .long("no-tun-qdisc")
+                .action(ArgAction::SetTrue)
+                .help("By default, I405 will reconfigure the qdisc on the TUN interface to improve TCP performance. Specify this option if you are going to configure the qdisc manually."),
             Arg::new("outgoing_send_deviation_stats")
                 .long("outgoing-send-deviation-stats")
                 .value_parser(humantime::parse_duration)
@@ -230,7 +235,7 @@ impl EzClap for CommonConfigCli {
                 // TODO consider changing to spinny:
                 .default_value("sleepy")
                 .help("Control how we poll/wait for network events. The default is `sleepy`, which uses the OS' timers to schedule wakeups whenthere is nothing to do immediately (eg, to wait until the next time that an outgoing packet is scheduled to be sent). This is power-efficient and keeps CPU usage low. However, the time it takes to wake up after a sleep varies under system load, so outgoing packet timings may sligthly vary based on system load and leak information about whether the system is busy. In `spinny` mode, spin loops/busy loops are used for timing, which keeps the CPU hot and has more consistent wake-up times, at the cost of 100% CPU usage on one core. In spinny mode, you'll also probably want to "),
-            Arg::new("force_no_sched_fifo")
+            Arg::new("no_sched_fifo")
                 .long("no-sched-fifo")
                 .action(ArgAction::SetTrue)
                 .help("I405 by default sets the scheduling policy its main thread to SCHED_FIFO. Specify this option to use the default scheduling policy instead. Don't specify this option unless you really know what you're doing; SCHED_FIFO is the single most helpful thing to improve the precision of the times at which I405 sends outgoing packets!"),
@@ -249,10 +254,8 @@ impl EzClap for CommonConfigCli {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
-            no_sched_fifo: matches
-                .get_one::<bool>("force_no_sched_fifo")
-                .unwrap()
-                .clone(),
+            no_tun_qdisc: matches.get_one::<bool>("no_tun_qdisc").unwrap().clone(),
+            no_sched_fifo: matches.get_one::<bool>("no_sched_fifo").unwrap().clone(),
             outgoing_send_deviation_stats: matches
                 .get_one::<Duration>("outgoing_send_deviation_stats")
                 .cloned(),

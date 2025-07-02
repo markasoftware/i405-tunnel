@@ -430,7 +430,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
 
     fn on_read_incoming_packet(
         mut self,
-        _config: &Config,
+        config: &Config,
         hardware: &mut impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
@@ -488,10 +488,12 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     peer,
                     s2c_wire_config
                 );
-                hardware.configure_qdisc(&QdiscSettings::new(
-                    Duration::from_nanos(c2s_handshake.s2c_packet_interval_max),
-                    Duration::from_nanos(c2s_handshake.c2s_packet_interval_max),
-                ))?;
+                if config.should_configure_qdisc {
+                    hardware.configure_qdisc(&QdiscSettings::new(
+                        Duration::from_nanos(c2s_handshake.s2c_packet_interval_max),
+                        Duration::from_nanos(c2s_handshake.c2s_packet_interval_max),
+                    ))?;
+                }
                 let mut established_connection =
                     EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
                 established_connection
@@ -589,6 +591,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Config {
     pub(crate) pre_shared_key: Vec<u8>,
+    pub(crate) should_configure_qdisc: bool,
     // TODO
     // allowed_peers: Vec<SocketAddr>,
 }

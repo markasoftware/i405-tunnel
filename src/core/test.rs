@@ -84,6 +84,7 @@ fn simulated_pair(
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(server_addr()),
     )
@@ -94,6 +95,7 @@ fn simulated_pair(
             peer_address: server_addr(),
             client_wire_config,
             server_wire_config,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -185,6 +187,47 @@ fn simple() {
             timestamp: ms(1.423 * 3.0),
         }
     );
+}
+
+#[test]
+fn dont_configure_qdisc() {
+    setup_logging();
+    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
+    let server_core = core::server::Core::new(
+        core::server::Config {
+            pre_shared_key: PSK.into(),
+            should_configure_qdisc: false,
+        },
+        &mut simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let client_core = core::client::Core::new(
+        core::client::Config {
+            pre_shared_key: PSK.into(),
+            peer_address: server_addr(),
+            client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
+            server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: false,
+        },
+        &mut simulated_hardware.hardware(client_addr()),
+    )
+    .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+    simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
+    simulated_hardware.run_until(&mut cores, ms(5.0));
+    // ensure that they're connected
+    assert_eq!(
+        simulated_hardware
+            .sent_incoming_packets(&server_addr())
+            .len(),
+        1
+    );
+
+    assert!(simulated_hardware.qdisc_settings(&client_addr()).is_none());
+    assert!(simulated_hardware.qdisc_settings(&server_addr()).is_none());
 }
 
 #[test]
@@ -430,6 +473,7 @@ fn drop_and_reorder() {
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(server_addr()),
     )
@@ -440,6 +484,7 @@ fn drop_and_reorder() {
             peer_address: server_addr(),
             client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
             server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -545,6 +590,7 @@ fn wrong_psk() {
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(server_addr()),
     )
@@ -555,6 +601,7 @@ fn wrong_psk() {
             peer_address: server_addr(),
             client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
             server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -592,6 +639,7 @@ fn multiple_ongoing_negotiations() {
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(server_addr()),
     )
@@ -602,6 +650,7 @@ fn multiple_ongoing_negotiations() {
             peer_address: server_addr(),
             client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
             server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(evil_client_addr),
     )
@@ -623,6 +672,7 @@ fn multiple_ongoing_negotiations() {
             peer_address: server_addr(),
             client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
             server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(good_client_addr),
     )
@@ -676,6 +726,7 @@ fn client_termination_and_reconnect() {
             peer_address: server_addr(),
             client_wire_config: DEFAULT_CLIENT_WIRE_CONFIG,
             server_wire_config: DEFAULT_SERVER_WIRE_CONFIG,
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(client_addr()),
     )
@@ -720,6 +771,7 @@ fn server_termination_and_reconnect() {
     let new_server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
+            should_configure_qdisc: true,
         },
         &mut simulated_hardware.hardware(server_addr()),
     )
@@ -783,6 +835,7 @@ fn server_not_responding() {
         core::server::Core::new(
             core::server::Config {
                 pre_shared_key: PSK.into(),
+                should_configure_qdisc: true,
             },
             &mut simulated_hardware.hardware(server_addr()),
         )
@@ -853,6 +906,7 @@ fn client_not_responding() {
                 client_wire_config: LONGER_CLIENT_WIRE_CONFIG,
                 server_wire_config: LONGER_SERVER_WIRE_CONFIG,
                 peer_address: server_addr(),
+                should_configure_qdisc: true,
             },
             &mut simulated_hardware.hardware(client_addr()),
         )
