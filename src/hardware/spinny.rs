@@ -6,7 +6,10 @@ use std::{
 
 use anyhow::{Result, anyhow};
 
-use super::Hardware;
+use super::{
+    Hardware,
+    real::{QdiscSettings, configure_qdisc},
+};
 use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
@@ -214,6 +217,11 @@ impl Hardware for SpinnyHardware {
                 duration,
             );
         }
+    }
+
+    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
+        configure_qdisc(&self.tun.name()?, settings);
+        Ok(())
     }
 }
 

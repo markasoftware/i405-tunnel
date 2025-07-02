@@ -95,6 +95,7 @@ pub(crate) struct ClientToServerHandshake {
     pub(crate) s2c_packet_interval_min: u64,
     pub(crate) s2c_packet_interval_max: u64,
     pub(crate) s2c_packet_finalize_delta: u64,
+    pub(crate) c2s_packet_interval_max: u64,
     pub(crate) server_timeout: u64,
 }
 
@@ -118,6 +119,7 @@ impl serdes::Serializable for ClientToServerHandshake {
         self.s2c_packet_interval_min.serialize(serializer);
         self.s2c_packet_interval_max.serialize(serializer);
         self.s2c_packet_finalize_delta.serialize(serializer);
+        self.c2s_packet_interval_max.serialize(serializer);
         self.server_timeout.serialize(serializer);
     }
 }
@@ -150,6 +152,7 @@ impl serdes::Deserializable for ClientToServerHandshake {
             s2c_packet_interval_min: read_cursor.read()?,
             s2c_packet_interval_max: read_cursor.read()?,
             s2c_packet_finalize_delta: read_cursor.read()?,
+            c2s_packet_interval_max: read_cursor.read()?,
             server_timeout: read_cursor.read()?,
         })
     }
@@ -510,6 +513,7 @@ mod test {
             s2c_packet_interval_min: 992828,
             s2c_packet_interval_max: 1002838,
             s2c_packet_finalize_delta: 1_000_000,
+            c2s_packet_interval_max: 888_999,
             server_timeout: 2773818,
         }));
     }

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
 use declarative_enum_dispatch::enum_dispatch;
@@ -7,7 +7,7 @@ use crate::{
     constants::MAX_IP_PACKET_LENGTH,
     core::established_connection::IsConnectionOpen,
     dtls,
-    hardware::Hardware,
+    hardware::{Hardware, real::QdiscSettings},
     messages,
     utils::{ip_to_dtls_length, ip_to_i405_length},
     wire_config::WireConfig,
@@ -488,6 +488,10 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     peer,
                     s2c_wire_config
                 );
+                hardware.configure_qdisc(&QdiscSettings::new(
+                    Duration::from_nanos(c2s_handshake.s2c_packet_interval_max),
+                    Duration::from_nanos(c2s_handshake.c2s_packet_interval_max),
+                ))?;
                 let mut established_connection =
                     EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
                 established_connection

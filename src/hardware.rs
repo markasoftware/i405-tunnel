@@ -7,6 +7,7 @@ pub(crate) mod spinny;
 use std::net::SocketAddr;
 
 use anyhow::Result;
+use real::QdiscSettings;
 
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
 /// only able to interact with the outside world through an instance of `Hardware`
@@ -44,4 +45,10 @@ pub(crate) trait Hardware {
     /// Report to the hardware the planned duration from the last sent packet (send_outgoing_packet
     /// called before this) until the next sent packet. Not used functionally, just for reporting.
     fn register_interval(&mut self, duration: u64);
+
+    /// See
+    /// https://www.bufferbloat.net/projects/codel/wiki/Best_practices_for_benchmarking_Codel_and_FQ_Codel/
+    /// and the tc-codel man pages
+    /// Used to inform the
+    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()>;
 }

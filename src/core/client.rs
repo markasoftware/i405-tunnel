@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use declarative_enum_dispatch::enum_dispatch;
@@ -7,6 +8,7 @@ use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::hardware::Hardware;
+use crate::hardware::real::QdiscSettings;
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
@@ -24,6 +26,10 @@ pub(crate) struct Core {
 
 impl Core {
     pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
+        hardware.configure_qdisc(&QdiscSettings::new(
+            Duration::from_nanos(config.client_wire_config.packet_interval_max),
+            Duration::from_nanos(config.server_wire_config.packet_interval_max),
+        ))?;
         Ok(Self {
             state: Some(ConnectionState::NoConnection(NoConnection::new(
                 &config, hardware,
@@ -272,6 +278,7 @@ impl C2SHandshakeSent {
             s2c_packet_interval_min: config.server_wire_config.packet_interval_min,
             s2c_packet_interval_max: config.server_wire_config.packet_interval_max,
             s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
+            c2s_packet_interval_max: config.client_wire_config.packet_interval_max,
             server_timeout: config.server_wire_config.timeout,
         };
         let did_add =

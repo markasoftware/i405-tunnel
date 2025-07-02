@@ -137,11 +137,21 @@ fn simple() {
     setup_logging();
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
+    assert!(simulated_hardware.qdisc_settings(&client_addr()).is_some());
+    assert!(simulated_hardware.qdisc_settings(&server_addr()).is_none());
+
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[4, 3, 2, 1]);
     // at 1.411ms, the server hasn't yet gotten the first "normal" packet from the client, so it's
     // not going to send anything outgoing until 2.822.
     simulated_hardware.run_until(&mut cores, ms(3.0));
+
+    assert!(simulated_hardware.qdisc_settings(&server_addr()).is_some());
+    // bullshit check to help ensure we didn't mix up outgoing/incoming packet sizes
+    assert_ne!(
+        simulated_hardware.qdisc_settings(&client_addr()).unwrap(),
+        simulated_hardware.qdisc_settings(&server_addr()).unwrap()
+    );
 
     assert_eq!(
         simulated_hardware.sent_incoming_packets(&client_addr()),

@@ -15,6 +15,8 @@ use crate::{
     utils::{ChannelThread, instant_to_timestamp, timestamp_to_instant},
 };
 
+use super::real::{QdiscSettings, configure_qdisc};
+
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
 const OVERSLEEP_WARNING: Duration = Duration::from_micros(250);
@@ -381,5 +383,10 @@ impl Hardware for SleepyHardware {
                 duration,
             );
         }
+    }
+
+    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
+        configure_qdisc(&self.tun.name()?, settings);
+        Ok(())
     }
 }

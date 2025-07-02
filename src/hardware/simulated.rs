@@ -9,11 +9,14 @@ use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::Core;
 use crate::{core, hardware::Hardware};
 
+use super::real::QdiscSettings;
+
 #[derive(Debug, Clone)]
 struct OneSideInfo {
     addr: SocketAddr,
     // if socket_connect has been called, then only accept incoming packets from this address
     connected_addr: Option<SocketAddr>,
+    qdisc_settings: Option<QdiscSettings>,
 
     /// Packets already sent out by the side. A little bit cursed because it's in the order that
     /// send_outgoing_packet is called, rather than by send_timestamp, so it's possible for
@@ -37,6 +40,7 @@ impl OneSideInfo {
         Self {
             addr,
             connected_addr: None,
+            qdisc_settings: None,
             sent_outgoing_packets: Vec::new(),
             unread_outgoing_packets: VecDeque::new(),
             unread_incoming_packets: BinaryHeap::new(),
@@ -136,6 +140,10 @@ impl SimulatedHardware {
 
     pub(crate) fn all_wan_packets(&self) -> &Vec<WanPacket> {
         &self.all_wan_packets
+    }
+
+    pub(crate) fn qdisc_settings(&self, addr: &SocketAddr) -> Option<&QdiscSettings> {
+        self.peers[addr].qdisc_settings.as_ref()
     }
 
     pub(crate) fn drop_packet(&mut self, nth: u64) {
@@ -384,4 +392,9 @@ impl<'a> Hardware for OneSideHardware<'a> {
     }
 
     fn register_interval(&mut self, _duration: u64) {}
+
+    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
+        self.our_side().qdisc_settings = Some(settings.clone());
+        Ok(())
+    }
 }
