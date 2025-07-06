@@ -1,38 +1,27 @@
-# I405 Tunnel: Constant-Traffic Padded Layer-3 Tunnel
+# I405 Tunnel: Constant-Traffic Padded IP Tunnel
 
-I405 is the nuclear option for anonymizing network traffic. Tor and other tools have various schemes
-of padding and delaying messages to make them hard to anonymize. (TODO: references to examples).
-However, even the best padding schemes are vulnerable to statistical attacks. Machine learning (TODO
-link) can deanonymize many fancy padding schemes. Even if you come up with a padding scheme that
-resists current machine learning attacks, there are blunt ways to identify you: Eg, you usually only
-turn on the software when you're using it, so attackers can correlate based on simply when there's
-any network traffic over the anonymization protocol, padding or otherwise (TODO elaborate, also how
-is I405 different than running eg a tor relay 24/7 in this respect?).
+I405 is the nuclear option for hiding network traffic: Send fixed-length encrypted UDP packets at
+fixed, predetermined timestamps. Tunnelled traffic is transmitted by changing the encrypted content
+of the packets. An attacker monitoring your network learns nothing about the tunneled traffic other than the maximum bandwidth.
 
-![A bastardized version of the I405 interstate highway sign](logo.svg)
+![A bastardized version of the I405 interstate highway sign](i405-matrix.png)
 
-## Using I405 as a Tor alternative: "Interstate Circuits"
+The real power of I405 comes when you use I405 to establish an [Interstate
+Circuit](./docs/interstate-circuits.md) to access the internet anonymously, kind of like Tor.
+Interstate Circuits have very different privacy properties than Tor. For example, there's no P2P
+network; you set up the whole circuit yourself! Interstate Circuits resist deanonymization by
+"global passive adversaries", unlike Tor.
 
-I405 can be (carefully!) used to anonymously accessing clearnet websites.
+What's in the name? I405 tunnel implements "constant-traffic" padding. The I-405 freeway in LA
+also has constant traffic!
 
-TODO diagram
+## Documentation
 
-An Interstate Circuit consists of (at least) three network hops:
-1. An I405 fully padded connection between your home internet and the "guard" server
-2. A connection between the "guard" server and the "exit" server. You must have prior knowledge that
-   this connection cannot be monitored by whoever you're hiding from. Eg, if you're trying to hide
-   from Western governments, you might choose this hop to be between two servers in Russia;
-   conversely, if you're trying to hide from the Russian government, you should make this hop
-   between two servers in the Western world.
-3. The final egress hop from your "exit" server to the ultimate clearnet site you're connecting to.
-
-The attacker you're hiding from will be able to observe hops 1 and 3, but not 2. Because hops 1 and
-3 do not involve the same servers, the attacker will not be able to simply use IP addresses to
-correlate them. Furthermore, the observable network traffic on hop 1 is uniform and uncorrelated to
-the actual data being tunnelled, so the attacker cannot determine that the traffic on hops 1 and 3
-are correlated with any amount of statistical analysis.
-
-For more details on how to securely set up an Interstate Circuit, see docs/interstate-circuits.md
++ [Interstate Circuits](./docs/interstate-circuits.md)
++ [Comparison of Interstate Circuits with Onion Routing (Tor, I2P) and Mixnets (Nym, Loopix, etc)](./docs/onion-mixnet-interstate-comparison.md)
++ [I405 Usage](./docs/usage.md)
++ [Real-time tuning](./docs/real-time-tuning.md)
++ [Contributing to I405](./CONTRIBUTING.md)
 
 ## Building and Testing
 
