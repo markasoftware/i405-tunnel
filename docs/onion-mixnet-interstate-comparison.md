@@ -13,7 +13,7 @@ Overview of pros/cons of each type of anonymity network, followed by more in-dep
 
 |                                         | Onion Routing (Tor/I2P) | Mixnet (Loopix/Nym) | Mixnet (Synchronous) | Interstate Circuit |
 |-----------------------------------------|-------------------------|---------------------|----------------------|--------------------|
-| Low-latency                             | ✅                      | ✅                  | ❌                   | ✅                 |
+| Low-latency                             | ✅                      | 🟡                  | ❌                   | ✅                 |
 | Easy to setup                           | ✅                      | ✅                  | ✅                   | ❌                 |
 | Free as in beer                         | ✅                      | ❌                  | 🟡                   | ❌                 |
 | Resistant to global passive adversaries | ❌                      | ✅                  | ✅                   | ✅                 |
@@ -30,7 +30,7 @@ Overview of pros/cons of each type of anonymity network, followed by more in-dep
   basically just being the network latency between the nodes.
 + Results from the original Loopix paper indicate that in a reasonably busy network, only a few
   milliseconds of added latency at each hop will suffice. However, docs on the Nym website explain
-  that latencies are typically at least 1 second and go up from there; I'm not sure why.
+  that latencies are typically greater than 1 second; I'm not sure why. <!-- TODO include graph from that Nym paper explaining latencies in multiple seconds -->
 + Synchronous mixnets have to wait for a whole bunch of messages to be collected before forwarding
   them on, which typically adds at least seconds of latency. With some designs, this latency may be
   small enough to be suitable for clearnet web browsing.
@@ -131,16 +131,23 @@ to prevent this, maybe thanks to the providers hiding identity of their users?
 
 Tor and I2P have been used in practice for well over a decade and have healthy networks of volunteer
 nodes. Nym's mixnet has been running since 2022 (I think? It's hard to tell if it was fully
-operational yet). However, TODO
+operational yet). However, it's unclear if there are enough users and mixnet nodes right now for it
+to be very anonymous.
 
 Most other mixnets never went beyond academic papers. Many have functional implementations that were
 used in the papers for evaluation purposes, but that's it. None have large enough P2P networks to be
 really anonymous.
 
 The I405 software is not particularly mature, but no large P2P network is necessary for it to
-achieve its anonymity properties, so I consider it ready to use.
+achieve its anonymity properties, so I consider it ready to use. (This is a bit misleading -- an
+adversary monitoring "hop 3" of an Interstate Circuit might be able to tell that the traffic
+originated from *an* interstate circuit, even if they don't know exactly which one, dependeng on how
+you set up the circuit. In this case, you would want there to be lots of I405 tunnels in production
+to increase the anonymity set. But if you set up an Interstate Circuit as recommended [in the
+docs](./interstate-circuit.md) using a remote desktop on the "guard" node, this shouldn't be a
+concern).
 
 ## Implementation lines of code
 
 I405 is much simpler than Tor, I2P, or Nym, so its codebase is much smaller and easier to audit and
-understand.
+understand. Interstate Circuits are also easier to understand for a human than Loopix-like mixnets.

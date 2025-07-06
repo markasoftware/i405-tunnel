@@ -142,7 +142,12 @@ will be visible to an adversary monitoring hop 3 who can correlate the two drops
   understand this, realize that the connection from the destination website to the exit node is
   probably much faster than the I405 connection (I405 speeds are typically set slow because of how
   much traffic they send). The SOCKS proxy on the exit node will typically be backpressured by hops
-  1 and 2 as a result, and will usually advertise a full TCP receive window.
+  1 and 2 as a result, and will usually advertise a full TCP receive window shortly after the
+  download begins. Every time a bit more traffic goes through the I405 hop 1, the backpressure will
+  be released slightly and the receive window will be updated. The receive window updates are
+  visible to the adversary monitoring hop 3. If there's a packet drop on hop 1, the receive window
+  will stay the same until that packet gets retransmitted. The adversary can correlate these
+  delayed rcvwin updates with packet drops on hop 1.
 + In a layer-7 interstate circuit (eg, a remote desktop server on the guard node, running a browser
   that then uses a SOCKS proxy running on the exit node): The website will be downloaded to the
   guard node as quickly as possible after hitting enter. Any dropped packets on hop 1 will cause the
@@ -191,18 +196,18 @@ currently possible.
 
 As described earlier, forwarding raw network traffic (either at layer-3 or layer-4) over an Interstate Circuit isn't safe. But what if we forward at the level of HTTP requests instead? That's the idea behind HTTP proxies, but they're aren't perfect out of the box for a few reasons:
 1. When browsers are configured to use an HTTP proxy to proxy HTTPS traffic, they don't actually send
-  HTTP requests to the proxy; instead, they use the `CONNECT` HTTP method to use the HTTP proxy as a
-  layer-4 TCP proxy instead so that the broswer can make an end-to-end encrypted connection to the
-  server. And as described earlier, layer-4 TCP proxies are problematic.
+   HTTP requests to the proxy; instead, they use the `CONNECT` HTTP method to use the HTTP proxy as a
+   layer-4 TCP proxy instead so that the broswer can make an end-to-end encrypted connection to the
+   server. And as described earlier, layer-4 TCP proxies are problematic.
 
-  This can be solved by using a "TLS terminating HTTP proxy", but I can't find any decent open
-  source TLS terminating proxies.
+   This can be solved by using a "TLS terminating HTTP proxy", but I can't find any decent open
+   source TLS terminating proxies.
 2. Even over insecure HTTP, when downloading a large file, the HTTP proxy effectively turns into a
-  layer-4 TCP proxy because it won't buffer the entire downloaded file. So once whatever buffering
-  available fills up, the HTTP proxy will become backpressured by the hop 1 bandwidth. Every time a
-  new I405 packet is sent (from guard to home) and new packets are read from the TUN, the
-  backpressure will release a little bit, and the HTTP proxy will update its TCP widow to admit a
-  bit more downloaded data from the destination website. This is effectively a layer-4 proxy.
+   layer-4 TCP proxy because it won't buffer the entire downloaded file. So once whatever buffering
+   available fills up, the HTTP proxy will become backpressured by the hop 1 bandwidth. Every time a
+   new I405 packet is sent (from guard to home) and new packets are read from the TUN, the
+   backpressure will release a little bit, and the HTTP proxy will update its TCP widow to admit a
+   bit more downloaded data from the destination website. This is effectively a layer-4 proxy.
 
   A similar problem can occur on the upload path as well.
 
@@ -221,20 +226,20 @@ potential heavier-weight solutions to this (like also buffering the responses on
 and only delivering them to the browser when complete).
 
 ### Threat model of a layer-7 Interstate Circuit
-    A layer-7 interstate circuit constructed as recommended in this document is designed so that an
-    adversary with the following capabilities:
-    + Read all network traffic on hops 1 and 3, but not hop 2. (on-path, read-only)
-    + Send arbirary IP traffic. (off-path, read-write)
+A layer-7 interstate circuit constructed as recommended in this document is designed so that an
+adversary with the following capabilities:
++ Read all network traffic on hops 1 and 3, but not hop 2. (on-path, read-only)
++ Send arbirary IP traffic. (off-path, read-write)
 
-    ...is unable to determine that the guard or home nodes are part of the same interstate circuit as the hop 3 traffic/the exit node.
+...is unable to determine that the guard or home nodes are part of the same interstate circuit as the hop 3 traffic/the exit node.
 
-    A layer-7 Interstate Circuit does *not* generally protect against an adversary with any of the following capabilities:
-    + Block arbitrary IP traffic (on-path, read-write). A very blunt example: If you're in the middle of an instant messaging conversation over the Interstate Circuit, then your ISP suddenly shuts down your hop 1 connection, you'll be unable to continue chatting. The fact that you stopped chatting over hop 3 when hop 1 died is evidence that they're connected!
-    + Can observe hop 2 traffic.
-    + Is able to take control over the guard or server nodes, beacuse then they could observe hop 2 traffic.
-    + Knows that the same person (you) is in control of the guard and exit nodes (eg, if you purchase the exit node in a non-anonymous way)
+A layer-7 Interstate Circuit does *not* generally protect against an adversary with any of the following capabilities:
++ Block arbitrary IP traffic (on-path, read-write). A very blunt example: If you're in the middle of an instant messaging conversation over the Interstate Circuit, then your ISP suddenly shuts down your hop 1 connection, you'll be unable to continue chatting. The fact that you stopped chatting over hop 3 when hop 1 died is evidence that they're connected!
++ Can observe hop 2 traffic.
++ Is able to take control over the guard or server nodes, beacuse then they could observe hop 2 traffic.
++ Knows that the same person (you) is in control of the guard and exit nodes (eg, if you purchase the exit node in a non-anonymous way)
 
-    I405 and Interstate Circuits are new and experimental. I recommend you read this whole document and fully think about the security properties of an Interstate Circuit yourself before setting one up.
+I405 and Interstate Circuits are new and experimental. I recommend you read this whole document and fully think about the security properties of an Interstate Circuit yourself before setting one up.
 ## Practice
 ### Setting up an Interstate Circuit
 

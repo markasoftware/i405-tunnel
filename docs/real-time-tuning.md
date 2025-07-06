@@ -135,6 +135,6 @@ have supported hardware. If it's virtualized, it certainly won't.
 
 Since it's unlikely you'll have hardware support for `SO_TXTIME` on both sides of the I405
 connection, and the software implementation is probably worse than `--poll-mode spinny`, I405 does
-not support `SO_TXTIME`. A possible future direction is to write an eBPF program or kernel module
-that implements `SO_TXTIME` using a non-preemptible spin loop instead of `hrtimer`; then we could
-really beat the userspace spin loop!
+not support `SO_TXTIME`. I would still like to add support in the future, though! A possible future
+direction is to write an eBPF program or kernel module that implements `SO_TXTIME` using a
+non-preemptible spin loop instead of `hrtimer`; then we could really beat the userspace spin loop!
