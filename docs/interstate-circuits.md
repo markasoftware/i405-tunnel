@@ -1,5 +1,4 @@
-# Interstate Circuits
-## Theory
+# Interstate Circuits: Theory
 
 I405 can be used as an alternative to Tor for anonymously accessing the Internet. However, it's not
 plug-and-play like Tor; you have to set up the circuit yourself, an involved and time-consuming
@@ -14,6 +13,11 @@ An Interstate Circuit consists of (at least) three network hops:
    Western governments, you might choose this hop to be between two servers in Russia (as pictured
    in the diagram); conversely, if you're trying to hide from the Russian government, you should
    make this hop between two servers in the Western world.
+
+   This step is the "catch" in how Interstate Circuits are resistant to global passive adversaries:
+   An Interstate Circuit isn't safe against a truly global passive adversary that monitors *all*
+   network traffic; you have to be able to make a network hop somewhere that they your adversary
+   can't monitor.
 
    For reasons I'll explain below, I recommend running a remote desktop on the "guard" server rather
    than directly tunnelling network traffic.
@@ -31,7 +35,7 @@ network traffic; for this reason, I recommend running a remote desktop server or
 proxy" on the guard node rather than forwarding network traffic all the way through the circuit;
 read on for details.
 
-### Correlation attacks between hops 1 and 3
+## Correlation attacks between hops 1 and 3
 
 I405 is designed so that the tunneled traffic does not visibly affect the traffic on hop 1. However,
 the way that I405 tunnels the packets might mean that an observer monitoring both hops 1 and 3 are
@@ -43,7 +47,7 @@ decorrelate the hop 1 and hop 3 traffic.
 The rest of this section is optional reading if you want to learn the details of how hop 1 and 3
 traffic might be correlated.
 
-#### Maximum speed
+### Maximum speed
 
 The easiest thing the attacker can do is monitor the maximum download or upload speed you achieve on
 hop 3, and can use that to make an accurate estimate of what your configured I405 speed is.
@@ -54,12 +58,14 @@ the outer I405 packets. Then, an attacker observing the maximum speed on hop 3 w
 the hop 1 bandwidth must be *higher* than the hop 3 bandwidth, but not exactly what the outer hop 1
 bandwidth is.
 
-#### Inter-packet intervals
+### Inter-packet intervals
 
 An attacker might be able to correlate traffic between hops 1 and 3 by analyzing inter-packet
 intervals. For example, if you have I405 configured to send a packet on average every 27
 milliseconds, and the average hop 3 packet intervals are also 27ms, the attacker can figure out
 what's up (even with the jitter that I405 applies to packets automatically).
+
+<img src="./interval-correlation.svg" height=400>
 
 **Possible Solution (not implemented): Scheduled Packets**. When I405 receives an IP packet on its
 TUN interface, attach a "scheduled dispatch timestamp", eg `system_timestamp() + 500ms` (where 500ms
@@ -70,7 +76,7 @@ intervals of the tunneled IP packets are the same as the inter-packet intervals 
 read off the TUN interface, completely independently of the inter-packet intervals of the encrypted
 I405 packets.
 
-#### Dropped packets
+### Dropped packets
 
 The more insidious way to correlate hops 1 and 3: If a packet is dropped on hop 1 while traffic is
 actively being tunneled, packets will be dropped on hop 3. Packet drops are normal and fairly common
@@ -79,6 +85,8 @@ monitoring hop 1 will often be able to tell that a packet was dropped because th
 interval is larger than usual, and on hop 3, by monitoring TCP sequence numbers or similar. When the
 adversary notices drops on hops 1 and 3 at almost the same time, they become more confident that
 these two hops are part of the same Interstate Circuit.
+
+<img src="./drop-correlation.svg" height=400>
 
 **Possible Solution (not implemented): Forward Error Correction (FEC)**: The packet drop problem can
 be mitigated by using error correction so that even if a packet is dropped on hop 1, I405 is able to
@@ -90,7 +98,7 @@ network gets full, or a router goes down and routes aren't updated immediately. 
 correction needed to reliably correct most packet drop events would be quite high, increasing
 latency and bandwidth overhead.
 
-#### Why don't we implement dispatch scheduling or FEC?
+### Why don't we implement dispatch scheduling or FEC?
 
 Error correction really does not fully solve the (IMO more serious) problem of dropped packets.
 Further, probably just a few dozen packet drop events may be enough to uniquely correlate hops 1 and
@@ -109,7 +117,7 @@ delay and error correction level) are sufficient, eg by dry-running for a few da
 many "privacy compromising" events occur (network delay greater than the scheduling delay, or dropped
 packets beyond what error correction can recover).
 
-### Systematically defending against hop 1-hop 3 correlation attacks: Layer-7 proxies
+## Systematically defending against hop 1-hop 3 correlation attacks: Layer-7 proxies
 
 Layer-7 is the application layer. A "layer-7 proxy" is a proxy that proxies application-level
 actions rather than proxying the network traffic made by the application.
@@ -168,7 +176,7 @@ If there's a packet drop on hop 1, some mouse movements may not be transmitted, 
 conspicuous gap in a sequence of HTTP requests as a user moves their mouse across the screen.
 Situations like these are rare, mostly contrived, and hard to exploit.
 
-#### Remote desktops are laggy and a general PITA. Are there other layer-7 proxies I can use?
+### Remote desktops are laggy and a general PITA. Are there other layer-7 proxies I can use?
 
 Here are some examples based on what you're using the Interstate Circuit for:
 + Bittorrent: Run a headless bittorrent client on the guard node (still proxying through the exit
@@ -180,7 +188,7 @@ Here are some examples based on what you're using the Interstate Circuit for:
   addresses!). Control the client by SSHing from your home computer into the guard node over hop 1
   (I405).
 
-##### What about web browsing? Are there are any good layer-7 proxies for web browsing other than a remote desktop?
+#### What about web browsing? Are there are any good layer-7 proxies for web browsing other than a remote desktop?
 
 Short answer: For modern interactive websites, not yet, but it's possible and I want to build it!
 For other websites, run Lynx.
@@ -225,7 +233,7 @@ inter-packet intervals, etc, even with the buffering described in point (2) abov
 potential heavier-weight solutions to this (like also buffering the responses on the home computer,
 and only delivering them to the browser when complete).
 
-### Threat model of a layer-7 Interstate Circuit
+## Threat model of a layer-7 Interstate Circuit
 A layer-7 interstate circuit constructed as recommended in this document is designed so that an
 adversary with the following capabilities:
 + Read all network traffic on hops 1 and 3, but not hop 2. (on-path, read-only)
@@ -240,8 +248,8 @@ A layer-7 Interstate Circuit does *not* generally protect against an adversary w
 + Knows that the same person (you) is in control of the guard and exit nodes (eg, if you purchase the exit node in a non-anonymous way)
 
 I405 and Interstate Circuits are new and experimental. I recommend you read this whole document and fully think about the security properties of an Interstate Circuit yourself before setting one up.
-## Practice
-### Setting up an Interstate Circuit
+# Interstate Circuits: Practice
+## Setting up an Interstate Circuit
 
 1. Identify which adversaries you are trying to hide your network traffic from.
 2. Find two servers you can rent, a "guard" and an "exit", which have a network link between them

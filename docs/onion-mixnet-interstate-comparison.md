@@ -81,9 +81,10 @@ employing fixed-rate cover traffic (somewhat similarly to I405!) and a number of
 Many other proposed mixnets do not employ constant-bitrate cover traffic, but there's no reason why
 that feature couldn't be added, so I consider them resistant to "GPAs" also.
 
-Interstate Circuits are resistant to GPAs as long as you are able to make a single, chosen network
-link that is not observable by the adversaries you are worried about. Read more on the main page:
-[Interstate Circuits](./interstate-circuits.md).
+Interstate Circuits are resistant to almost-GPAs. Why "almost?" You must be able to choose two
+servers such that the network hop between them is not observable by your adversaries (eg, if you are
+hiding from the NSA, then maybe two servers in Russia). Read more on the main page: [Interstate
+Circuits](./interstate-circuits.md).
 
 ## Resistant to Global Active Adversaries
 
