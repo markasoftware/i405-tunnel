@@ -22,7 +22,8 @@ An Interstate Circuit consists of (at least) three network hops:
    For reasons I'll explain below, I recommend running a remote desktop on the "guard" server rather
    than directly tunnelling network traffic.
 3. The final egress hop from your "exit" server to the final clearnet site you're connecting to
-   (orange in the diagram).
+   (orange in the diagram). The exit node can run a simple layer-3 VPN or layer-4 proxy protocol (eg
+   SOCKS5).
 
 The attacker you're hiding from will be able to observe hops 1 and 3, but not 2. Because hops 1 and
 3 involve disjoint sets of IP addresses, there's no trivial way to correlate the links based on
@@ -37,10 +38,11 @@ read on for details.
 
 ## Correlation attacks between hops 1 and 3
 
-I405 is designed so that the tunneled traffic does not visibly affect the traffic on hop 1. However,
-the way that I405 tunnels the packets might mean that an observer monitoring both hops 1 and 3 are
-able to use subtle techniques to correlate the two. I'm going to explain how, and then recommend
-that you **do not an Interstate Circuit to forward end-to-end network traffic**. Instead, I'll
+I405 is designed so that the cleartext tunneled traffic does not affect the traffic visible to
+adversaries on hop 1. However, the way that I405 tunnels the packets might mean that if you forward
+raw network pacekts all the way through the circuit, then an observer monitoring both hops 1 and 3
+can use subtle techniques to correlate the two hops. I'm going to explain how, and then recommend
+that you **do not an Interstate Circuit to forward raw end-to-end network traffic**. Instead, I'll
 recommend using a "layer-7 proxy", such as a remote desktop server, on the guard node to help
 decorrelate the hop 1 and hop 3 traffic.
 
@@ -50,7 +52,8 @@ traffic might be correlated.
 ### Maximum speed
 
 The easiest thing the attacker can do is monitor the maximum download or upload speed you achieve on
-hop 3, and can use that to make an accurate estimate of what your configured I405 speed is.
+hop 3, and can use that to make an accurate estimate of what your configured I405 speed on hop 1 is,
+narrowing down the list of possible I405 connections on the internet that might belong to you.
 
 **Possible Solution (not implemented): Artificial "inner" speed limit**. A CLI option in I405 could
 artificially limit the maximum speed allowed inside the tunnel to be less than the bandwidth used by
@@ -63,9 +66,13 @@ bandwidth is.
 An attacker might be able to correlate traffic between hops 1 and 3 by analyzing inter-packet
 intervals. For example, if you have I405 configured to send a packet on average every 27
 milliseconds, and the average hop 3 packet intervals are also 27ms, the attacker can figure out
-what's up (even with the jitter that I405 applies to packets automatically).
+what's up.
 
 <img src="./interval-correlation.svg" height=400>
+
+(Note that in practice I405 applies jitter to inter-packet intervals, so it wouldn't be exactly 27ms
+between each sent I405 packet. However, the *average* inter-packet interval will remain the same,
+and over a long period of time)
 
 **Possible Solution (not implemented): Scheduled Packets**. When I405 receives an IP packet on its
 TUN interface, attach a "scheduled dispatch timestamp", eg `system_timestamp() + 500ms` (where 500ms
@@ -112,12 +119,12 @@ two obvious strategies, and are both problematic. I've thought of other ideas to
 perfect).
 
 That being said, I'm still open to implementing scheduling and FEC in the future. I think it would
-useful in combination with tooling for users determine wheher their choice of settings (scheduling
-delay and error correction level) are sufficient, eg by dry-running for a few days and seeing how
-many "privacy compromising" events occur (network delay greater than the scheduling delay, or dropped
-packets beyond what error correction can recover).
+useful in combination with tooling that helps users empirically determine whether their choice of
+settings (scheduling delay and error correction level) are sufficient, eg by dry-running for a few
+days and seeing how many "privacy compromising" events occur (network delay greater than the
+scheduling delay, or dropped packets beyond what error correction can recover).
 
-## Systematically defending against hop 1-hop 3 correlation attacks: Layer-7 proxies
+## Systematically defending against hop 1 - hop 3 correlation attacks: Layer-7 proxies
 
 Layer-7 is the application layer. A "layer-7 proxy" is a proxy that proxies application-level
 actions rather than proxying the network traffic made by the application.
@@ -127,58 +134,63 @@ receives mouse and keyboard events. You could argue this isn't truly layer-7, si
 keyboard events don't correlate 1-to-1 with application-level actions, but it's enough for our
 purposes.
 
-Hop 1-hop 3 correlation attacks are effectively defeated by running a layer-7 proxy on the guard
+Hop 1 - hop 3 correlation attacks are effectively defeated by running a layer-7 proxy on the guard
 node, rather than actually forwarding network traffic directly to the exit node (eg with a VPN
 protocol or TCP proxy).
 
 A layer-7 proxy defeats the packet drop correlation attack described above. If an I405 packet gets
 dropped, then the application-level action will either just not occur, or will happen after a short
-delay for the application to reliably retransmit the intent to perform the action.
+delay (while the application retransmits the intent to perform the action.
 
 **Concrete example**: Let's take the process of typing a website address in the web browser address
-bar and hitting enter, in the presence of packet drops.
+bar and hitting enter), in the presence of packet drops.
 + In a layer-3 Interstate Circuit (eg, if you directly forward hop 1 traffic over hop 2 using
 Wireguard): After hitting enter, potentially multiple megabytes of network traffic will be
-transmitted from the website to your home machine over the circuit after you press enter. If there's
-any packet drop on hop 1 during the download, it will cause a TCP retransmission on hop 3, which
-will be visible to an adversary monitoring hop 3 who can correlate the two drops.
-+ In a layer-4 interstate circuit (eg, if you forward hop 1 traffic over hop 2 using a SOCKS TCP
-  proxy): After hitting enter, once again, potentially multiple megabytes of network traffic will be
-  sent from the remote website to your local machine. If a packet is dropped on hop 1, it won't
-  cause a TCP retransmission on hop 3 because the SOCKS proxy ensures reliable delivery all the way
-  from the exit node to the home machine. However, the download will get *delayed* a bit. To
-  understand this, realize that the connection from the destination website to the exit node is
-  probably much faster than the I405 connection (I405 speeds are typically set slow because of how
-  much traffic they send). The SOCKS proxy on the exit node will typically be backpressured by hops
-  1 and 2 as a result, and will usually advertise a full TCP receive window shortly after the
-  download begins. Every time a bit more traffic goes through the I405 hop 1, the backpressure will
-  be released slightly and the receive window will be updated. The receive window updates are
-  visible to the adversary monitoring hop 3. If there's a packet drop on hop 1, the receive window
-  will stay the same until that packet gets retransmitted. The adversary can correlate these
-  delayed rcvwin updates with packet drops on hop 1.
+transmitted from the website to your home machine over the circuit. If there's any packet drop on
+hop 1 during the download, it will cause a TCP retransmission on hop 3, which will be visible to an
+adversary monitoring hop 3 who can correlate the two drops.
++ In a layer-4 interstate circuit (eg, guard and exit nodes both running SOCKS5 TCP proxies): After
+  hitting enter, once again, potentially multiple megabytes of network traffic will be sent from the
+  remote website to your local machine. If a packet is dropped on hop 1, it won't cause a TCP
+  retransmission on hop 3 because the SOCKS proxy ensures reliable delivery on each hop. However,
+  the download on hop 3 will *pause* / be *delayed* for a short amount of time just after the hop 1
+  packet drop.
+
+  To understand this, realize that the hop 3 is typically much higher bandwidth than the hop 1
+  connection (I405 speeds are typically set slow because of how much traffic they send). The SOCKS
+  proxy on the exit node will typically be backpressured by hops 1 and 2 as a result, and will
+  advertise a full TCP receive window starting shortly after the download begins. Every time a bit
+  more traffic goes through the I405 hop 1 tunnel, the backpressure will be released slightly and
+  the exit will advertise a little bit of space in its receive window. The receive window updates
+  are visible to the adversary monitoring hop 3. If there's a packet drop on hop 1, the receive
+  window will stay the same until that packet gets retransmitted. The adversary can correlate these
+  delayed receyive window updates with packet drops on hop 1.
 + In a layer-7 interstate circuit (eg, a remote desktop server on the guard node, running a browser
   that then uses a SOCKS proxy running on the exit node): The website will be downloaded to the
   guard node as quickly as possible after hitting enter. Any dropped packets on hop 1 will cause the
   remote desktop video stream to be delayed or skip frames, but will not affect the hop 3 traffic of
-  the download at all.
+  the download at all. So there's no correlation between drops on hop 1 and drops/delays on hop 3.
 
-  The only packet drop that would be observable here is if the packet that encodes the "enter"
-  keypress gets dropped. In this case, the remote desktop software will retransmit the enter
-  keypress, which will get performed slightly later. However, this isn't observable to the
-  adversary, who doesn't know whether the keypress was delayed by a retransmit, or genuinely
-  occurred later.
+  The only packet drop that would be observable to an adversary here is if the packet that encodes
+  the "enter" keypress gets dropped. In this case, the remote desktop software will retransmit the
+  enter keypress, which will get performed slightly later. However, this isn't observable to the
+  adversary, who doesn't know whether the keypress was delayed by a retransmit, or whether the user
+  genuinely pressed the enter key a split second later than they actually did.
 
 <!-- TODO would be good to get a diagram of this concrete example in each case -->
 
-You can still contrive some scenarios where packet drops on hop 1 path will be observable by an
-adversary watching hop 3. For example, take a website sends an HTTP request on every mouse movement.
-If there's a packet drop on hop 1, some mouse movements may not be transmitted, and there may be a
-conspicuous gap in a sequence of HTTP requests as a user moves their mouse across the screen.
-Situations like these are rare, mostly contrived, and hard to exploit.
+You can still contrive some scenarios with a layer-7 proxy where packet drops on hop 1 path will be
+observable by an adversary watching hop 3. For example, take a website sends an HTTP request on
+every mouse movement. If there's a packet drop on hop 1, some mouse movements may not be
+transmitted, and there may be a conspicuous gap in a sequence of HTTP requests as a user moves their
+mouse across the screen. Situations like these are rare, mostly contrived, and hard to exploit.
+
+The Guard node should be running a layer-7 proxy, but the exit node can and should just run a simple
+layer-3 (eg Wireshark) or layer-4 (eg SOCKS5) proxy.
 
 ### Remote desktops are laggy and a general PITA. Are there other layer-7 proxies I can use?
 
-Here are some examples based on what you're using the Interstate Circuit for:
+Here are some application-specific layer-7 proxy examples:
 + Bittorrent: Run a headless bittorrent client on the guard node (still proxying through the exit
   node. Or just run the bittorrent client on the exit node instead!), download the file you want,
   and then use `rsync`/`scp`/etc to transfer the downloaded file over hop 1 (I405) tunnel to your
@@ -188,66 +200,80 @@ Here are some examples based on what you're using the Interstate Circuit for:
   addresses!). Control the client by SSHing from your home computer into the guard node over hop 1
   (I405).
 
+  (For IRC specifically, you could use dedicated IRC bouncer software like ZNC)
+
 #### What about web browsing? Are there are any good layer-7 proxies for web browsing other than a remote desktop?
 
 Short answer: For modern interactive websites, not yet, but it's possible and I want to build it!
-For other websites, run Lynx.
+For simple websites, run Lynx.
 
 If you can give up JavaScript, one option is to run a command-line, text-only web browser like Lynx
-on the guard node, then control it over SSH on hop 1. Surprisingly many websites' essential
+on the guard node, and control it over SSH on hop 1. Surprisingly many websites' essential
 functionality works with Lynx, even though it doesn't support JavaScript! Further, many
 privacy-oriented websites are specifically designed to be usable without JavaScript. But if you're
 looking for a general-purpose web browser, Lynx will fall short.
 
 Running Chromium or Firefox on a remote machine with a local interface (like Lynx over SSH) isn't
-currently possible.
+currently possible. (You can use X forwarding or the Wayland equivalent, but in my experience it's
+even slower than a usual remote desktop because these browsers basically push raw pixels to X)
 
-As described earlier, forwarding raw network traffic (either at layer-3 or layer-4) over an Interstate Circuit isn't safe. But what if we forward at the level of HTTP requests instead? That's the idea behind HTTP proxies, but they're aren't perfect out of the box for a few reasons:
-1. When browsers are configured to use an HTTP proxy to proxy HTTPS traffic, they don't actually send
-   HTTP requests to the proxy; instead, they use the `CONNECT` HTTP method to use the HTTP proxy as a
-   layer-4 TCP proxy instead so that the broswer can make an end-to-end encrypted connection to the
-   server. And as described earlier, layer-4 TCP proxies are problematic.
+As described earlier, forwarding raw network traffic (either at layer-3 or layer-4) over an
+Interstate Circuit isn't safe. But what if we forward at the level of HTTP requests instead? That's
+the idea behind HTTP proxies, but they're aren't perfect out of the box for a few reasons:
+1. When browsers are configured to use an HTTP proxy to proxy HTTPS traffic, they don't actually
+   send HTTP requests to the proxy; instead, they use the `CONNECT` HTTP method, which converts the
+   HTTP proxy into a layer-4 TCP proxy. This is necessary so that the connection can be end-to-end
+   encrypted. And as described earlier, an Interstate Circuit based on layer-4 TCP proxies is
+   problematic.
 
-   This can be solved by using a "TLS terminating HTTP proxy", but I can't find any decent open
-   source TLS terminating proxies.
-2. Even over insecure HTTP, when downloading a large file, the HTTP proxy effectively turns into a
-   layer-4 TCP proxy because it won't buffer the entire downloaded file. So once whatever buffering
-   available fills up, the HTTP proxy will become backpressured by the hop 1 bandwidth. Every time a
-   new I405 packet is sent (from guard to home) and new packets are read from the TUN, the
-   backpressure will release a little bit, and the HTTP proxy will update its TCP widow to admit a
-   bit more downloaded data from the destination website. This is effectively a layer-4 proxy.
+   This can be solved by using a "TLS terminating HTTP proxy" that uses a self-signed certificate to
+   decrypt then forward the raw HTTP request, and then buffer the response, but I can't find any
+   decent open source TLS terminating proxies.
+2. Even over insecure HTTP, when downloading a large file, an HTTP proxy effectively turns into a
+   layer-4 TCP proxy because it won't buffer the entire downloaded file. Once the buffer (if any)
+   fills up, the HTTP proxy will become backpressured by the hop 1 bandwidth. Every time a new I405
+   packet is sent (from guard to home) and new packets are read from the TUN, the backpressure will
+   release a little bit, and the HTTP proxy will update its TCP window to admit a bit more
+   downloaded data from the destination website. Ie, the HTTP proxy is acting effectively as a
+   layer-4 proxy.
 
-  A similar problem can occur on the upload path as well.
+   A similar problem can occur on the upload path as well.
 
-  The solution is to have a large fixed-size buffer per request in the HTTP proxy, and to abort a
-  download or upload if the total downloaded or uploaded data for the request exceeds the buffer
-  size. To solve the upload case, the proxy must also not send out HTTP requests until the entire
-  request is received.
+   The solution is to have a large fixed-size buffer per request in the HTTP proxy, and to abort a
+   download or upload if the total downloaded or uploaded data for the request exceeds the buffer
+   size. To solve the upload case, the proxy must also not send out HTTP requests until the entire
+   request is received.
 
 It's on the roadmap to build an HTTP(S) proxy that solves the above problems! It won't be perfect
-though; mainly, Real-time web communication tech like WebSockets or long-lived HTTP connections
-(Comet? Does anyone use that term anymore?) won't work at all.
+though; mainly, Real-time web communication tech like WebSockets and WebRTC, as well as long-lived
+HTTP connections (Comet? Does anyone use that term anymore?) won't work at all.
 
 There's also one remaining challenge: Malicious JavaScript can measure the hop 1 bandwidth,
 inter-packet intervals, etc, even with the buffering described in point (2) above. There are some
 potential heavier-weight solutions to this (like also buffering the responses on the home computer,
-and only delivering them to the browser when complete).
+and only delivering them to the browser when complete). But in the shorter term, I'll just consider
+malicious JavaScript outside the threat model.
 
 ## Threat model of a layer-7 Interstate Circuit
 A layer-7 interstate circuit constructed as recommended in this document is designed so that an
 adversary with the following capabilities:
-+ Read all network traffic on hops 1 and 3, but not hop 2. (on-path, read-only)
++ Read all network traffic on hops 1 and 3 (but not hop 2). (on-path, read-only)
 + Send arbirary IP traffic. (off-path, read-write)
 
-...is unable to determine that the guard or home nodes are part of the same interstate circuit as the hop 3 traffic/the exit node.
+...is unable to determine that the home and guard nodes are part of the same interstate circuit as
+the hop 3 traffic and the exit node.
 
 A layer-7 Interstate Circuit does *not* generally protect against an adversary with any of the following capabilities:
-+ Block arbitrary IP traffic (on-path, read-write). A very blunt example: If you're in the middle of an instant messaging conversation over the Interstate Circuit, then your ISP suddenly shuts down your hop 1 connection, you'll be unable to continue chatting. The fact that you stopped chatting over hop 3 when hop 1 died is evidence that they're connected!
-+ Can observe hop 2 traffic.
++ Block arbitrary IP traffic (on-path, read-write). A very blunt example: If you're in the middle of
+  an instant messaging conversation over the Interstate Circuit, then your ISP suddenly shuts down
+  your hop 1 connection, you'll be unable to continue chatting. The fact that you stopped chatting
+  over hop 3 when hop 1 died is evidence that they're connected!
++ Observe hop 2 traffic.
 + Is able to take control over the guard or server nodes, beacuse then they could observe hop 2 traffic.
 + Knows that the same person (you) is in control of the guard and exit nodes (eg, if you purchase the exit node in a non-anonymous way)
 
-I405 and Interstate Circuits are new and experimental. I recommend you read this whole document and fully think about the security properties of an Interstate Circuit yourself before setting one up.
+I405 and Interstate Circuits are new and experimental. I recommend you read this whole document and
+fully think about the security properties of an Interstate Circuit yourself before setting one up.
 # Interstate Circuits: Practice
 ## Setting up an Interstate Circuit
 

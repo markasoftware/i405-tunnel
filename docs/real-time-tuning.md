@@ -1,31 +1,29 @@
 # I405 real-time performance
 
-I405 determines what timestamps it will send packets at before sending them, and in a manner that is
-independent of the data being transmitted. In order to hide information about what either the client
-or server is doing, it's crucial that the packets be sent as close to the scheduled times as
-possible. For example, it's crucial that the packets do not get delayed when the system is under
-heavy load. Otherwise, an adversary monitoring the I405 connection could determine when a peer is
-under heavy load by noticing that its packets are delayed. The adversary might reasonably guess that
-the peer is most likely to be actually transmitting data through the I405 tunnel when it's under
-heavy load, and so use the delayed packets as a weak indicator that cleartext traffic is flowing
-through the tunnel.
+Adversaries can analyze the jitter in the timestamps of I405's sent packets to reveal some
+information about one or both machines running I405. Specifically, if one system is under heavy
+load, it typically makes the distribution of inter-packet intervals slightly tighter. Passing
+`--poll-mode spinny` to I405 helps mitigate this by using a busy loop instead of `nanosleep` to wait
+for scheduled packet transmissions.
 
-I405 applies jitter on top of the predetermined packet timings to make these sorts of side-channel
-attacks based on packet timings more difficult. With sufficient jitter, even an adversary that's
-able to get accurate packet timestamps (ie, an adversary that's physically very nearby to one side
-of the connection or the other) won't be able to conclusively determine whether any single packet
-was late or early due to the underlying variable they're trying to observe (eg, system load) or due
-to the artificially applied jitter.
+I405 applies artificial jitter on inter-packet intervals to make it harder for an adversary to
+determine anything about the "natural" jitter that contains the side-channel information. But as
+described below, paranoid users are right to still be concerned that the *distribution* of jitter
+changes slightly under load.
+
+## Why and how inter-packet interval jitter leaks information
 
 Jitter isn't enough to prevent all side-channel attacks. System load or other factors can also
-influence the *distribution* of packet timings. For example: When 1 packets are transmitted at exactly
+influence the *distribution* of packet timings. For example: When packets are transmitted at exactly
 the scheduled times, then due to the artificial jitter, the distribution of the time between packets
 will have some specific variance/standard deviation. However, when the system is under heavy load,
-the distribution may change, and the variance might increase. So even though an adversary can't say
-anything based on the timing of any individual packet, if the variance of the packet intervals from
-8:30am-8:31am is greater than the variance of the packet intervals from 8:29am-8:30am, the adversary
-may conclude that you were more likely to be using your system, and hence transmitting traffic over
-the tunnel, from 8:30-8:31 than in the preceding minute.
+the variance tends to decrease. So even though an adversary can't say anything based on the timing
+of any individual packet, if the variance of the packet intervals from 8:30am-8:31am is greater than
+the variance of the packet intervals from 8:29am-8:30am, the adversary may conclude that you were
+more likely to be using your system, and hence transmitting traffic over the tunnel, from 8:30-8:31
+than in the preceding minute.
+
+<img src="inter-packet-interval.svg" width="750">
 
 You can now see why I405 makes efforts to dispatch packets at precisely the scheduled times. That
 being said, the default configuration for I405 is not the configuration that achieves the highest
@@ -69,12 +67,26 @@ scheduler priority above all other threads and processes. So, when I405 is wakin
 `nanosleep` under heavy load, it will interrupt whatever other thread is running on the same core
 without delay (unless the currently running thread is executing non-preemptible kernel code, which
 usually won't take long to finish). This behavior can be disabled with `--no-sched-fifo`, but I
-highly recommend against disabling it as doing so causes very large packet delays under heavy load.
+highly recommend leaving it enabled.
 
 If you need the distribution of packet interval lengths to be more consistent between low-load and
 high-load cases, then pass `--poll-mode spinny` to I405. This setting is not transmitted in the
 handshake; you must set it on the client and server separately (though it's also ok to set it on
-only one or the other). When running in `spinny` mode, I405 will never `nanosleep` or otherwise yield the CPU for any reason. Instead, it changes to busy polling, both when listening for incoming packets and 
+only one or the other). When running in `spinny` mode, I405 will never `nanosleep` or otherwise
+yield the CPU for any reason. Instead, it changes to busy polling, both when listening for incoming
+packets and
+
+## Benchmarking the distribution of packet timings
+
+Pass the `--outgoing-send-deviation-stats 10s` option on either client or server to print stats
+about the distribution of actual vs expected inter-packet intervals to stdout every 10 seconds. Put
+your system under load, send packets through the I405 tunnel, or do anything else that you're
+worried about an adversary observing via side channel attacks, and then observe the stats and see if
+they noticeably change.
+
+At the time of writing, the "actual" inter-packet intervals are measured based on when the `send`
+syscalls are made. It's on the roadmap to add the ability to measure interval deviation stats based
+on timestamps reported from the Linux NIC drivers.
 
 ## In a VM (eg, a cloud VPS)
 
@@ -84,7 +96,8 @@ This throws a wrench into getting packets out on time, because the hypervisor ca
 out a core of your VPS, preventing it from executing any instructions until the hypervisor decides
 it's its turn again.
 
-For this reason, I recommend running I405 on bare metal when possible. That being said, we aren't completely hosed just because we're running on a VM.
+For this reason, I recommend running I405 on bare metal when possible. That being said, we aren't
+completely hosed just because we're running on a VM.
 
 First, there are some elaborate schemes you could try and come up with. For example, if your VPS has
 multiple cores, the hypervisor thinks of each core independently. So you could try to run something
@@ -106,6 +119,8 @@ least four vCPUs, so that you aren't using more than a quarter of the burst CPU 
 That ought to be "fair use". If you can find a provider offering "VDS" (virtual dedicated CPU), then
 they probably won't get mad at you for pegging a CPU core)
 
+More research into usage on VPSes is needed.
+
 ## Other tips for precise packet dispatch timing.
 
 + Disable energy-efficient-ethernet (EEE): `ethtool --set-eee <DEVNAME> eee off` (where `<DEVNAME>`
@@ -116,6 +131,9 @@ they probably won't get mad at you for pegging a CPU core)
   you're sending high non-I405 egress traffic. And, similarly to system load, high egress traffic
   for any reason could indicate that you are "online" and generally using your network, and hence
   are more likely to be using the I405 connection as well.
++ Add the `preempt=full` linux kernel parameter. This will let userspace threads interrupt the
+  kernel in more places. (If you're really hardcore, you could even setup `PREEMPT_RT`, but that's
+  probably not necessary).
 
 ## `SO_TXTIME`
 

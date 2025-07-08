@@ -9,10 +9,10 @@ run `cargo build --release`. The binaries will be placed in the `target/release`
 There's also a `flake.nix` file provided for Nix users, who can use this repository as a flake with
 `nix build` or `nix run` commands, eg `nix build github:markasoftware/i405-tunnel` will place
 binaries into the `result` folder.
-## Important: Polling modes: Spinny vs Sleepy
+## Prevent side-channel attacks by tuning for real-time usage
 Feel free to play around with I405 first, but before using it for anything serious, I recommend at
 least skimming the [real-time tuning](./real-time-tuning.md) page to learn the difference between
-the "sleepy" and "spinny" poll modes, which affect how accurately I405 is able to send packest at
+the "sleepy" and "spinny" poll modes, which affect how accurately I405 is able to send packets at
 the predetermined timestamps.
 ## CLI examples
 The canonical documentation for CLI options is in the help text, `i405-tunnel --help`. Here's a

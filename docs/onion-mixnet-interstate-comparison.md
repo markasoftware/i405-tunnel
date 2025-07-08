@@ -29,8 +29,14 @@ Overview of pros/cons of each type of anonymity network, followed by more in-dep
 + Onion routers forward messages as soon as they arrive, so have the lowest theoretical latency,
   basically just being the network latency between the nodes.
 + Results from the original Loopix paper indicate that in a reasonably busy network, only a few
-  milliseconds of added latency at each hop will suffice. However, docs on the Nym website explain
-  that latencies are typically greater than 1 second; I'm not sure why. <!-- TODO include graph from that Nym paper explaining latencies in multiple seconds -->
+  milliseconds of added latency at each hop will suffice. However, that requires there to be a
+  larger number of users. When there are few users, it's necessary to have higher latency to protect
+  their identities; see [this blog post by the Nym
+  team](https://nym.com/blog/empirical-study-of-privacy) for a high-level description.
+
+  Right now, using Nym is a painfully slow experience. For example, in [this review of
+  "NymVPN"](https://www.pcworld.com/article/2572111/nymvpn-review.html), the author reports that the
+  mixnet was too slow to load most websites. This will hopefully improve over time.
 + Synchronous mixnets have to wait for a whole bunch of messages to be collected before forwarding
   them on, which typically adds at least seconds of latency. With some designs, this latency may be
   small enough to be suitable for clearnet web browsing.
@@ -77,6 +83,9 @@ defenses](https://www.cs.utexas.edu/~shmat/shmat_esorics06.pdf)".
 
 Loopix makes a good argument that they're resistant against read-only global passive adversaries by
 employing fixed-rate cover traffic (somewhat similarly to I405!) and a number of other techniques.
+There are some experimental attacks against Nym, such as
+[MixMatch](https://petsymposium.org/popets/2024/popets-2024-0050.php), but they can be defended
+against.
 
 Many other proposed mixnets do not employ constant-bitrate cover traffic, but there's no reason why
 that feature couldn't be added, so I consider them resistant to "GPAs" also.
@@ -108,7 +117,8 @@ If you set up an Interstate Circuit based on layer-3 or layer-4 tunnels (not rec
 is vulnerable to correlation attacks based on packet drops as well. If you set up an Interstate
 Circuit as a layer-7 (application layer) proxy, eg by connecting to a remote desktop server on the
 guard node rather than actually making network connections to your ultimate clearnet destination
-through the tunnel, packet-drop-based correlation attacks become much harder.
+through the tunnel, packet-drop-based correlation attacks are generally prevented; see the
+[Interstate Circuit](./interstate-circuits.md) documentation for (much) more detail.
 
 ## Resistant to Sybil Attacks
 
@@ -135,9 +145,21 @@ nodes. Nym's mixnet has been running since 2022 (I think? It's hard to tell if i
 operational yet). However, it's unclear if there are enough users and mixnet nodes right now for it
 to be very anonymous.
 
-Most other mixnets never went beyond academic papers. Many have functional implementations that were
-used in the papers for evaluation purposes, but that's it. None have large enough P2P networks to be
-really anonymous.
+Most mixnets designs have not progressed beyond academic papers. Many have functional
+implementations that were used in the papers for evaluation purposes, but that's it. None have large
+enough P2P networks to be really anonymous.
+
+Nym/Loopix is the exception; they have a working Mixnet with hundreds of mixnet nodes! However,
+since Nym is still fairly new and has a complex design, it's hard to say if its design will stand
+the test of time. There have been a couple papers attacking it with moderate success:
+[MixMatch](https://petsymposium.org/popets/2024/popets-2024-0050.php) and [The Last Hop
+Attack](https://petsymposium.org/popets/2025/popets-2025-0067.php). Neither paper is fatal to Nym's
+design, but they do demonstrate that more research into Nym's security is warranted.
+
+Additionally, the anonymity of the Nym network improves as the number of users increases, and as the
+artificial latency is increased. This means in its current state, with relatively few users, the
+artificial latency is fairly high (I believe low single digit seconds) to keep the network
+anonymous.
 
 The I405 software is not particularly mature, but no large P2P network is necessary for it to
 achieve its anonymity properties, so I consider it ready to use. (This is a bit misleading -- an
@@ -145,10 +167,17 @@ adversary monitoring "hop 3" of an Interstate Circuit might be able to tell that
 originated from *an* interstate circuit, even if they don't know exactly which one, dependeng on how
 you set up the circuit. In this case, you would want there to be lots of I405 tunnels in production
 to increase the anonymity set. But if you set up an Interstate Circuit as recommended [in the
-docs](./interstate-circuit.md) using a remote desktop on the "guard" node, this shouldn't be a
+docs](./interstate-circuit.md) using a "layer-7 proxy" on the "guard" node, this shouldn't be a
 concern).
+
+Importantly, I consider Interstate Circuits to be "obviously" correct. That may sound a little
+ironic considering that the documentation on Interstate Circuits is over 4,000 words already. What I
+mean isn't that Interstate Circuits are super simple, but rather that once you understand how
+Interstate Circuits work, it's obvious how it defeats the threats described in the threat model,
+like Tor, and unlike some more advanced mixnets.
 
 ## Implementation lines of code
 
 I405 is much simpler than Tor, I2P, or Nym, so its codebase is much smaller and easier to audit and
-understand. Interstate Circuits are also easier to understand for a human than Loopix-like mixnets.
+understand. Interstate Circuits are also easier to understand for a human than advanced mixnets like
+Loopix.
