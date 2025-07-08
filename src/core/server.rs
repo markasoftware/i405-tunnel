@@ -489,10 +489,9 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     s2c_wire_config
                 );
                 if config.should_configure_qdisc {
-                    hardware.configure_qdisc(&QdiscSettings::new(
-                        Duration::from_nanos(c2s_handshake.s2c_packet_interval_max),
-                        Duration::from_nanos(c2s_handshake.c2s_packet_interval_max),
-                    ))?;
+                    hardware.configure_qdisc(&QdiscSettings::new(Duration::from_nanos(
+                        c2s_handshake.s2c_packet_interval_max,
+                    )))?;
                 }
                 let mut established_connection =
                     EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;

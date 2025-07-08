@@ -1,7 +1,7 @@
 /// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
 use std::{net::SocketAddr, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use crate::{config_cli::CommonConfigCli, constants::MAX_IP_PACKET_LENGTH};
 
@@ -85,52 +85,47 @@ pub(crate) fn set_sched_fifo() -> Result<()> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct QdiscSettings {
-    target: Duration,
-    interval: Duration,
-    limit: u64,
-    quantum: u64,
+    fq_flow_limit: u64,
+    fq_quantum: u64,
+    tun_hardware_queue_len: u32,
 }
 
 impl QdiscSettings {
-    pub(crate) fn new(
-        outgoing_interval_max: Duration,
-        incoming_interval_max: Duration,
-    ) -> QdiscSettings {
-        let target = outgoing_interval_max * 3 / 2 + Duration::from_millis(5);
+    pub(crate) fn new(outgoing_interval_max: Duration) -> QdiscSettings {
         QdiscSettings {
-            // most of these numbers derived from
-            // https://www.bufferbloat.net/projects/codel/wiki/Best_practices_for_benchmarking_Codel_and_FQ_Codel/
-            // as per link above, we want the interval to be above the packet interval. Adding 5ms
-            // is just an easy way to make sure it doesn't get super short at higher bandwidths
-            target,
-            // recommended for this to be worst-case RTT -- we should probably make this
-            // user-configurable, but until then, take 200ms as an RTT estimate and then add
-            // worst-case intervals in both directions.
-            interval: std::cmp::max(
-                target * 2,
-                outgoing_interval_max + incoming_interval_max + Duration::from_millis(200),
-            ),
-            // haven't tested this, but the link above recommends it for 10mbit. It still seems
-            // questionably estimate 1 second worth. This is fairly close to the recommendation of
-            // 600 for 10mbit from the link above.
-            limit: std::cmp::max(
+            // 500ms max per-flow buffering. Complete empirical crap
+            fq_flow_limit: std::cmp::max(
                 20,
-                Duration::from_secs(1).div_duration_f64(outgoing_interval_max) as u64,
+                Duration::from_millis(500).div_duration_f64(outgoing_interval_max) as u64,
             ),
-            // general recommendation from that link for lower bandwidths
-            quantum: 300,
+            // this is kinda recommended for slow flows in fq_codel. I'm not sure what setting this
+            // to less than the MTU really does (some bufferbloat wiki pages suggest that it "favors
+            // small packets", which sounds nice), but I definitely see the wisdom in decreasing it
+            // from the default of 2*MTU -- no reason to let the same flow send more than one packet
+            // before switching at low speeds
+            fq_quantum: 300,
+            // 50ms worth of "hardware" buffering -- this is empirical and honestly complete crap --
+            // need to revisit TODO
+            tun_hardware_queue_len: std::cmp::max(
+                3,
+                Duration::from_millis(50)
+                    .div_duration_f64(outgoing_interval_max)
+                    .ceil() as u32,
+            ),
         }
     }
 }
 
-pub(crate) fn configure_qdisc(interface_name: &str, settings: &QdiscSettings) {
-    log::debug!(
-        "Configuring fq_codel target {}us interval {}us limit {} quantum {}",
-        settings.target.as_micros(),
-        settings.interval.as_micros(),
-        settings.limit,
-        settings.quantum
-    );
+pub(crate) fn configure_qdisc(
+    interface_name: &str,
+    tun: &tun_rs::SyncDevice,
+    settings: &QdiscSettings,
+) -> Result<()> {
+    log::debug!("Configuring qdisc -- {:?}", settings);
+
+    // TODO return a Result instead
+    tun.set_tx_queue_len(settings.tun_hardware_queue_len)
+        .map_err(|err| anyhow!(err).context("Setting TUN tq queue length"))?;
 
     // How hard is it to do this with syscalls? It seems to involve `sendmsg` with lots of special
     // flags. Just setting the qdisc doesn't seem to bad, but specifying the options looks a little
@@ -144,20 +139,18 @@ pub(crate) fn configure_qdisc(interface_name: &str, settings: &QdiscSettings) {
         .arg("dev")
         .arg(interface_name)
         .arg("root")
-        .arg("fq_codel")
-        .arg("target")
-        .arg(format!("{}us", settings.target.as_micros()))
-        .arg("interval")
-        .arg(format!("{}us", settings.interval.as_micros()))
-        .arg("limit")
-        .arg(format!("{}", settings.limit))
+        .arg("fq")
+        .arg("flow_limit")
+        .arg(format!("{}", settings.fq_flow_limit))
         .arg("quantum")
-        .arg(format!("{}", settings.quantum))
+        .arg(format!("{}", settings.fq_quantum))
         .status()
-        .expect("Error running `tc` command to configure qdisc:");
+        .map_err(|err| anyhow!(err).context("Calling `tc` to configure qdisc"))?;
     if !exit_code.success() {
-        panic!("Nonzero exit code configuring qdisc: {exit_code}");
+        bail!("Nonzero exit code when using `tc` to configure qdisc: {exit_code}");
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -166,14 +159,13 @@ mod test {
 
     #[test]
     fn qdisc_settings() {
-        let settings = QdiscSettings::new(Duration::from_millis(10), Duration::from_millis(25));
+        let settings = QdiscSettings::new(Duration::from_millis(10));
         assert_eq!(
             settings,
             QdiscSettings {
-                target: Duration::from_millis(20),
-                interval: Duration::from_millis(235),
-                limit: 100,
-                quantum: 300,
+                fq_flow_limit: 50,
+                fq_quantum: 300,
+                tun_hardware_queue_len: 5,
             }
         )
     }

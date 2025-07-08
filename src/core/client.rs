@@ -27,10 +27,9 @@ pub(crate) struct Core {
 impl Core {
     pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
         if config.should_configure_qdisc {
-            hardware.configure_qdisc(&QdiscSettings::new(
-                Duration::from_nanos(config.client_wire_config.packet_interval_max),
-                Duration::from_nanos(config.server_wire_config.packet_interval_max),
-            ))?;
+            hardware.configure_qdisc(&QdiscSettings::new(Duration::from_nanos(
+                config.client_wire_config.packet_interval_max,
+            )))?;
         }
         Ok(Self {
             state: Some(ConnectionState::NoConnection(NoConnection::new(
@@ -280,7 +279,6 @@ impl C2SHandshakeSent {
             s2c_packet_interval_min: config.server_wire_config.packet_interval_min,
             s2c_packet_interval_max: config.server_wire_config.packet_interval_max,
             s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
-            c2s_packet_interval_max: config.client_wire_config.packet_interval_max,
             server_timeout: config.server_wire_config.timeout,
         };
         let did_add =

@@ -386,7 +386,6 @@ impl Hardware for SleepyHardware {
     }
 
     fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
-        configure_qdisc(&self.tun.name()?, settings);
-        Ok(())
+        configure_qdisc(&self.tun.name()?, &self.tun, settings)
     }
 }
