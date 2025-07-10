@@ -1,5 +1,8 @@
 use config_cli::ContainsCommonConfigCli as _;
-use hardware::{Hardware, real::set_sched_fifo};
+use hardware::{
+    Hardware,
+    real::{resolve_socket_addr_string, set_sched_fifo},
+};
 use wire_config::to_wire_configs;
 
 mod array_array;
@@ -80,11 +83,10 @@ fn make_core(
 
     match &configuration {
         config_cli::ConfigCli::Client(client_configuration) => {
-            // TODO do DNS resolving so we can use domains
-            let peer: std::net::SocketAddr = client_configuration
-                .peer
-                .parse()
-                .expect("Invalid peer syntax; use host:port");
+            let peer = resolve_socket_addr_string(&client_configuration.peer).expect(&format!(
+                "No route to host {} (but DNS resolved successfully); check your internet connectivity",
+                client_configuration.peer
+            ));
             let wire_configs = to_wire_configs(&peer, &client_configuration.wire_configuration);
             let client_config = core::client::Config {
                 client_wire_config: wire_configs.client,

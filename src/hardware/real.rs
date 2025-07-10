@@ -1,5 +1,8 @@
 /// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 
@@ -155,6 +158,26 @@ pub(crate) fn configure_qdisc(
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_socket_addr_string(socket_addr_str: &str) -> Option<SocketAddr> {
+    let addrs: Vec<SocketAddr> = socket_addr_str
+        .to_socket_addrs()
+        .expect(&format!(
+            "Failed to resolve peer address {}. Make sure to include a port number",
+            socket_addr_str
+        ))
+        .collect();
+    // prefer IPv6, but fall back to IPv4
+    let ipv6_addr = addrs.iter().find(|addr| {
+        // a bit hacky, but the easiest way to check routability is to just find the MTU,
+        // since that involves a route table lookup and we already require the MTU library.
+        addr.is_ipv6() && mtu::interface_and_mtu(addr.ip()).is_ok()
+    });
+    let ipv4_addr = addrs
+        .iter()
+        .find(|addr| addr.is_ipv4() && mtu::interface_and_mtu(addr.ip()).is_ok());
+    ipv6_addr.or(ipv4_addr).cloned()
 }
 
 #[cfg(test)]

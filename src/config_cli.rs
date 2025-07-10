@@ -136,7 +136,7 @@ impl EzClap for WireConfigCli {
                     interval
                         .as_nanos()
                         .try_into()
-                        .expect("Don't put intervals longer than hundreds of years."),
+                        .expect("Don't put intervals longer than hundreds of years"),
                 ),
                 (None, Some(bytes_per_second)) => {
                     AverageWireIntervalCli::Rate(bytes_per_second.as_u64())
