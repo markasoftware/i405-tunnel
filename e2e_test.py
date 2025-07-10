@@ -7,11 +7,11 @@ import subprocess
 import shlex
 import time
 import os
+import json
 import re
-import statistics
 import sys
 import signal
-from typing import Any, Tuple, Optional
+from typing import Any
 
 # Configuration variables
 SERVER_NS: str = "i405-server"
@@ -22,7 +22,6 @@ CLIENT_VETH: str = "veth-client"
 SERVER_VETH_IP: str = "192.168.99.0"
 CLIENT_VETH_IP: str = "192.168.99.1"
 SERVER_PORT: int = 1405
-CLIENT_PORT: int = 11405
 
 SERVER_TUN_IP: str = "192.168.100.0"
 CLIENT_TUN_IP: str = "192.168.100.1"
@@ -32,6 +31,8 @@ PASSWORD = "password"
 
 I405_BINARY_PATH = "./target/debug/i405-tunnel"
 I405_ENV = {"RUST_BACKTRACE": "1"} | os.environ
+
+IPERF_TIMEOUT_SECS = 10
 
 # we run our tests across all poll modes, and use this global variable to keep track of which one is currently set
 global_poll_mode: str = "undefined"
@@ -87,15 +88,18 @@ def cleanup() -> None:
     # Veth pairs in the bridge namespace are automatically cleaned up when the namespace is deleted.
     print("Cleanup complete.")
 
-def dict_to_args(d: dict[str, str]) -> list[str]:
+def dict_to_args(d: dict[str, str | None]) -> list[str]:
     result: list[str] = []
     for key, value in d.items():
-        result.append(f"--{key}")
-        result.append(value)
+        if value is not None:
+            result.append(f"--{key}")
+            result.append(value)
     return result
 
-def launch_client(**cli_overrides: str) -> subprocess.Popen[bytes]:
+def launch_client(cli_overrides: dict[str, str | None] | None = None) -> subprocess.Popen[bytes]:
     global all_popens
+    if cli_overrides is None:
+        cli_overrides = {}
     args = dict_to_args(default_client_args() | cli_overrides)
     cli = ["ip", "netns", "exec", CLIENT_NS, I405_BINARY_PATH, "client", *args]
     print(f"Launching client: {shlex.join(cli)}")
@@ -103,8 +107,10 @@ def launch_client(**cli_overrides: str) -> subprocess.Popen[bytes]:
     all_popens.append(result)
     return result
 
-def launch_server(**cli_overrides: str) -> subprocess.Popen[bytes]:
+def launch_server(cli_overrides: dict[str, str | None] | None = None) -> subprocess.Popen[bytes]:
     global all_popens
+    if cli_overrides is None:
+        cli_overrides = {}
     args = dict_to_args(default_server_args() | cli_overrides)
     cli = ["ip", "netns", "exec", SERVER_NS, I405_BINARY_PATH, "server", *args]
     print(f"Launching server: {shlex.join(cli)}")
@@ -121,6 +127,8 @@ def shutdown(*popens: subprocess.Popen):
             if popen.poll() is None:
                 print(f"Pid {popen.pid} did not exit cleanly, sending SIGKILL")
                 popen.kill()
+        if popen.returncode != 0:
+            raise AssertionError(f"Pid {popen.pid} shut down with nonzero exit code {popen.returncode}")
 
 def assert_ping():
     """
@@ -141,6 +149,65 @@ def assert_ping():
     longest_ping_time = max(*ping_times_ms)
     # TODO there ight be a plausible reason for it to be shorter than the min here
     assert PACKET_INTERVAL_MS / 2 <= longest_ping_time <= PACKET_INTERVAL_MS * 3, f"Ping time out of range: {longest_ping_time}"
+
+class TcpPerformanceTester:
+    def __init__(self, upload: bool, download: bool, timeout: int):
+        assert upload or download, 'must specify either upload or download'
+
+        self.upload = upload
+        self.download = download
+        self.timeout = timeout
+        self.start_time = time.time()
+        # Start iperf server in server namespace. It will exit after one connection.
+        iperf_server_cmd = ["ip", "netns", "exec", SERVER_NS, "iperf3", "-s", "-1"]
+        print(f"Running: {shlex.join(iperf_server_cmd)}")
+        self.iperf_server_process = subprocess.Popen(iperf_server_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        all_popens.append(self.iperf_server_process)
+        time.sleep(0.5) # give server time to start
+
+        iperf_client_cmd = ["ip", "netns", "exec", CLIENT_NS, "iperf3", "-c", SERVER_TUN_IP, "--json", "-t", str(timeout)]
+        if download:
+            if upload:
+                iperf_client_cmd.append("--bidir")
+            else:
+                iperf_client_cmd.append("--reverse")
+
+        print(f"Running: {shlex.join(iperf_client_cmd)}")
+        self.iperf_client_process = subprocess.Popen(iperf_client_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        all_popens.append(self.iperf_client_process)
+
+    # sleep until n seconds before the end of the test
+    def sleep_until_secs_left(self, n: int):
+        assert n < self.timeout, "n too large"
+        time.sleep(time.time() + self.timeout - n)
+
+    # return upload and download speeds (if requested)
+    def finish(self) -> tuple[float | None, float | None, float]:
+        iperf_client_stdout, iperf_client_stderr = self.iperf_client_process.communicate(timeout=self.timeout+1)
+        all_popens.remove(self.iperf_client_process)
+        if self.iperf_client_process.returncode != 0:
+            raise RuntimeError(f"iperf3 nonzero exit code: {self.iperf_client_process.returncode}. Stdout: {iperf_client_stdout}, Stderr: {iperf_client_stderr}")
+        _ = self.iperf_server_process.wait(0.5)
+        all_popens.remove(self.iperf_server_process)
+        iperf_output = json.loads(iperf_client_stdout)
+        if 'error' in iperf_output:
+            raise RuntimeError(f"iperf3 client error: {iperf_output['error']}")
+
+        upload_speed = None
+        download_speed = None
+        max_rtt_us = 0
+        for stream in iperf_output['end']['streams']:
+            max_rtt_us = max(max_rtt_us, stream['sender']['max_rtt'])
+        if self.upload:
+            upload_speed = iperf_output['end']['sum_sent']['bits_per_second']/8
+        if self.download:
+            if self.upload:
+                download_speed = iperf_output['end']['sum_received_bidir_reverse']['bits_per_second']/8
+            else:
+                download_speed = iperf_output['end']['sum_received']['bits_per_second']/8
+
+        print(f"Iperf test done. UL:{upload_speed} DL:{download_speed} RTT:{max_rtt_us}us")
+        return upload_speed, download_speed, max_rtt_us
 
 def setup_network() -> None:
     print("Setting up netns-es and veths")
@@ -181,10 +248,24 @@ def main() -> None:
         cleanup() # Ensure a clean state before starting
         setup_network()
 
-        for global_poll_mode in "sleepy", "spinny":
-            print(f"About to test in poll-mode: {global_poll_mode}")
-            basic_test()
-            reconnect_test()
+        if len(sys.argv) > 1:
+            if sys.argv[1] == 'debug':
+                global_poll_mode = sys.argv[2]
+                launch_server()
+                launch_client()
+                print(f"Debug mode: I405 running between network namespaces {CLIENT_NS} and {SERVER_NS} until interrupted.")
+                while True:
+                    time.sleep(60)
+            else:
+                raise RuntimeError("Invalid command line. Usage: ./e2e_test.py [debug spinny|sleepy]")
+
+        # default: run tests
+        else:
+            for global_poll_mode in "sleepy", "spinny":
+                print(f"About to test in poll-mode: {global_poll_mode}")
+                basic_test()
+                reconnect_test()
+                tcp_throughput_test()
 
         print()
         print("End-to-end test completed without error.")
@@ -194,7 +275,9 @@ def main() -> None:
         cleanup() # Always clean up network namespaces and interfaces
 
 def basic_test():
-    print("Basic test")
+    print()
+    print("E2E TEST: Basic test")
+    print()
     server = launch_server()
     client = launch_client()
     time.sleep(0.25)
@@ -204,7 +287,9 @@ def basic_test():
 
 def reconnect_test():
     """Can both sides reconnect to the other after a disconnection?"""
-    print("Reconnect test")
+    print()
+    print("E2E TEST: Reconnect test")
+    print()
     server = launch_server()
     client = launch_client()
     time.sleep(0.25)
@@ -218,6 +303,36 @@ def reconnect_test():
     # will have to increase this:
     time.sleep(1.25)
     assert_ping()
+
+    shutdown(client, server)
+
+def tcp_throughput_test():
+    print()
+    print("E2E TEST: TCP throughput test")
+    print()
+    server = launch_server()
+    client = launch_client({
+        "outgoing-packet-interval": None,
+        "incoming-packet-interval": None,
+        "outgoing-speed": "100k",
+        "incoming-speed": "100k",
+    })
+    time.sleep(0.25)
+    tester = TcpPerformanceTester(True, True, IPERF_TIMEOUT_SECS)
+    upload_speed, download_speed, max_rtt_us = tester.finish()
+    # trust me, i wish the lower bound here were higher :|
+    assert 50_000 < upload_speed < 100_000
+    assert 50_000 < download_speed < 100_000
+    assert 0 < max_rtt_us < 100_000
+
+    tester = TcpPerformanceTester(True, False, IPERF_TIMEOUT_SECS)
+    upload_speed, _, max_rtt_us = tester.finish()
+
+    # the speed is reliably higher when we're not pushing both directions at the same time.
+    # Honestly, that's a bit worrying, but I'm willing to chalk it up to bufferbloat on the acks for
+    # now :|
+    assert 80_000 < upload_speed < 100_000
+    assert 0 < max_rtt_us < 100_000
 
     shutdown(client, server)
 

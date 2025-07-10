@@ -26,6 +26,8 @@ pub(crate) struct SleepyHardware {
     // we increment this when event listeners are cleared, and include it in all requests to other
     // for interval tracking
     next_outgoing_packet_id: u64,
+    // true if the core has a pending request to read an outgoing packet
+    currently_reading_outgoing: bool,
     // we'll "connect" to this address to disconnect:
     _disconnect_addr: SocketAddr,
 
@@ -90,6 +92,7 @@ impl SleepyHardware {
         Ok(Self {
             epoch,
             next_outgoing_packet_id: 0,
+            currently_reading_outgoing: false,
             _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
             timer: None,
@@ -160,7 +163,12 @@ impl SleepyHardware {
                     // it back and forth between a slice and an IpPacketBuffer cause even more
                     // copying than necessary? Probably depends on inlining and stuff but I'm
                     // not sure!
-                    core.on_read_outgoing_packet(self, &packet, timestamp);
+                    if self.currently_reading_outgoing {
+                        // important to set to false /before/ calling the event handler, because the
+                        // event handler may set it back to true:
+                        self.currently_reading_outgoing = false;
+                        core.on_read_outgoing_packet(self, &packet, timestamp);
+                    }
                 }
                 Ok(Event::IncomingRead { addr, packet }) => {
                     core.on_read_incoming_packet(self, &packet, addr);
@@ -307,6 +315,7 @@ impl Hardware for SleepyHardware {
     }
 
     fn read_outgoing_packet(&mut self) {
+        self.currently_reading_outgoing = true;
         self.outgoing_read_thread.tx().send(()).unwrap();
     }
 
@@ -363,6 +372,7 @@ impl Hardware for SleepyHardware {
 
     fn clear_event_listeners(&mut self) -> Result<()> {
         self.timer = None;
+        self.currently_reading_outgoing = false;
         // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }

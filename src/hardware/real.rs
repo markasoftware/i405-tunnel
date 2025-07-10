@@ -133,6 +133,10 @@ pub(crate) fn configure_qdisc(
 
     // TODO we may not want to panic when these commands fail, in case there's some way that
     // interval settings can cause the `tc` command to crash but we don't want the program to crash.
+    // TODO consider going back to fq_codel to keep TCP sockets rtts lower. fq_codel has the slight
+    // disadvantage that, because it drops packets at the head of the queue instead of the tail, it
+    // actually drops packets, rather than effectively backpressuring the TCP stack without dropping
+    // packets.
     let exit_code = std::process::Command::new("tc")
         .arg("qdisc")
         .arg("replace")
