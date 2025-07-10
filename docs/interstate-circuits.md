@@ -7,12 +7,13 @@ process.
 ![Diagram of an Interstate Circuit](interstate-circuit.png)
 
 An Interstate Circuit consists of (at least) three network hops:
-1. An I405 fully padded connection between your home internet and the "guard" server (green in the diagram)
-2. A connection between the "guard" server and the "exit" server. You must have prior knowledge that
-   this connection cannot be monitored by your adversaries. Eg, if you're trying to hide from
-   Western governments, you might choose this hop to be between two servers in Russia (as pictured
-   in the diagram); conversely, if you're trying to hide from the Russian government, you should
-   make this hop between two servers in the Western world.
+1. An I405 constant-traffic connection between your home internet and the "guard" server (green in
+   the diagram)
+2. A connection between the "guard" server and the "exit" server (purple in the diagram). You must
+   have prior knowledge that this connection cannot be monitored by your adversaries. Eg, if you're
+   trying to hide from Western governments, you might choose this hop to be between two servers in
+   Russia (as pictured in the diagram); conversely, if you're trying to hide from the Russian
+   government, you should make this hop between two servers in the Western world.
 
    This step is the "catch" in how Interstate Circuits are resistant to global passive adversaries:
    An Interstate Circuit isn't safe against a truly global passive adversary that monitors *all*
@@ -27,8 +28,8 @@ An Interstate Circuit consists of (at least) three network hops:
 
 The attacker you're hiding from will be able to observe hops 1 and 3, but not 2. Because hops 1 and
 3 involve disjoint sets of IP addresses, there's no trivial way to correlate the links based on
-source/destination IPs. And since hop 1 has completely uniform network I405 network traffic, it's
-hard to correlate with the hop 3 traffic.
+source/destination IPs. And since hop 1 has completely uniform I405 network traffic, it's hard to
+correlate with the hop 3 traffic.
 
 Unfortunately, if you simply proxy or tunnel network traffic all the way through your Interstate
 Circuit, there are some techniques an adversary could use to correlate hops 1 and 3 by inspecting
@@ -39,12 +40,11 @@ read on for details.
 ## Correlation attacks between hops 1 and 3
 
 I405 is designed so that the cleartext tunneled traffic does not affect the traffic visible to
-adversaries on hop 1. However, the way that I405 tunnels the packets might mean that if you forward
-raw network pacekts all the way through the circuit, then an observer monitoring both hops 1 and 3
-can use subtle techniques to correlate the two hops. I'm going to explain how, and then recommend
-that you **do not an Interstate Circuit to forward raw end-to-end network traffic**. Instead, I'll
-recommend using a "layer-7 proxy", such as a remote desktop server, on the guard node to help
-decorrelate the hop 1 and hop 3 traffic.
+adversaries on hop 1. However, if you forward raw network packets all the way through the circuit,
+an observer monitoring both hops 1 and 3 can use subtle techniques to correlate the two hops. I'm
+going to explain how, and then recommend that you **do not an Interstate Circuit to forward raw
+end-to-end network traffic**. Instead, I'll recommend using a "layer-7 proxy", such as a remote
+desktop server, on the guard node to help decorrelate the hop 1 and hop 3 traffic.
 
 The rest of this section is optional reading if you want to learn the details of how hop 1 and 3
 traffic might be correlated.
@@ -72,26 +72,25 @@ what's up.
 
 (Note that in practice I405 applies jitter to inter-packet intervals, so it wouldn't be exactly 27ms
 between each sent I405 packet. However, the *average* inter-packet interval will remain the same,
-and over a long period of time)
+even over a long period of time)
 
-**Possible Solution (not implemented): Scheduled Packets**. When I405 receives an IP packet on its
-TUN interface, attach a "scheduled dispatch timestamp", eg `system_timestamp() + 500ms` (where 500ms
-is an overestimate of the network latency) to the packet and then immediately send it to the other
-side of the I405 connection. When the packet is received on the other side, wait until the
-"scheduled" dispatch time to send the packet through the TUN interface. This way, the inter-packet
-intervals of the tunneled IP packets are the same as the inter-packet intervals between when they're
-read off the TUN interface, completely independently of the inter-packet intervals of the encrypted
-I405 packets.
+**Possible Solution (not implemented): Scheduled Packets**. When I405 receives an IP packet to
+tunnel, attach a "scheduled dispatch timestamp" of `system_timestamp() + 500ms` (where 500ms is an
+overestimate of the network latency) to the packet. On the other side of the I405 connection, wait
+until the scheduled timestamp to send the tunneled IP packet. The inter-packet intervals of the
+tunneled IP packets when they leave the I405 tunnel will be the same as the inter-packet intervals
+when those packets entered the tunnel, completely independently of the inter-packet intervals of the
+encrypted I405 packets.
 
 ### Dropped packets
 
 The more insidious way to correlate hops 1 and 3: If a packet is dropped on hop 1 while traffic is
 actively being tunneled, packets will be dropped on hop 3. Packet drops are normal and fairly common
-over the internet; the adversary does not need to actually cause the packet drops. An adversary
-monitoring hop 1 will often be able to tell that a packet was dropped because the inter-packet
-interval is larger than usual, and on hop 3, by monitoring TCP sequence numbers or similar. When the
-adversary notices drops on hops 1 and 3 at almost the same time, they become more confident that
-these two hops are part of the same Interstate Circuit.
+over the internet; the adversary does not need to actually cause the packet drops. An adversary will
+be able to tell that a packet was dropped on hop 1 because the inter-packet interval was larger than
+usual, and on hop 3, by noticing a gap in TCP sequence numbers. When the adversary notices drops on
+hops 1 and 3 at almost the same time, they become more confident that these two hops are part of the
+same Interstate Circuit.
 
 <img src="./drop-correlation.svg" height=400>
 
