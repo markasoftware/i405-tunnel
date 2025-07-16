@@ -22,7 +22,7 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    pub(crate) fn new(config: Config, hardware: &mut impl Hardware) -> Result<Self> {
+    pub(crate) fn new(config: Config, hardware: &impl Hardware) -> Result<Self> {
         Ok(Self {
             state: Some(ConnectionState::NoConnection(NoConnection::new(hardware)?)),
             config,
@@ -44,7 +44,7 @@ fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionStat
 }
 
 impl super::Core for Core {
-    fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64) {
+    fn on_timer(&mut self, hardware: &impl Hardware, timer_timestamp: u64) {
         replace_state_with_result(&mut self.state, |state| {
             state.on_timer(&self.config, hardware, timer_timestamp)
         });
@@ -52,7 +52,7 @@ impl super::Core for Core {
 
     fn on_read_outgoing_packet(
         &mut self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         recv_timestamp: u64,
     ) {
@@ -63,7 +63,7 @@ impl super::Core for Core {
 
     fn on_read_incoming_packet(
         &mut self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
     ) {
@@ -72,7 +72,7 @@ impl super::Core for Core {
         });
     }
 
-    fn on_terminate(self, hardware: &mut impl Hardware) {
+    fn on_terminate(self, hardware: &impl Hardware) {
         if let Err(err) = self.state.unwrap().on_terminate(hardware) {
             log::error!("Error while terminating: {err:?}")
         }
@@ -88,24 +88,24 @@ enum_dispatch! {
         fn on_timer(
             self,
             config: &Config,
-            hardware: &mut impl Hardware,
+            hardware: &impl Hardware,
             timer_timestamp: u64,
         ) -> Result<ConnectionState>;
         fn on_read_outgoing_packet(
             self,
             config: &Config,
-            hardware: &mut impl Hardware,
+            hardware: &impl Hardware,
             packet: &[u8],
             recv_timestamp: u64,
         ) -> Result<ConnectionState>;
         fn on_read_incoming_packet(
             self,
             config: &Config,
-            hardware: &mut impl Hardware,
+            hardware: &impl Hardware,
             packet: &[u8],
             peer: SocketAddr,
         ) -> Result<ConnectionState>;
-        fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()>;
+        fn on_terminate(self, hardware: &impl Hardware) -> Result<()>;
     }
 
     #[derive(Debug)]
@@ -132,7 +132,7 @@ struct Negotiation {
 }
 
 impl NoConnection {
-    fn new(hardware: &mut impl Hardware) -> Result<Self> {
+    fn new(hardware: &impl Hardware) -> Result<Self> {
         hardware.clear_event_listeners()?;
         NoConnection::set_timer(hardware);
         Ok(NoConnection {
@@ -140,7 +140,7 @@ impl NoConnection {
         })
     }
 
-    fn set_timer(hardware: &mut impl Hardware) {
+    fn set_timer(hardware: &impl Hardware) {
         hardware.set_timer(hardware.timestamp() + 1_000_000_000);
     }
 }
@@ -149,7 +149,7 @@ impl ServerConnectionStateTrait for NoConnection {
     fn on_timer(
         mut self,
         _config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         // to simplify the Hardware struct, it only supports one timer. However, we may have
@@ -202,7 +202,7 @@ impl ServerConnectionStateTrait for NoConnection {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut impl Hardware,
+        _hardware: &impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -213,7 +213,7 @@ impl ServerConnectionStateTrait for NoConnection {
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
@@ -311,7 +311,7 @@ impl ServerConnectionStateTrait for NoConnection {
         }))
     }
 
-    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+    fn on_terminate(self, hardware: &impl Hardware) -> Result<()> {
         for negotiation in self.negotiations {
             let peer = negotiation.peer.clone();
             match negotiation.session.terminate() {
@@ -342,7 +342,7 @@ struct InProtocolHandshake {
 
 impl InProtocolHandshake {
     fn new(
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         session: dtls::EstablishedSession,
         peer: SocketAddr,
     ) -> Result<InProtocolHandshake> {
@@ -357,7 +357,7 @@ impl InProtocolHandshake {
 
     fn send_s2c_handshake(
         &mut self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         c2s_handshake: &messages::ClientToServerHandshake,
     ) -> Result<()> {
         let mut send_response = |success| {
@@ -412,7 +412,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     fn on_timer(
         self,
         _config: &Config,
-        _hardware: &mut impl Hardware,
+        _hardware: &impl Hardware,
         _timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         panic!("No timers set but we got on_timer'd!");
@@ -421,7 +421,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     fn on_read_outgoing_packet(
         self,
         _config: &Config,
-        _hardware: &mut impl Hardware,
+        _hardware: &impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -431,7 +431,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
@@ -504,7 +504,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
         }
     }
 
-    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+    fn on_terminate(self, hardware: &impl Hardware) -> Result<()> {
         for packet in self.session.terminate()? {
             hardware.send_outgoing_packet(&packet, self.peer, None)?;
         }
@@ -516,7 +516,7 @@ impl EstablishedConnection {
     // stupid naming _s because enum_dispatch won't let us use the same name here and in client
     fn handle_is_connection_open_s(
         self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         is_connection_open: IsConnectionOpen,
     ) -> Result<ConnectionState> {
         match is_connection_open {
@@ -541,7 +541,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
     fn on_timer(
         mut self,
         _config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         timer_timestamp: u64,
     ) -> Result<ConnectionState> {
         let is_connection_open =
@@ -552,7 +552,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
     fn on_read_outgoing_packet(
         mut self,
         _config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         recv_timestamp: u64,
     ) -> Result<ConnectionState> {
@@ -563,7 +563,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
     fn on_read_incoming_packet(
         mut self,
         _config: &Config,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
@@ -578,7 +578,7 @@ impl ServerConnectionStateTrait for EstablishedConnection {
         self.handle_is_connection_open_s(hardware, is_connection_open)
     }
 
-    fn on_terminate(self, hardware: &mut impl Hardware) -> Result<()> {
+    fn on_terminate(self, hardware: &impl Hardware) -> Result<()> {
         let peer = self.peer();
         for packet in EstablishedConnection::on_terminate_inner(self)? {
             hardware.send_outgoing_packet(&packet, peer, None)?;

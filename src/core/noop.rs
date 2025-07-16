@@ -8,7 +8,7 @@ use crate::hardware::Hardware;
 pub(crate) struct Core {}
 
 impl Core {
-    pub(crate) fn new(hardware: &mut impl Hardware) -> Result<Core> {
+    pub(crate) fn new(hardware: &impl Hardware) -> Result<Core> {
         // At first, I thought we might not want to clear the listeners here because in a test we
         // might want to install a Core, replace it with a noop for a while, then re-replace it with
         // a Core...but this could break certain expectations of the Core, for example Cores rely on
@@ -20,13 +20,13 @@ impl Core {
 }
 
 impl super::Core for Core {
-    fn on_timer(&mut self, _hardware: &mut impl Hardware, _timer_timestamp: u64) {
+    fn on_timer(&mut self, _hardware: &impl Hardware, _timer_timestamp: u64) {
         panic!("noop core shouldn't have timer triggered");
     }
 
     fn on_read_outgoing_packet(
         &mut self,
-        _hardware: &mut impl Hardware,
+        _hardware: &impl Hardware,
         _packet: &[u8],
         _recv_timestamp: u64,
     ) {
@@ -35,11 +35,11 @@ impl super::Core for Core {
 
     fn on_read_incoming_packet(
         &mut self,
-        _hardware: &mut impl Hardware,
+        _hardware: &impl Hardware,
         _packet: &[u8],
         _peer: SocketAddr,
     ) {
     }
 
-    fn on_terminate(self, _hardware: &mut impl Hardware) {}
+    fn on_terminate(self, _hardware: &impl Hardware) {}
 }

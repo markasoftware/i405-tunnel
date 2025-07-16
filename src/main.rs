@@ -46,13 +46,13 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let mut hardware = hardware::sleepy::SleepyHardware::new(
+            let hardware = hardware::sleepy::SleepyHardware::new(
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
             )
             .expect("Failed to construct SleepyHardware");
-            let core = make_core(&configuration, &mut hardware);
+            let core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (sleepy)");
             hardware.run(core);
         }
@@ -62,13 +62,13 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let mut hardware = hardware::spinny::SpinnyHardware::new(
+            let hardware = hardware::spinny::SpinnyHardware::new(
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
             )
             .expect("Failed to construct SpinnyHardware");
-            let core = make_core(&configuration, &mut hardware);
+            let core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (spinny)");
             hardware.run(core);
         }
@@ -77,7 +77,7 @@ fn main() {
 
 fn make_core(
     configuration: &config_cli::ConfigCli,
-    hardware: &mut impl Hardware,
+    hardware: &impl Hardware,
 ) -> core::ConcreteCore {
     let common_config_cli = configuration.common_config_cli();
 

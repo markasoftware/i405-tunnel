@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     net::{SocketAddr, UdpSocket},
     sync::{Arc, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
@@ -25,13 +26,13 @@ pub(crate) struct SleepyHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
     // for interval tracking
-    next_outgoing_packet_id: u64,
+    next_outgoing_packet_id: Cell<u64>,
     // true if the core has a pending request to read an outgoing packet
-    currently_reading_outgoing: bool,
+    currently_reading_outgoing: Cell<bool>,
     // we'll "connect" to this address to disconnect:
     _disconnect_addr: SocketAddr,
 
-    timer: Option<u64>,
+    timer: Cell<Option<u64>>,
     socket: Arc<UdpSocket>,
     tun: Arc<tun_rs::SyncDevice>,
     tun_is_shutdown: Arc<AtomicBool>,
@@ -91,11 +92,11 @@ impl SleepyHardware {
 
         Ok(Self {
             epoch,
-            next_outgoing_packet_id: 0,
-            currently_reading_outgoing: false,
+            next_outgoing_packet_id: Cell::new(0),
+            currently_reading_outgoing: Cell::new(false),
             _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
-            timer: None,
+            timer: Cell::new(None),
             socket,
             tun,
             tun_is_shutdown,
@@ -125,7 +126,7 @@ impl SleepyHardware {
 
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
-    pub(crate) fn run(&mut self, mut core: impl core::Core) {
+    pub(crate) fn run(&self, mut core: impl core::Core) {
         loop {
             // we don't do precise sleep for timers, because everything time-sensitive that the Core
             // does is done via timestamps on other core methods. It's never important that the core
@@ -133,7 +134,7 @@ impl SleepyHardware {
 
             // only set if the user requested a timer, /and/ that timer is short enough that we're
             // actually able to use it.
-            let event_or_timeout = match self.timer {
+            let event_or_timeout = match self.timer.get() {
                 Some(timer_nanos) => {
                     let timeout_instant = timestamp_to_instant(self.epoch, timer_nanos);
                     let overshoot_duration =
@@ -163,10 +164,10 @@ impl SleepyHardware {
                     // it back and forth between a slice and an IpPacketBuffer cause even more
                     // copying than necessary? Probably depends on inlining and stuff but I'm
                     // not sure!
-                    if self.currently_reading_outgoing {
+                    if self.currently_reading_outgoing.get() {
                         // important to set to false /before/ calling the event handler, because the
                         // event handler may set it back to true:
-                        self.currently_reading_outgoing = false;
+                        self.currently_reading_outgoing.replace(false);
                         core.on_read_outgoing_packet(self, &packet, timestamp);
                     }
                 }
@@ -175,7 +176,7 @@ impl SleepyHardware {
                 }
                 Ok(Event::Terminate) => return core.on_terminate(self),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let activated_timer = std::mem::take(&mut self.timer);
+                    let activated_timer = self.timer.take();
                     core.on_timer(self, activated_timer.unwrap());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -304,25 +305,25 @@ impl Hardware for SleepyHardware {
         instant_to_timestamp(self.epoch, Instant::now())
     }
 
-    fn set_timer(&mut self, timestamp: u64) -> Option<u64> {
-        std::mem::replace(&mut self.timer, Some(timestamp))
+    fn set_timer(&self, timestamp: u64) -> Option<u64> {
+        self.timer.replace(Some(timestamp))
     }
 
-    fn socket_connect(&mut self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
+    fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
         // TODO disconnection doesn't work right now so we don't connect at all:
         // self.socket.connect(socket_addr)?;
         Ok(())
     }
 
-    fn read_outgoing_packet(&mut self) {
-        self.currently_reading_outgoing = true;
+    fn read_outgoing_packet(&self) {
+        self.currently_reading_outgoing.replace(true);
         self.outgoing_read_thread.tx().send(()).unwrap();
     }
 
     // TODO consider remove Result from signature since it always succeeds (or, at least, we don't
     // want to fatally fail on a send error)
     fn send_outgoing_packet(
-        &mut self,
+        &self,
         packet: &[u8],
         destination: std::net::SocketAddr,
         timestamp: Option<u64>,
@@ -345,16 +346,17 @@ impl Hardware for SleepyHardware {
         }
         if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
             deviation_stats_thread.register_packet(
-                self.next_outgoing_packet_id,
+                self.next_outgoing_packet_id.get(),
                 instant_to_timestamp(self.epoch, actual_socket_send_instant),
             );
         }
-        self.next_outgoing_packet_id += 1;
+        self.next_outgoing_packet_id
+            .replace(self.next_outgoing_packet_id.get() + 1);
         Ok(())
     }
 
     // TODO like above, consider changing the signature, since this always succeeds.
-    fn send_incoming_packet(&mut self, packet: &[u8]) -> Result<()> {
+    fn send_incoming_packet(&self, packet: &[u8]) -> Result<()> {
         match self.tun.send(packet) {
             Ok(len) => {
                 if len != packet.len() {
@@ -370,9 +372,9 @@ impl Hardware for SleepyHardware {
         Ok(())
     }
 
-    fn clear_event_listeners(&mut self) -> Result<()> {
-        self.timer = None;
-        self.currently_reading_outgoing = false;
+    fn clear_event_listeners(&self) -> Result<()> {
+        self.timer.replace(None);
+        self.currently_reading_outgoing.replace(false);
         // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
@@ -381,21 +383,22 @@ impl Hardware for SleepyHardware {
         Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1).unwrap_or(u16::MAX))
     }
 
-    fn register_interval(&mut self, duration: u64) {
+    fn register_interval(&self, duration: u64) {
         assert!(
-            self.next_outgoing_packet_id > 0,
+            self.next_outgoing_packet_id.get() > 0,
             "Must send an outgoing packet before calling register_interval"
         );
         if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            let next_outgoing_packet_id = self.next_outgoing_packet_id.get();
             deviation_stats_thread.register_interval(
-                self.next_outgoing_packet_id - 1,
-                self.next_outgoing_packet_id,
+                next_outgoing_packet_id - 1,
+                next_outgoing_packet_id,
                 duration,
             );
         }
     }
 
-    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
+    fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
         configure_qdisc(&self.tun.name()?, &self.tun, settings)
     }
 }

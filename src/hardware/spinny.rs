@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     net::{SocketAddr, UdpSocket},
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
@@ -24,13 +25,13 @@ pub(crate) struct SpinnyHardware {
     epoch: Instant,
     _disconnect_addr: SocketAddr,
 
-    timer: Option<u64>,
+    timer: Cell<Option<u64>>,
     // whether we are actively polling for an outgoing read
-    read_outgoing: bool,
+    read_outgoing: Cell<bool>,
     // set to true if we should shut down when able
     shutting_down: Arc<AtomicBool>,
 
-    next_outgoing_packet_id: u64,
+    next_outgoing_packet_id: Cell<u64>,
     deviation_stats_thread: Option<DeviationStatsThread>,
 
     socket: UdpSocket,
@@ -66,11 +67,11 @@ impl SpinnyHardware {
             epoch,
             _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
-            timer: None,
-            read_outgoing: false,
+            timer: Cell::new(None),
+            read_outgoing: Cell::new(false),
             shutting_down,
 
-            next_outgoing_packet_id: 0,
+            next_outgoing_packet_id: Cell::new(0),
             deviation_stats_thread: deviation_stats
                 .map(|duration| DeviationStatsThread::spawn(duration)),
 
@@ -79,27 +80,27 @@ impl SpinnyHardware {
         })
     }
 
-    pub(crate) fn run(&mut self, mut core: impl core::Core) {
+    pub(crate) fn run(&self, mut core: impl core::Core) {
         // 1. Check if we should shut down
         while !self
             .shutting_down
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             // 1. Timer
-            if let Some(timer) = self.timer {
+            if let Some(timer) = self.timer.get() {
                 if Instant::now() >= timestamp_to_instant(self.epoch, timer) {
                     core.on_timer(self, timer);
                 }
             }
 
             // 2. Read Outgoing
-            if self.read_outgoing {
+            if self.read_outgoing.get() {
                 // ideally we'd put this recv outside the loop, but given how small it is I
                 // don't think it matters.
                 let mut tun_recv_buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
                 match self.tun.recv(&mut tun_recv_buf) {
                     Ok(len) => {
-                        self.read_outgoing = false;
+                        self.read_outgoing.replace(false);
                         tun_recv_buf.shrink(len);
                         core.on_read_outgoing_packet(
                             self,
@@ -149,23 +150,23 @@ impl Hardware for SpinnyHardware {
             .unwrap()
     }
 
-    fn set_timer(&mut self, timestamp: u64) -> Option<u64> {
-        std::mem::replace(&mut self.timer, Some(timestamp))
+    fn set_timer(&self, timestamp: u64) -> Option<u64> {
+        self.timer.replace(Some(timestamp))
     }
 
-    fn socket_connect(&mut self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
+    fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
         // Socket disconnection doesn't work right now so we don't connect at all:
         // self.socket.connect(socket_addr)?;
         Ok(())
     }
 
     // remaining are different than in SleepyHardware
-    fn read_outgoing_packet(&mut self) {
-        self.read_outgoing = true;
+    fn read_outgoing_packet(&self) {
+        self.read_outgoing.replace(true);
     }
 
     fn send_outgoing_packet(
-        &mut self,
+        &self,
         packet: &[u8],
         destination: std::net::SocketAddr,
         timestamp: Option<u64>,
@@ -179,24 +180,25 @@ impl Hardware for SpinnyHardware {
         }
         if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
             deviation_stats_thread.register_packet(
-                self.next_outgoing_packet_id,
+                self.next_outgoing_packet_id.get(),
                 instant_to_timestamp(self.epoch, socket_send_instant),
             );
         }
-        self.next_outgoing_packet_id += 1;
+        self.next_outgoing_packet_id
+            .set(self.next_outgoing_packet_id.get() + 1);
         Ok(())
     }
 
-    fn send_incoming_packet(&mut self, packet: &[u8]) -> Result<()> {
+    fn send_incoming_packet(&self, packet: &[u8]) -> Result<()> {
         if let Err(err) = self.tun.send(packet) {
             log::error!("Error sending incoming packet (over TUN): {err:?}");
         }
         Ok(())
     }
 
-    fn clear_event_listeners(&mut self) -> Result<()> {
-        self.timer = None;
-        self.read_outgoing = false;
+    fn clear_event_listeners(&self) -> Result<()> {
+        self.timer.replace(None);
+        self.read_outgoing.replace(false);
         // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
@@ -205,21 +207,22 @@ impl Hardware for SpinnyHardware {
         Ok(u16::try_from(mtu::interface_and_mtu(peer.ip())?.1).unwrap_or(u16::MAX))
     }
 
-    fn register_interval(&mut self, duration: u64) {
+    fn register_interval(&self, duration: u64) {
         assert!(
-            self.next_outgoing_packet_id > 0,
+            self.next_outgoing_packet_id.get() > 0,
             "Must send an outgoing packet before registering an interval"
         );
         if let Some(deviation_stats_thread) = &self.deviation_stats_thread {
+            let next_outgoing_packet_id = self.next_outgoing_packet_id.get();
             deviation_stats_thread.register_interval(
-                self.next_outgoing_packet_id - 1,
-                self.next_outgoing_packet_id,
+                next_outgoing_packet_id - 1,
+                next_outgoing_packet_id,
                 duration,
             );
         }
     }
 
-    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
+    fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
         configure_qdisc(&self.tun.name()?, &self.tun, settings)
     }
 }

@@ -36,7 +36,7 @@ struct OutgoingConnection {
 }
 
 impl OutgoingConnection {
-    fn new(hardware: &mut impl Hardware) -> Self {
+    fn new(hardware: &impl Hardware) -> Self {
         // unless we have a queued packet (which we don't yet), we want the hardware to always know
         // we are ready to read an outgoing packet.
         hardware.read_outgoing_packet();
@@ -50,7 +50,7 @@ impl OutgoingConnection {
     /// can be flushed into the new buffer.
     fn try_to_dequeue(
         &mut self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
     ) {
         // this indirection is me being afraid that we're going to accidentally reallocate
@@ -80,7 +80,7 @@ impl OutgoingConnection {
 
     fn on_read_outgoing_packet<H: Hardware>(
         &mut self,
-        hardware: &mut H,
+        hardware: &H,
         write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
         packet: &[u8],
         _recv_timestamp: u64,
@@ -97,7 +97,7 @@ impl OutgoingConnection {
 
 impl EstablishedConnection {
     pub(crate) fn new(
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         session: dtls::EstablishedSession,
         peer: std::net::SocketAddr,
         outgoing_wire_config: WireConfig,
@@ -135,7 +135,7 @@ impl EstablishedConnection {
 
     pub(crate) fn on_timer(
         &mut self,
-        hardware: &mut impl Hardware,
+        hardware: &impl Hardware,
         timer_timestamp: u64,
     ) -> Result<IsConnectionOpen> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
@@ -173,7 +173,7 @@ impl EstablishedConnection {
 
     pub(crate) fn on_read_outgoing_packet<H: Hardware>(
         &mut self,
-        hardware: &mut H,
+        hardware: &H,
         packet: &[u8],
         recv_timestamp: u64,
     ) {
@@ -189,7 +189,7 @@ impl EstablishedConnection {
     /// other side terminated the connection normally in this packet.
     pub(crate) fn on_read_incoming_packet<H: Hardware>(
         &mut self,
-        hardware: &mut H,
+        hardware: &H,
         packet: &[u8],
     ) -> Result<IsConnectionOpen> {
         match self.session.decrypt_datagram(packet) {
@@ -214,7 +214,7 @@ impl EstablishedConnection {
 
     pub(crate) fn on_read_incoming_cleartext_packet<H: Hardware>(
         &mut self,
-        hardware: &mut H,
+        hardware: &H,
         packet: &[u8],
     ) -> Result<()> {
         let mut cursor = messages::ReadCursor::new(packet);

@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::cmp::min;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -15,39 +16,39 @@ use super::real::QdiscSettings;
 struct OneSideInfo {
     addr: SocketAddr,
     // if socket_connect has been called, then only accept incoming packets from this address
-    connected_addr: Option<SocketAddr>,
-    qdisc_settings: Option<QdiscSettings>,
+    connected_addr: Cell<Option<SocketAddr>>,
+    qdisc_settings: Cell<Option<QdiscSettings>>,
 
     /// Packets already sent out by the side. A little bit cursed because it's in the order that
     /// send_outgoing_packet is called, rather than by send_timestamp, so it's possible for
     /// send_timestamps to not be in ascending order here.
-    sent_outgoing_packets: Vec<WanPacket>,
+    sent_outgoing_packets: RefCell<Vec<WanPacket>>,
     /// Packets to be read by this side, along with the time they'll become available.
-    unread_outgoing_packets: VecDeque<IpPacketBuffer>,
+    unread_outgoing_packets: RefCell<VecDeque<IpPacketBuffer>>,
 
-    unread_incoming_packets: BinaryHeap<WanPacket>,
-    sent_incoming_packets: Vec<LocalPacket>,
+    unread_incoming_packets: RefCell<BinaryHeap<WanPacket>>,
+    sent_incoming_packets: RefCell<Vec<LocalPacket>>,
 
     /// For each outgoing packet that's been read by the core, what timestamp was it read at?
-    outgoing_read_times: Vec<u64>,
+    outgoing_read_times: RefCell<Vec<u64>>,
     // The next time we should wake up this thread.
-    timer: Option<u64>,
-    should_read_outgoing: bool,
+    timer: Cell<Option<u64>>,
+    should_read_outgoing: Cell<bool>,
 }
 
 impl OneSideInfo {
     fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
-            connected_addr: None,
-            qdisc_settings: None,
-            sent_outgoing_packets: Vec::new(),
-            unread_outgoing_packets: VecDeque::new(),
-            unread_incoming_packets: BinaryHeap::new(),
-            sent_incoming_packets: Vec::new(),
-            outgoing_read_times: Vec::new(),
-            timer: None,
-            should_read_outgoing: false,
+            connected_addr: Cell::new(None),
+            qdisc_settings: Cell::new(None),
+            sent_outgoing_packets: RefCell::new(Vec::new()),
+            unread_outgoing_packets: RefCell::new(VecDeque::new()),
+            unread_incoming_packets: RefCell::new(BinaryHeap::new()),
+            sent_incoming_packets: RefCell::new(Vec::new()),
+            outgoing_read_times: RefCell::new(Vec::new()),
+            timer: Cell::new(None),
+            should_read_outgoing: Cell::new(false),
         }
     }
 }
@@ -89,8 +90,8 @@ pub(crate) struct SimulatedHardware {
     peers: BTreeMap<SocketAddr, OneSideInfo>,
     /// All packets that have been sent from any of the sides are collected here in addition to the
     /// specific peers they were sent from/to.
-    all_wan_packets: Vec<WanPacket>,
-    packet_counter: u64,
+    all_wan_packets: RefCell<Vec<WanPacket>>,
+    packet_counter: Cell<u64>,
     packets_to_drop: HashSet<u64>,
     /// Additional delay beyond the `default_delay`
     packets_to_delay: HashMap<u64, u64>,
@@ -106,8 +107,8 @@ impl SimulatedHardware {
                     .into_iter()
                     .map(|addr| (addr, OneSideInfo::new(addr))),
             ),
-            all_wan_packets: Vec::new(),
-            packet_counter: 0,
+            all_wan_packets: RefCell::new(Vec::new()),
+            packet_counter: Cell::new(0),
             packets_to_drop: HashSet::new(),
             packets_to_delay: HashMap::new(),
             default_delay,
@@ -115,7 +116,7 @@ impl SimulatedHardware {
         }
     }
 
-    pub(crate) fn hardware<'a>(&'a mut self, addr: SocketAddr) -> OneSideHardware<'a> {
+    pub(crate) fn hardware<'a>(&'a self, addr: SocketAddr) -> OneSideHardware<'a> {
         OneSideHardware {
             simulated: self,
             our_addr: addr,
@@ -124,30 +125,33 @@ impl SimulatedHardware {
 
     pub(crate) fn make_outgoing_packet(&mut self, addr: &SocketAddr, packet: &[u8]) {
         self.peers
-            .get_mut(addr)
+            .get(addr)
             .expect("Non-existent `addr` to make_outgoing_packet")
             .unread_outgoing_packets
+            .borrow_mut()
             .push_back(IpPacketBuffer::new(packet));
     }
 
-    pub(crate) fn sent_incoming_packets(&self, addr: &SocketAddr) -> &Vec<LocalPacket> {
-        &self.peers[addr].sent_incoming_packets
+    // for the next few methods, since it's only for testing it's better to just clone rather than
+    // to deal with returning a Ref
+    pub(crate) fn sent_incoming_packets(&self, addr: &SocketAddr) -> Vec<LocalPacket> {
+        self.peers[addr].sent_incoming_packets.borrow().clone()
     }
 
-    pub(crate) fn sent_outgoing_packets(&self, addr: &SocketAddr) -> &Vec<WanPacket> {
-        &self.peers[addr].sent_outgoing_packets
+    pub(crate) fn sent_outgoing_packets(&self, addr: &SocketAddr) -> Vec<WanPacket> {
+        self.peers[addr].sent_outgoing_packets.borrow().clone()
     }
 
-    pub(crate) fn all_wan_packets(&self) -> &Vec<WanPacket> {
-        &self.all_wan_packets
+    pub(crate) fn all_wan_packets(&self) -> Vec<WanPacket> {
+        self.all_wan_packets.borrow().clone()
     }
 
-    pub(crate) fn qdisc_settings(&self, addr: &SocketAddr) -> Option<&QdiscSettings> {
-        self.peers[addr].qdisc_settings.as_ref()
+    pub(crate) fn qdisc_settings(&self, addr: &SocketAddr) -> Option<QdiscSettings> {
+        self.peers[addr].qdisc_settings.get()
     }
 
     pub(crate) fn drop_packet(&mut self, nth: u64) {
-        let counter_to_drop = self.packet_counter + nth;
+        let counter_to_drop = self.packet_counter.get() + nth;
         assert!(
             !self.packets_to_drop.contains(&counter_to_drop),
             "Already were gonna drop packet {} (nth: {})",
@@ -158,7 +162,7 @@ impl SimulatedHardware {
     }
 
     pub(crate) fn delay_packet(&mut self, nth: u64, duration: u64) {
-        let counter_to_delay = self.packet_counter + nth;
+        let counter_to_delay = self.packet_counter.get() + nth;
         assert!(
             !self.packets_to_delay.contains_key(&counter_to_delay),
             "Already were gonna delay packet {} (nth: {})",
@@ -194,7 +198,7 @@ impl SimulatedHardware {
                     .expect("Missing addr from cores argument to run_until");
 
                 // timer
-                if let Some(timer) = peer.timer {
+                if let Some(timer) = peer.timer.get() {
                     assert!(
                         timer >= timestamp,
                         "We slept past a timer? Or maybe timer was set in the past? Timer {} vs timestamp {}",
@@ -215,15 +219,17 @@ impl SimulatedHardware {
                 }
 
                 // scheduled read outgoing
-                if peer.should_read_outgoing {
-                    if let Some(outgoing_packet) = peer.unread_outgoing_packets.pop_front() {
-                        peer.should_read_outgoing = false;
+                if peer.should_read_outgoing.get() {
+                    if let Some(outgoing_packet) =
+                        peer.unread_outgoing_packets.get_mut().pop_front()
+                    {
+                        peer.should_read_outgoing.set(false);
                         self.debug(format!(
                             "Reading outgoing packet on {} at {}ns",
                             addr, timestamp
                         ));
                         core.on_read_outgoing_packet(
-                            &mut self.hardware(addr),
+                            &self.hardware(addr),
                             &outgoing_packet,
                             timestamp,
                         );
@@ -232,10 +238,11 @@ impl SimulatedHardware {
                 }
 
                 // read incoming
-                if let Some(incoming_packet) = peer.unread_incoming_packets.peek() {
+                let unread_incoming_packets = peer.unread_incoming_packets.get_mut();
+                if let Some(incoming_packet) = unread_incoming_packets.peek() {
                     if timestamp >= incoming_packet.receipt_timestamp {
-                        let incoming_packet = peer.unread_incoming_packets.pop().unwrap();
-                        if let Some(connected_addr) = peer.connected_addr {
+                        let incoming_packet = unread_incoming_packets.pop().unwrap();
+                        if let Some(connected_addr) = peer.connected_addr.get() {
                             if connected_addr != incoming_packet.source {
                                 self.debug(format!("Connected to {} but got packet from {} of size {}, on {}. Dropping.", connected_addr, incoming_packet.source, incoming_packet.buffer.len(), addr));
                             }
@@ -252,7 +259,7 @@ impl SimulatedHardware {
                         );
                         assert_eq!(incoming_packet.dest, addr);
                         core.on_read_incoming_packet(
-                            &mut self.hardware(addr),
+                            &self.hardware(addr),
                             &incoming_packet.buffer,
                             incoming_packet.source,
                         );
@@ -280,19 +287,19 @@ impl SimulatedHardware {
 }
 
 pub(crate) struct OneSideHardware<'a> {
-    simulated: &'a mut SimulatedHardware,
+    simulated: &'a SimulatedHardware,
     our_addr: SocketAddr,
 }
 
 impl<'a> OneSideHardware<'a> {
-    fn our_side(&mut self) -> &mut OneSideInfo {
-        self.simulated.peers.get_mut(&self.our_addr).unwrap()
+    fn our_side(&self) -> &OneSideInfo {
+        self.simulated.peers.get(&self.our_addr).unwrap()
     }
 }
 
 impl<'a> Hardware for OneSideHardware<'a> {
-    fn set_timer(&mut self, timestamp: u64) -> Option<u64> {
-        let old_timestamp = std::mem::replace(&mut self.our_side().timer, Some(timestamp));
+    fn set_timer(&self, timestamp: u64) -> Option<u64> {
+        let old_timestamp = self.our_side().timer.replace(Some(timestamp));
         self.simulated.debug(format!(
             "Setting timer for {} to {}ns (used to be {:?})",
             self.our_addr, timestamp, old_timestamp
@@ -304,18 +311,18 @@ impl<'a> Hardware for OneSideHardware<'a> {
         self.simulated.timestamp.clone()
     }
 
-    fn read_outgoing_packet(&mut self) {
-        self.our_side().should_read_outgoing = true;
+    fn read_outgoing_packet(&self) {
+        self.our_side().should_read_outgoing.set(true);
     }
 
     fn send_outgoing_packet(
-        &mut self,
+        &self,
         packet: &[u8],
         destination: SocketAddr,
         timestamp: Option<u64>,
     ) -> Result<()> {
-        let packet_counter = self.simulated.packet_counter;
-        self.simulated.packet_counter += 1;
+        let packet_counter = self.simulated.packet_counter.get();
+        self.simulated.packet_counter.set(packet_counter + 1);
 
         let sent_timestamp = timestamp.unwrap_or(self.timestamp());
 
@@ -357,33 +364,43 @@ impl<'a> Hardware for OneSideHardware<'a> {
 
         self.our_side()
             .sent_outgoing_packets
+            .borrow_mut()
             .push(wan_packet.clone());
-        self.simulated.all_wan_packets.push(wan_packet.clone());
-        if let Some(destination_peer) = self.simulated.peers.get_mut(&destination) {
-            destination_peer.unread_incoming_packets.push(wan_packet);
+        self.simulated
+            .all_wan_packets
+            .borrow_mut()
+            .push(wan_packet.clone());
+        if let Some(destination_peer) = self.simulated.peers.get(&destination) {
+            destination_peer
+                .unread_incoming_packets
+                .borrow_mut()
+                .push(wan_packet);
         }
 
         Ok(())
     }
 
-    fn send_incoming_packet(&mut self, packet: &[u8]) -> Result<()> {
+    fn send_incoming_packet(&self, packet: &[u8]) -> Result<()> {
         let timestamp = self.timestamp();
-        self.our_side().sent_incoming_packets.push(LocalPacket {
-            buffer: IpPacketBuffer::new(packet),
-            timestamp,
-        });
+        self.our_side()
+            .sent_incoming_packets
+            .borrow_mut()
+            .push(LocalPacket {
+                buffer: IpPacketBuffer::new(packet),
+                timestamp,
+            });
         Ok(())
     }
 
-    fn socket_connect(&mut self, addr: &SocketAddr) -> Result<()> {
-        self.our_side().connected_addr = Some(*addr);
+    fn socket_connect(&self, addr: &SocketAddr) -> Result<()> {
+        self.our_side().connected_addr.set(Some(*addr));
         Ok(())
     }
 
-    fn clear_event_listeners(&mut self) -> Result<()> {
-        self.our_side().timer = None;
-        self.our_side().should_read_outgoing = false;
-        self.our_side().connected_addr = None;
+    fn clear_event_listeners(&self) -> Result<()> {
+        self.our_side().timer.set(None);
+        self.our_side().should_read_outgoing.set(false);
+        self.our_side().connected_addr.set(None);
         Ok(())
     }
 
@@ -391,10 +408,12 @@ impl<'a> Hardware for OneSideHardware<'a> {
         Ok(MAX_IP_PACKET_LENGTH.try_into().unwrap())
     }
 
-    fn register_interval(&mut self, _duration: u64) {}
+    fn register_interval(&self, _duration: u64) {}
 
-    fn configure_qdisc(&mut self, settings: &QdiscSettings) -> Result<()> {
-        self.our_side().qdisc_settings = Some(settings.clone());
+    fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
+        self.our_side()
+            .qdisc_settings
+            .replace(Some(settings.clone()));
         Ok(())
     }
 }

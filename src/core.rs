@@ -24,15 +24,15 @@ const C2S_MAX_TIMEOUT: u64 = 60_000_000_000;
 // Core is not dyn-compatible because it's generic on Hardware
 enum_dispatch! {
     pub(crate) trait Core {
-        fn on_timer(&mut self, hardware: &mut impl Hardware, timer_timestamp: u64);
+        fn on_timer(&mut self, hardware: &impl Hardware, timer_timestamp: u64);
         fn on_read_outgoing_packet(
             &mut self,
-            hardware: &mut impl Hardware,
+            hardware: &impl Hardware,
             packet: &[u8],
             recv_timestamp: u64,
         );
-        fn on_read_incoming_packet(&mut self, hardware: &mut impl Hardware, packet: &[u8], peer: SocketAddr);
-        fn on_terminate(self, hardware: &mut impl Hardware);
+        fn on_read_incoming_packet(&mut self, hardware: &impl Hardware, packet: &[u8], peer: SocketAddr);
+        fn on_terminate(self, hardware: &impl Hardware);
     }
 
     pub(crate) enum ConcreteCore {

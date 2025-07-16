@@ -79,14 +79,14 @@ fn simulated_pair(
     server_wire_config: WireConfig,
     default_delay: u64,
 ) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
-    let mut simulated_hardware =
+    let simulated_hardware =
         SimulatedHardware::new(vec![client_addr(), server_addr()], default_delay);
     let server_core = core::server::Core::new(
         core::server::Config {
             pre_shared_key: PSK.into(),
             should_configure_qdisc: true,
         },
-        &mut simulated_hardware.hardware(server_addr()),
+        &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let client_core = core::client::Core::new(
@@ -97,7 +97,7 @@ fn simulated_pair(
             server_wire_config,
             should_configure_qdisc: true,
         },
-        &mut simulated_hardware.hardware(client_addr()),
+        &simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
     let cores = BTreeMap::from([
@@ -157,7 +157,7 @@ fn simple() {
 
     assert_eq!(
         simulated_hardware.sent_incoming_packets(&client_addr()),
-        &vec![LocalPacket {
+        vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[4, 3, 2, 1]),
             // 1.423 = time for the initial handshake, then 1.411 = interval after that
             timestamp: ms(1.423 + 1.411),
@@ -165,7 +165,7 @@ fn simple() {
     );
     assert_eq!(
         simulated_hardware.sent_incoming_packets(&server_addr()),
-        &vec![LocalPacket {
+        vec![LocalPacket {
             buffer: IpPacketBuffer::new(&[1, 4, 0, 5]),
             timestamp: ms(1.423),
         }]
@@ -248,7 +248,7 @@ fn fragmentation() {
     simulated_hardware.run_until(&mut cores, ms(4.5));
     assert_eq!(
         simulated_hardware.sent_incoming_packets(&client_addr()),
-        &vec![LocalPacket {
+        vec![LocalPacket {
             buffer: packet,
             timestamp: ms(1.423 + 1.411 * 2.0),
         }]
@@ -369,7 +369,7 @@ fn packing() {
 
     assert_eq!(
         simulated_hardware.sent_incoming_packets(&server_addr()),
-        &vec![
+        vec![
             LocalPacket {
                 buffer: long_packet(first_message_length),
                 timestamp: ms(1.423),

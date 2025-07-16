@@ -86,7 +86,7 @@ pub(crate) fn set_sched_fifo() -> Result<()> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct QdiscSettings {
     fq_flow_limit: u64,
     fq_quantum: u64,
