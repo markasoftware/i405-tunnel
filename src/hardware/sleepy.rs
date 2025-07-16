@@ -119,8 +119,7 @@ impl SleepyHardware {
                     incoming_read_socket,
                 )
             }),
-            deviation_stats_thread: deviation_stats
-                .map(|duration| DeviationStatsThread::spawn(duration)),
+            deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
         })
     }
 

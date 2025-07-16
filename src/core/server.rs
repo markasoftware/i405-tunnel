@@ -217,11 +217,10 @@ impl ServerConnectionStateTrait for NoConnection {
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
-        if self
+        if !self
             .negotiations
             .iter()
-            .find(|negotiation| negotiation.peer == peer)
-            .is_none()
+            .any(|negotiation| negotiation.peer == peer)
         {
             // start a negotiation
             log::info!("New DTLS handshake started with {}", peer);
@@ -313,7 +312,7 @@ impl ServerConnectionStateTrait for NoConnection {
 
     fn on_terminate(self, hardware: &impl Hardware) -> Result<()> {
         for negotiation in self.negotiations {
-            let peer = negotiation.peer.clone();
+            let peer = negotiation.peer;
             match negotiation.session.terminate() {
                 Ok(send_these) => {
                     for packet in send_these {
@@ -448,7 +447,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
             dtls::DecryptResult::Terminated => {
                 return Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?));
             }
-            dtls::DecryptResult::Err(err) => return Err(err.into()),
+            dtls::DecryptResult::Err(err) => return Err(err),
         };
 
         let mut read_cursor = messages::ReadCursor::new(cleartext_packet.clone());

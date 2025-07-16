@@ -271,7 +271,7 @@ where
     fn read_exact_comptime<const NUM: usize>(&mut self) -> Option<[u8; NUM]> {
         let result = self.peek_exact_comptime::<NUM>();
         if result.is_some() {
-            self.position = self.position + NUM;
+            self.position += NUM;
         }
         result
     }
@@ -320,7 +320,7 @@ impl<const C: usize> WriteCursor<ArrayArray<u8, C>> {
 
     fn write_exact(&mut self, buf: &[u8]) -> bool {
         if self.num_bytes_left() >= buf.len() {
-            self.position = self.position + buf.len();
+            self.position += buf.len();
             self.underlying[self.position - buf.len()..self.position].copy_from_slice(buf);
             true
         } else {
@@ -382,7 +382,7 @@ mod serdes {
 
     impl Serializer for LengthDeterminingSerializer {
         fn serialize(&mut self, data: &[u8]) {
-            self.length = self.length + data.len();
+            self.length += data.len();
         }
     }
 

@@ -72,8 +72,7 @@ impl SpinnyHardware {
             shutting_down,
 
             next_outgoing_packet_id: Cell::new(0),
-            deviation_stats_thread: deviation_stats
-                .map(|duration| DeviationStatsThread::spawn(duration)),
+            deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
 
             socket,
             tun,

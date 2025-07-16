@@ -341,7 +341,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         hardware: &impl Hardware,
         packet: &[u8],
     ) -> Result<ConnectionState> {
-        let cleartext_packet = match self.session.decrypt_datagram(&packet) {
+        let cleartext_packet = match self.session.decrypt_datagram(packet) {
             dtls::DecryptResult::Decrypted(cleartext_packet) => cleartext_packet,
             dtls::DecryptResult::SendThese(send_these) => {
                 for packet in send_these {
@@ -354,7 +354,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                     config, hardware,
                 )?));
             }
-            dtls::DecryptResult::Err(err) => return Err(err.into()),
+            dtls::DecryptResult::Err(err) => return Err(err),
         };
         // It really should be an S2C handshake. The server shouldn't send us anything but an
         // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
@@ -459,7 +459,7 @@ impl ConnectionStateTrait for EstablishedConnection {
     ) -> Result<ConnectionState> {
         let is_connection_open =
             EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
-        return self.handle_is_connection_open_c(config, hardware, is_connection_open);
+        self.handle_is_connection_open_c(config, hardware, is_connection_open)
     }
 
     fn on_read_outgoing_packet(

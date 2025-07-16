@@ -249,7 +249,7 @@ impl EstablishedConnection {
     // defined on EstablishedConnection as part of the connection state traits. This is likely a bug
     // with the declarative_enum_dispatch crate. Not sure why it doesn't affect the other methods.
     pub(crate) fn on_terminate_inner(self) -> Result<Vec<IpPacketBuffer>> {
-        Ok(self.session.terminate()?)
+        self.session.terminate()
     }
 }
 

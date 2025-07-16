@@ -254,8 +254,8 @@ impl EzClap for CommonConfigCli {
             tun_mtu: matches.get_one::<u16>("tun_mtu").cloned(),
             tun_ipv4: matches.get_one::<String>("tun_ipv4").cloned(),
             tun_ipv6: matches.get_one::<String>("tun_ipv6").cloned(),
-            no_tun_qdisc: matches.get_one::<bool>("no_tun_qdisc").unwrap().clone(),
-            no_sched_fifo: matches.get_one::<bool>("no_sched_fifo").unwrap().clone(),
+            no_tun_qdisc: *matches.get_one::<bool>("no_tun_qdisc").unwrap(),
+            no_sched_fifo: *matches.get_one::<bool>("no_sched_fifo").unwrap(),
             outgoing_send_deviation_stats: matches
                 .get_one::<Duration>("outgoing_send_deviation_stats")
                 .cloned(),

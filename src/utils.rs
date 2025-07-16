@@ -32,11 +32,11 @@ pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {
 }
 
 pub(crate) fn instant_to_timestamp(epoch: Instant, instant: Instant) -> u64 {
-    return instant
+    instant
         .saturating_duration_since(epoch)
         .as_nanos()
         .try_into()
-        .unwrap();
+        .unwrap()
 }
 
 pub(crate) struct BasicStats {
@@ -65,7 +65,7 @@ impl BasicStats {
             p50: vec[vec.len() / 2],
             p99: vec[vec.len() * 99 / 100],
             p999: vec[vec.len() * 999 / 1000],
-            max: vec.iter().max().unwrap().clone(),
+            max: *vec.iter().max().unwrap(),
         }
     }
 }
@@ -90,7 +90,7 @@ struct JThread {
 }
 
 impl JThread {
-    fn spawn<F: FnOnce() -> () + Send + 'static>(f: F) -> Self {
+    fn spawn<F: FnOnce() + Send + 'static>(f: F) -> Self {
         Self {
             join_handle: Some(std::thread::spawn(f)),
         }
@@ -115,7 +115,7 @@ pub(crate) struct ChannelThread<TX> {
 }
 
 impl<TX> ChannelThread<TX> {
-    pub(crate) fn spawn<F: FnOnce() -> () + Send + 'static>(tx: mpsc::Sender<TX>, f: F) -> Self {
+    pub(crate) fn spawn<F: FnOnce() + Send + 'static>(tx: mpsc::Sender<TX>, f: F) -> Self {
         Self {
             tx,
             _jthread: JThread::spawn(f),
