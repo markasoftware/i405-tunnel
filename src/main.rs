@@ -6,6 +6,7 @@ use hardware::{
 use wire_config::to_wire_configs;
 
 mod array_array;
+mod bitvecdeque;
 mod config_cli;
 mod constants;
 mod core;
