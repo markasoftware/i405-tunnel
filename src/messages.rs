@@ -41,6 +41,8 @@ impl PacketBuilder {
 pub(crate) enum Message {
     ClientToServerHandshake(ClientToServerHandshake),
     ServerToClientHandshake(ServerToClientHandshake),
+    Ack(Ack),
+    PacketStatus(PacketStatus),
     IpPacket(IpPacket),
     IpPacketFragment(IpPacketFragment),
 }
@@ -67,6 +69,8 @@ impl serdes::Serializable for Message {
         serialize_variants!(
             ClientToServerHandshake;
             ServerToClientHandshake;
+            Ack;
+            PacketStatus;
             IpPacket;
             IpPacketFragment
         );
@@ -199,6 +203,85 @@ impl serdes::Deserializable for ServerToClientHandshake {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct Ack {
+    pub(crate) first_acked_seqno: u32,
+    pub(crate) last_acked_seqno: u32,
+}
+
+impl Ack {
+    const TYPE_BYTE: u8 = 0x03;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
+}
+
+impl serdes::Serializable for Ack {
+    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
+        self.first_acked_seqno.serialize(serializer);
+        self.last_acked_seqno.serialize(serializer);
+    }
+}
+
+impl serdes::Deserializable for Ack {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+        deserialize_type_byte!(read_cursor);
+
+        Ok(Ack {
+            first_acked_seqno: read_cursor.read()?,
+            last_acked_seqno: read_cursor.read()?,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct PacketStatus {
+    seqno: u32,
+    // if set, then the packet was received after the given delay (may be negative due to clock
+    // skew). If unset, the packet was dropped.
+    delay: Option<i64>,
+}
+
+impl PacketStatus {
+    const TYPE_BYTE: u8 = 0x04;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
+}
+
+impl serdes::Serializable for PacketStatus {
+    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
+        self.seqno.serialize(serializer);
+        match self.delay {
+            None => i64::MIN.serialize(serializer),
+            Some(delay) => {
+                assert_ne!(
+                    delay,
+                    i64::MIN,
+                    "Can't serialize PacketStatus with Received(i64::MIN)"
+                );
+                delay.serialize(serializer);
+            }
+        }
+    }
+}
+
+impl serdes::Deserializable for PacketStatus {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+        deserialize_type_byte!(read_cursor);
+
+        let seqno = read_cursor.read()?;
+        let raw_delay: i64 = read_cursor.read()?;
+        let delay = (raw_delay != i64::MIN).then_some(raw_delay);
+
+        Ok(PacketStatus { seqno, delay })
+    }
+}
+
 impl serdes::Deserializable for Message {
     fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         let message_type = match read_cursor.peek_exact_comptime::<1>() {
@@ -219,7 +302,7 @@ impl serdes::Deserializable for Message {
                 )+
             };
         }
-        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; IpPacket; IpPacketFragment);
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; PacketStatus; IpPacket; IpPacketFragment);
         Err(anyhow!("Unknown message type byte: {message_type:#x}"))
     }
 }
@@ -465,18 +548,16 @@ mod serdes {
     serdes_integral!(u16);
     serdes_integral!(u32);
     serdes_integral!(u64);
+    serdes_integral!(i8);
+    serdes_integral!(i16);
+    serdes_integral!(i32);
+    serdes_integral!(i64);
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        array_array::ArrayArray,
-        constants::MAX_IP_PACKET_LENGTH,
-        messages::{
-            ClientToServerHandshake, MAGIC_VALUE, Message, PacketBuilder, ReadCursor,
-            SERDES_VERSION, ServerToClientHandshake, WriteCursor, has_message,
-        },
-    };
+    use super::*;
+    use crate::{array_array::ArrayArray, constants::MAX_IP_PACKET_LENGTH};
     use anyhow::anyhow;
     use test_case::test_case;
 
@@ -581,6 +662,30 @@ mod test {
             .to_string(),
             "Serdes versions should not match"
         );
+    }
+
+    #[test]
+    fn roundtrip_ack() {
+        assert_roundtrip_message(&Message::Ack(Ack {
+            first_acked_seqno: 2773,
+            last_acked_seqno: 92899,
+        }));
+    }
+
+    #[test]
+    fn roundtrip_packet_status() {
+        assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
+            seqno: 2888,
+            delay: Some(-2299),
+        }));
+        assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
+            seqno: 2888,
+            delay: Some(2299),
+        }));
+        assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
+            seqno: 2888,
+            delay: None,
+        }));
     }
 
     // TODO: test packet builder actually returns false when a packet would overrun the buffer

@@ -240,6 +240,12 @@ impl EstablishedConnection {
                         hardware.send_incoming_packet(&defragged_packet)?;
                     }
                 }
+                Message::Ack(ack) => {
+                    todo!("handle ack");
+                }
+                Message::PacketStatus(packet_status) => {
+                    todo!("handle packet status")
+                }
             }
         }
         Ok(())
