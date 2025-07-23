@@ -1,7 +1,8 @@
-use std::ops::{Index, IndexMut};
+use std::ops::Index;
 
 use bitvec::vec::BitVec;
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct BitArrDeque {
     bitvec: BitVec,
     head: usize,
@@ -65,6 +66,15 @@ impl BitArrDeque {
     }
 }
 
+impl Index<usize> for BitArrDeque {
+    type Output = bool;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.bitvec.index(self.external_to_internal_index(index))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct GlobalBitArrDeque {
     bit_arr_deque: BitArrDeque,
     head_global_idx: usize,
@@ -115,6 +125,14 @@ impl GlobalBitArrDeque {
     }
 }
 
+impl Index<usize> for GlobalBitArrDeque {
+    type Output = bool;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.bit_arr_deque.index(index - self.head_global_idx)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -146,9 +164,11 @@ mod test {
         assert_eq!(gbad.head_index(), 0);
         assert_eq!(gbad.tail_index(), 3);
         assert_eq!(gbad.push(true), Some((0, true))); // 3
-        assert_eq!(gbad.push(true), Some((1, false))); // 4
+        assert_eq!(gbad.push(false), Some((1, false))); // 4
         assert_eq!(gbad.head_index(), 2);
         assert_eq!(gbad.tail_index(), 5);
+        assert_eq!(gbad[3], true);
+        assert_eq!(gbad[4], false);
         gbad.set(3, false);
         assert_eq!(gbad.push(true), Some((2, true))); // 5
         assert_eq!(gbad.push(true), Some((3, false))); // 6
