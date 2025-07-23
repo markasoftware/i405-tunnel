@@ -3,6 +3,7 @@ use enumflags2::{BitFlag, BitFlags, bitflags};
 use crate::array_array::IpPacketBuffer;
 use crate::messages::{ReadCursor, serdes};
 
+use super::MessageTrait;
 use super::serdes::SerializableLength as _;
 use anyhow::{Result, anyhow};
 
@@ -40,6 +41,12 @@ impl IpPacket {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum IpPacketFlags {
     Fragmented = 1 << 0,
+}
+
+impl MessageTrait for IpPacket {
+    fn is_ack_eliciting(&self) -> bool {
+        false
+    }
 }
 
 impl serdes::Serializable for IpPacket {
@@ -111,6 +118,12 @@ impl IpPacketFragment {
             fragment: IpPacketBuffer::new_empty(0),
         }
         .serialized_length()
+    }
+}
+
+impl MessageTrait for IpPacketFragment {
+    fn is_ack_eliciting(&self) -> bool {
+        false
     }
 }
 

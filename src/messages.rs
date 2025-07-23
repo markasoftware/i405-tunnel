@@ -1,6 +1,7 @@
 mod ip_packet;
 
 use anyhow::{Result, anyhow, bail};
+use declarative_enum_dispatch::enum_dispatch;
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
@@ -37,14 +38,20 @@ impl PacketBuilder {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) enum Message {
-    ClientToServerHandshake(ClientToServerHandshake),
-    ServerToClientHandshake(ServerToClientHandshake),
-    Ack(Ack),
-    PacketStatus(PacketStatus),
-    IpPacket(IpPacket),
-    IpPacketFragment(IpPacketFragment),
+enum_dispatch! {
+    pub(crate) trait MessageTrait {
+        fn is_ack_eliciting(&self) -> bool;
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    pub(crate) enum Message {
+        ClientToServerHandshake(ClientToServerHandshake),
+        ServerToClientHandshake(ServerToClientHandshake),
+        Ack(Ack),
+        PacketStatus(PacketStatus),
+        IpPacket(IpPacket),
+        IpPacketFragment(IpPacketFragment),
+    }
 }
 
 // You can do this implementation using enum_dispatch, but its complete breakage of many IDE
@@ -107,6 +114,13 @@ impl ClientToServerHandshake {
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
+    }
+}
+
+// TODO should probably just remove this when/if we add packet type bytes
+impl MessageTrait for ClientToServerHandshake {
+    fn is_ack_eliciting(&self) -> bool {
+        false
     }
 }
 
@@ -176,6 +190,12 @@ impl ServerToClientHandshake {
     }
 }
 
+impl MessageTrait for ServerToClientHandshake {
+    fn is_ack_eliciting(&self) -> bool {
+        false
+    }
+}
+
 impl serdes::Serializable for ServerToClientHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
@@ -217,6 +237,12 @@ impl Ack {
     }
 }
 
+impl MessageTrait for Ack {
+    fn is_ack_eliciting(&self) -> bool {
+        false
+    }
+}
+
 impl serdes::Serializable for Ack {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
@@ -249,6 +275,12 @@ impl PacketStatus {
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
+    }
+}
+
+impl MessageTrait for PacketStatus {
+    fn is_ack_eliciting(&self) -> bool {
+        true
     }
 }
 
