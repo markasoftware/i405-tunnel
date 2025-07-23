@@ -1,5 +1,9 @@
+use std::{collections::VecDeque, time::Duration};
+
 use crate::{
     array_array::IpPacketBuffer,
+    bitvecdeque::GlobalBitArrDeque,
+    constants::MAX_IP_PACKET_LENGTH,
     defragger::Defragger,
     dtls,
     hardware::Hardware,
@@ -12,6 +16,8 @@ use crate::{
 
 use anyhow::Result;
 
+const MAX_QUEUED_IP_PACKETS: usize = 64;
+
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
@@ -20,7 +26,12 @@ pub(crate) struct EstablishedConnection {
     last_incoming_packet_timestamp: u64,
     jitterator: Jitterator,
     outgoing_connection: OutgoingConnection,
-    partial_outgoing_packet: messages::WriteCursor<IpPacketBuffer>,
+    /// which incoming packets we have already acked, or don't need to be acked (either because they
+    /// are not ack-eliciting, or we have not received them).
+    acked_incoming_packets: GlobalBitArrDeque,
+    /// Which outgoing packets we have received an ack back from.
+    acked_outgoing_packets: GlobalBitArrDeque,
+    i405_packet_length: u16,
     defragger: Defragger,
 }
 
@@ -31,7 +42,7 @@ pub(crate) struct EstablishedConnection {
 /// The OutgoingConnection is responsible for reading outgoing packets.
 #[derive(Debug)]
 struct OutgoingConnection {
-    queued_packet: Box<Option<QueuedIpPacket>>,
+    queued_packets: VecDeque<QueuedIpPacket>,
     fragmentation_id: u16,
 }
 
@@ -41,7 +52,7 @@ impl OutgoingConnection {
         // we are ready to read an outgoing packet.
         hardware.read_outgoing_packet();
         Self {
-            queued_packet: Box::new(None),
+            queued_packets: VecDeque::with_capacity(MAX_QUEUED_IP_PACKETS),
             fragmentation_id: 0,
         }
     }
@@ -53,45 +64,53 @@ impl OutgoingConnection {
         hardware: &impl Hardware,
         write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
     ) {
-        // this indirection is me being afraid that we're going to accidentally reallocate
-        // the box if we try to `take` the `queued_packet` directly (it might try to `take`
-        // the `Box` and then `expect` will still work due to deref coercion?).
-        let queued_packet_mut: &mut Option<QueuedIpPacket> = &mut self.queued_packet;
-        if let Some(old_queued_packet) = std::mem::take(queued_packet_mut) {
+        'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
             let bytes_left = write_cursor.num_bytes_left();
             self.fragmentation_id = self.fragmentation_id.wrapping_add(1);
             let fragment = old_queued_packet.fragment(bytes_left, self.fragmentation_id);
             match fragment {
-                FragmentResult::Done(msg) => {
-                    msg.serialize(write_cursor);
-                    // queue is empty, let's ask for another packet!
-                    hardware.read_outgoing_packet();
-                }
+                FragmentResult::Done(msg) => msg.serialize(write_cursor),
                 FragmentResult::Partial(msg, new_queued_packet) => {
                     msg.serialize(write_cursor);
-                    *queued_packet_mut = Some(new_queued_packet);
+                    self.queued_packets.push_front(new_queued_packet);
+                    break 'dequeue_loop;
                 }
                 FragmentResult::MaxLengthTooShort(new_queued_packet) => {
-                    *queued_packet_mut = Some(new_queued_packet);
+                    self.queued_packets.push_front(new_queued_packet);
+                    break 'dequeue_loop;
                 }
             }
         }
+        self.maybe_request_outgoing_read(hardware);
     }
 
     fn on_read_outgoing_packet<H: Hardware>(
         &mut self,
         hardware: &H,
-        write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
         packet: &[u8],
         _recv_timestamp: u64,
     ) {
-        // strategy: queue the packet, then dequeue it!
         assert!(
-            self.queued_packet.is_none(),
-            "We never request to read an outgoing packet while we have a queued packet"
+            self.queued_packets.len() < MAX_QUEUED_IP_PACKETS,
+            "We never request to read outgoing packets when the queue of IP packets is already full"
         );
-        *self.queued_packet = Some(QueuedIpPacket::new(packet));
-        self.try_to_dequeue(hardware, write_cursor);
+        self.queued_packets.push_back(QueuedIpPacket::new(packet));
+        self.maybe_request_outgoing_read(hardware);
+    }
+
+    /// If there is room left for another queued packet, queue one!
+    fn maybe_request_outgoing_read<H: Hardware>(&mut self, hardware: &H) {
+        let mut queued_bytes = 0;
+        'summation_loop: for packet in self.queued_packets.iter() {
+            let len = packet.len();
+            if len == 0 {
+                break 'summation_loop;
+            }
+            queued_bytes += len;
+        }
+        if queued_bytes < MAX_IP_PACKET_LENGTH {
+            hardware.read_outgoing_packet();
+        }
     }
 }
 
@@ -109,15 +128,29 @@ impl EstablishedConnection {
             hardware.timestamp() + jitterator.next_interval()
                 - outgoing_wire_config.packet_finalize_delta,
         );
+        // TODO make configurable. How long after sending a packet we will assume it to be dropped
+        // if we haven't received an ack (and it's ack-eliciting)
+        let outgoing_timeout = Duration::from_secs(1);
+        let outgoing_ack_capacity = std::cmp::max(
+            3,
+            outgoing_timeout.div_duration_f64(Duration::from_nanos(
+                outgoing_wire_config.packet_interval_min,
+            )) as usize
+                + 1,
+        );
         Ok(Self {
             session,
             peer,
             outgoing_connection: OutgoingConnection::new(hardware),
-            partial_outgoing_packet: messages::WriteCursor::new(IpPacketBuffer::new_empty(
-                ip_to_i405_length(outgoing_wire_config.packet_length, peer).into(),
-            )),
+            i405_packet_length: ip_to_i405_length(outgoing_wire_config.packet_length, peer).into(),
             defragger: Defragger::new(),
             wire_config: outgoing_wire_config,
+            // TODO the length of this should probably be chosen more intelligently; it should be at
+            // least the number of incoming packets we receive for each outgoing packet we send
+            // times a decent safety factor. May need to include reverse packet interval in the
+            // handshake.
+            acked_incoming_packets: GlobalBitArrDeque::new(1000),
+            acked_outgoing_packets: GlobalBitArrDeque::new(outgoing_ack_capacity),
             // this is a tiny bit jank in the client case, because the server won't start sending us
             // packets until it receives our first post-handshake packet. If we have fast incoming
             // intervals but long roundtrip time, it's possible that quite a few incoming intervals
@@ -141,13 +174,11 @@ impl EstablishedConnection {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
         let send_timestamp = timer_timestamp + self.wire_config.packet_finalize_delta;
-        let outgoing_cleartext_packet = std::mem::replace(
-            &mut self.partial_outgoing_packet,
-            messages::WriteCursor::new(IpPacketBuffer::new_empty(
-                ip_to_i405_length(self.wire_config.packet_length, self.peer).into(),
-            )),
-        )
-        .into_inner();
+        let mut write_cursor =
+            messages::WriteCursor::new(IpPacketBuffer::new_empty(self.i405_packet_length as usize));
+        self.outgoing_connection
+            .try_to_dequeue(hardware, &mut write_cursor);
+        let outgoing_cleartext_packet = write_cursor.into_inner();
         let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
         hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
@@ -159,8 +190,6 @@ impl EstablishedConnection {
         // );
         let next_interval = self.jitterator.next_interval();
         hardware.register_interval(next_interval);
-        self.outgoing_connection
-            .try_to_dequeue(hardware, &mut self.partial_outgoing_packet);
         hardware.set_timer(send_timestamp + next_interval - self.wire_config.packet_finalize_delta);
 
         // check if the incoming connection timed out
@@ -177,12 +206,8 @@ impl EstablishedConnection {
         packet: &[u8],
         recv_timestamp: u64,
     ) {
-        self.outgoing_connection.on_read_outgoing_packet(
-            hardware,
-            &mut self.partial_outgoing_packet,
-            packet,
-            recv_timestamp,
-        );
+        self.outgoing_connection
+            .on_read_outgoing_packet(hardware, packet, recv_timestamp);
     }
 
     /// Returns an error if something unexpected happened, vs Ok(IsConnectionOpen::No) means the

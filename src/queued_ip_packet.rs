@@ -130,6 +130,10 @@ impl QueuedIpPacket {
             }
         }
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.packet.len()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -139,7 +143,7 @@ pub(crate) enum FragmentResult {
     /// The remaining packet did not fit into a single message. Here's the next message, and the
     /// QueuedIpPacket you should fragment next.
     Partial(messages::Message, QueuedIpPacket),
-    /// The maximum length specified is too short.
+    /// The maximum length specified is too short to make any progress on this packet whatsoever.
     MaxLengthTooShort(QueuedIpPacket),
 }
 
