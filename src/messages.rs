@@ -10,6 +10,16 @@ pub(crate) use serdes::{Serializable, SerializableLength as _};
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
 
+// putting these all up here to ensure we don't add conflicts
+const CLIENT_TO_SERVER_HANDSHAKE_TYPE_BYTE: u8 = 0x01;
+const SERVER_TO_CLIENT_HANDSHAKE_TYPE_BYTE: u8 = 0x02;
+const ACK_TYPE_BYTE: u8 = 0x03;
+const SEQUENCE_NUMBER_TYPE_BYTE: u8 = 0x04;
+const SEND_SYSTEM_TIMESTAMP_TYPE_BYTE: u8 = 0x05;
+const PACKET_STATUS_TYPE_BYTE: u8 = 0x06;
+// IpPacket takes 0x10 to 0x1F
+// IpPacketFragment takes 0x20 and 0x21
+
 pub(crate) struct PacketBuilder {
     write_cursor: WriteCursor<IpPacketBuffer>,
 }
@@ -36,6 +46,10 @@ impl PacketBuilder {
         message.serialize(&mut self.write_cursor);
         true
     }
+
+    pub(crate) fn write_cursor(&mut self) -> &mut WriteCursor<IpPacketBuffer> {
+        &mut self.write_cursor
+    }
 }
 
 enum_dispatch! {
@@ -48,6 +62,8 @@ enum_dispatch! {
         ClientToServerHandshake(ClientToServerHandshake),
         ServerToClientHandshake(ServerToClientHandshake),
         Ack(Ack),
+        SequenceNumber(SequenceNumber),
+        SendSystemTimestamp(SendSystemTimestamp),
         PacketStatus(PacketStatus),
         IpPacket(IpPacket),
         IpPacketFragment(IpPacketFragment),
@@ -77,6 +93,8 @@ impl serdes::Serializable for Message {
             ClientToServerHandshake;
             ServerToClientHandshake;
             Ack;
+            SequenceNumber;
+            SendSystemTimestamp;
             PacketStatus;
             IpPacket;
             IpPacketFragment
@@ -110,7 +128,7 @@ pub(crate) struct ClientToServerHandshake {
 }
 
 impl ClientToServerHandshake {
-    const TYPE_BYTE: u8 = 0x01;
+    const TYPE_BYTE: u8 = CLIENT_TO_SERVER_HANDSHAKE_TYPE_BYTE;
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
@@ -183,7 +201,7 @@ pub(crate) struct ServerToClientHandshake {
 }
 
 impl ServerToClientHandshake {
-    const TYPE_BYTE: u8 = 0x02;
+    const TYPE_BYTE: u8 = SERVER_TO_CLIENT_HANDSHAKE_TYPE_BYTE;
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
@@ -230,7 +248,7 @@ pub(crate) struct Ack {
 }
 
 impl Ack {
-    const TYPE_BYTE: u8 = 0x03;
+    const TYPE_BYTE: u8 = ACK_TYPE_BYTE;
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
@@ -263,15 +281,85 @@ impl serdes::Deserializable for Ack {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct SequenceNumber {
+    pub(crate) seqno: u64,
+}
+
+impl SequenceNumber {
+    const TYPE_BYTE: u8 = SEQUENCE_NUMBER_TYPE_BYTE;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
+}
+
+impl MessageTrait for SequenceNumber {
+    fn is_ack_eliciting(&self) -> bool {
+        false
+    }
+}
+
+impl serdes::Serializable for SequenceNumber {
+    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
+        self.seqno.serialize(serializer);
+    }
+}
+
+impl serdes::Deserializable for SequenceNumber {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+        deserialize_type_byte!(read_cursor);
+        Ok(SequenceNumber {
+            seqno: read_cursor.read()?,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct SendSystemTimestamp {
+    pub(crate) timestamp: u64,
+}
+
+impl SendSystemTimestamp {
+    const TYPE_BYTE: u8 = SEND_SYSTEM_TIMESTAMP_TYPE_BYTE;
+
+    fn does_type_byte_match(type_byte: u8) -> bool {
+        type_byte == Self::TYPE_BYTE
+    }
+}
+
+impl MessageTrait for SendSystemTimestamp {
+    fn is_ack_eliciting(&self) -> bool {
+        false
+    }
+}
+
+impl serdes::Serializable for SendSystemTimestamp {
+    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        Self::TYPE_BYTE.serialize(serializer);
+        self.timestamp.serialize(serializer);
+    }
+}
+
+impl serdes::Deserializable for SendSystemTimestamp {
+    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+        deserialize_type_byte!(read_cursor);
+        Ok(SendSystemTimestamp {
+            timestamp: read_cursor.read()?,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct PacketStatus {
-    seqno: u32,
+    pub(crate) seqno: u64,
     // if set, then the packet was received after the given delay (may be negative due to clock
     // skew). If unset, the packet was dropped.
-    delay: Option<i64>,
+    pub(crate) delay: Option<i64>,
 }
 
 impl PacketStatus {
-    const TYPE_BYTE: u8 = 0x04;
+    const TYPE_BYTE: u8 = PACKET_STATUS_TYPE_BYTE;
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
@@ -334,7 +422,7 @@ impl serdes::Deserializable for Message {
                 )+
             };
         }
-        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; PacketStatus; IpPacket; IpPacketFragment);
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; SequenceNumber; SendSystemTimestamp; PacketStatus; IpPacket; IpPacketFragment);
         Err(anyhow!("Unknown message type byte: {message_type:#x}"))
     }
 }
@@ -702,6 +790,18 @@ mod test {
             first_acked_seqno: 2773,
             last_acked_seqno: 92899,
         }));
+    }
+
+    #[test]
+    fn roundtrip_sequence_number() {
+        assert_roundtrip_message(&Message::SequenceNumber(SequenceNumber { seqno: 1234 }));
+    }
+
+    #[test]
+    fn roundtrip_send_system_timestamp() {
+        assert_roundtrip_message(&Message::SendSystemTimestamp(SendSystemTimestamp {
+            timestamp: 1234,
+        }))
     }
 
     #[test]

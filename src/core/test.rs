@@ -321,10 +321,12 @@ fn packing() {
 
     // type byte and length only
     const MESSAGE_HEADER_LENGTH: usize = 1 + 2;
-    let i405_packet_length = usize::from(ip_to_i405_length(DEFAULT_PACKET_LENGTH, server_addr()));
-    let first_message_length: usize = i405_packet_length / 2;
+    const SEQNO_OVERHEAD_LENGTH: usize = 1 + 8; // every packet contains a sequence number
+    let payload_length = usize::from(ip_to_i405_length(DEFAULT_PACKET_LENGTH, server_addr()))
+        - SEQNO_OVERHEAD_LENGTH;
+    let first_message_length: usize = payload_length / 2;
     let second_message_length: usize =
-        i405_packet_length - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
+        payload_length - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
 
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));

@@ -8,13 +8,13 @@ use crate::{
     dtls,
     hardware::Hardware,
     jitter::Jitterator,
-    messages::{self, Message, Serializable as _},
+    messages::{self, Message, MessageTrait, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     utils::ip_to_i405_length,
     wire_config::WireConfig,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
 const MAX_QUEUED_IP_PACKETS: usize = 64;
 
@@ -24,6 +24,7 @@ pub(crate) struct EstablishedConnection {
     peer: std::net::SocketAddr,
     wire_config: WireConfig,
     last_incoming_packet_timestamp: u64,
+    next_outgoing_seqno: u64,
     jitterator: Jitterator,
     outgoing_connection: OutgoingConnection,
     /// which incoming packets we have already acked, or don't need to be acked (either because they
@@ -38,7 +39,8 @@ pub(crate) struct EstablishedConnection {
 // OutgoingConnection is sort of historical cruft, there was once a grand plan for a "scheduled"
 // mode where outbound packets would be read off the TUN at predetermined times also, in order to
 // hide even from userspace applications the details of the tunnel, and there would be both
-// scheduled and unscheduled OutgoingConnection implementations.
+// scheduled and unscheduled OutgoingConnection implementations. In a world with Acks, it's even
+// more confusing exactly what the role of the OutgoingConnection should be.
 /// The OutgoingConnection is responsible for reading outgoing packets.
 #[derive(Debug)]
 struct OutgoingConnection {
@@ -62,8 +64,9 @@ impl OutgoingConnection {
     fn try_to_dequeue(
         &mut self,
         hardware: &impl Hardware,
-        write_cursor: &mut messages::WriteCursor<IpPacketBuffer>,
+        packet_builder: &mut messages::PacketBuilder,
     ) {
+        let write_cursor = packet_builder.write_cursor();
         'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
             let bytes_left = write_cursor.num_bytes_left();
             self.fragmentation_id = self.fragmentation_id.wrapping_add(1);
@@ -158,6 +161,7 @@ impl EstablishedConnection {
             // this to None though and wait for the first server packet, because the server could
             // theoretically crash even now!
             last_incoming_packet_timestamp: hardware.timestamp(),
+            next_outgoing_seqno: 0,
             jitterator,
         })
     }
@@ -174,13 +178,24 @@ impl EstablishedConnection {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
         let send_timestamp = timer_timestamp + self.wire_config.packet_finalize_delta;
-        let mut write_cursor =
-            messages::WriteCursor::new(IpPacketBuffer::new_empty(self.i405_packet_length as usize));
+        let seqno = self.next_outgoing_seqno;
+        self.next_outgoing_seqno += 1;
+        let mut packet_builder = messages::PacketBuilder::new(self.i405_packet_length as usize);
+
+        let could_add_seqno = packet_builder
+            .try_add_message(&Message::SequenceNumber(messages::SequenceNumber { seqno }));
+        assert!(
+            could_add_seqno,
+            "Wasn't able to add seqno to packet (it's smaller than handshake, so shouldn't be possible)"
+        );
+
         self.outgoing_connection
-            .try_to_dequeue(hardware, &mut write_cursor);
-        let outgoing_cleartext_packet = write_cursor.into_inner();
+            .try_to_dequeue(hardware, &mut packet_builder);
+
+        let outgoing_cleartext_packet = packet_builder.into_inner();
         let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
         hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
+
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
         // we don't forget to update here:
         // TODO enable this assertion, or ensure our code does not rely on send_outgoing_packet blocking until the designated send time
@@ -243,15 +258,27 @@ impl EstablishedConnection {
         packet: &[u8],
     ) -> Result<()> {
         let mut cursor = messages::ReadCursor::new(packet);
+        let mut incoming_seqno = None;
+        let mut send_system_timestamp = None;
+        let mut ack_elicited = false;
         while messages::has_message(&cursor) {
-            let msg = cursor.read()?;
+            let msg: Message = cursor.read()?;
+            if msg.is_ack_eliciting() {
+                ack_elicited = true;
+            }
             match msg {
-                Message::ClientToServerHandshake(_) => log::warn!(
-                    "Received ClientToServerHandshake during established session -- retransmission?"
-                ),
-                Message::ServerToClientHandshake(_) => log::warn!(
-                    "Received ServerToClientHandshake during established session -- retransmission?"
-                ),
+                Message::ClientToServerHandshake(_) => {
+                    log::warn!(
+                        "Received ClientToServerHandshake during established session -- retransmission?"
+                    );
+                    return Ok(());
+                }
+                Message::ServerToClientHandshake(_) => {
+                    log::warn!(
+                        "Received ServerToClientHandshake during established session -- retransmission?"
+                    );
+                    return Ok(());
+                }
                 Message::IpPacket(ip_packet) => {
                     if let Some(defragged_packet) = self.defragger.handle_ip_packet(&ip_packet) {
                         hardware.send_incoming_packet(&defragged_packet)?;
@@ -265,14 +292,57 @@ impl EstablishedConnection {
                         hardware.send_incoming_packet(&defragged_packet)?;
                     }
                 }
-                Message::Ack(ack) => {
+                Message::Ack(_ack) => {
                     todo!("handle ack");
                 }
-                Message::PacketStatus(packet_status) => {
+                Message::SequenceNumber(messages::SequenceNumber { seqno }) => {
+                    if let Some(existing_incoming_seqno) = incoming_seqno {
+                        bail!(
+                            "Multiple sequence numbers in the same packet: {}, then {}",
+                            existing_incoming_seqno,
+                            seqno
+                        );
+                    }
+                    incoming_seqno = Some(seqno);
+                }
+                Message::SendSystemTimestamp(messages::SendSystemTimestamp { timestamp }) => {
+                    if let Some(existing_timestamp) = send_system_timestamp {
+                        bail!(
+                            "Multiple send system timestamps in the same packet: {}, then {}",
+                            existing_timestamp,
+                            timestamp
+                        );
+                    }
+                    send_system_timestamp = Some(timestamp);
+                }
+                Message::PacketStatus(_packet_status) => {
                     todo!("handle packet status")
                 }
             }
         }
+        // TODO I at one point considered having a "packet header" that would contain the sequence
+        // number in a fixed location to make inclusion of seqno more "safe". Chose not to implement
+        // until we do FEC because those both require changes to the packet format.
+        let incoming_seqno = incoming_seqno.ok_or(anyhow!(
+            "No sequence number in established session packet -- protocol violation"
+        ))?;
+
+        // update ack board
+        let incoming_seqno_usize = usize::try_from(incoming_seqno).unwrap();
+        for _ in self.acked_incoming_packets.tail_index()..=incoming_seqno_usize {
+            // we don't care about pushed-off acks; that just means we failed to ack it. The other
+            // side will send the contents again if this is important. TODO privacy concerns if this
+            // causes a packet drop equivalent?
+            self.acked_incoming_packets.push(false);
+        }
+        debug_assert!(self.acked_incoming_packets.tail_index() > incoming_seqno_usize);
+        // consider it already acked if no ack is elicited
+        // TODO how can we unit-test this logic in the core tests? Ie, make we aren't needlessly
+        // ack'ing packets that don't elicit acks.
+        if incoming_seqno_usize >= self.acked_incoming_packets.head_index() && !ack_elicited {
+            self.acked_incoming_packets.set(incoming_seqno_usize, true);
+        }
+
         Ok(())
     }
 
