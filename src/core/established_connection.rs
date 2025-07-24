@@ -195,6 +195,10 @@ impl EstablishedConnection {
             "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
         );
 
+        // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
+        // this is a substantial portion of the overall cost of building a new packet; it causes the
+        // jitter test to go measurably faster when this is commented out (even in release mode,
+        // though you have to increase the timespan of the jitter test to slow it down more)
         for ack in outgoing_acks(&mut self.acked_incoming_packets) {
             packet_builder.try_add_message(&Message::Ack(ack), &mut ack_elicited);
         }
@@ -402,30 +406,23 @@ impl<'a> Iterator for OutgoingAckIterator<'a> {
     type Item = messages::Ack;
 
     fn next(&mut self) -> Option<messages::Ack> {
-        // TODO this whole function could be optimized significantly by using BitVec methods like
-        // find first 0. The complication is that in our deque bitvec we would need to handle
-        // stitching these methods across two BitVecs.
-        let tail_seqno = self.incoming_acks_deque.tail_index();
-        'find_start_of_ack_block: loop {
-            if self.seqno >= tail_seqno {
-                return None;
-            }
-            if !self.incoming_acks_deque[self.seqno] {
-                break 'find_start_of_ack_block;
-            }
-            self.seqno += 1;
+        if self.seqno >= self.incoming_acks_deque.tail_index() {
+            return None;
         }
-        // now self.pos is at the start of the next ack block
-        let first_seqno = self.seqno;
-        while self.seqno < tail_seqno && !self.incoming_acks_deque[self.seqno] {
-            self.incoming_acks_deque.set(self.seqno, true);
-            self.seqno += 1;
-        }
-        // now self.idx is one past the end of what we want to ack
-        Some(messages::Ack {
-            first_acked_seqno: first_seqno,
-            last_acked_seqno: self.seqno - 1,
-        })
+        self.incoming_acks_deque
+            .first_zero_after(self.seqno)
+            .map(|first_zero_seqno| {
+                let tail_seqno = self.incoming_acks_deque.tail_index();
+                self.seqno = first_zero_seqno;
+                while self.seqno < tail_seqno && !self.incoming_acks_deque[self.seqno] {
+                    self.incoming_acks_deque.set(self.seqno, true);
+                    self.seqno += 1;
+                }
+                messages::Ack {
+                    first_acked_seqno: first_zero_seqno,
+                    last_acked_seqno: self.seqno - 1,
+                }
+            })
     }
 }
 
