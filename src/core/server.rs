@@ -367,8 +367,8 @@ impl InProtocolHandshake {
             let mut builder = messages::PacketBuilder::new(
                 ip_to_i405_length(c2s_handshake.s2c_packet_length, self.peer).into(),
             );
-            let did_add =
-                builder.try_add_message(&messages::Message::ServerToClientHandshake(response));
+            let did_add = builder
+                .try_add_message_no_ack(&messages::Message::ServerToClientHandshake(response));
             if !did_add {
                 bail!(
                     "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
@@ -450,14 +450,8 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
             dtls::DecryptResult::Err(err) => return Err(err),
         };
 
-        let mut read_cursor = messages::ReadCursor::new(cleartext_packet.clone());
-
-        let message = if messages::has_message(&read_cursor) {
-            Some(read_cursor.read()?)
-        } else {
-            None
-        };
-        match message {
+        let mut reader = messages::PacketReader::new(&cleartext_packet);
+        match reader.try_read_message_no_ack()? {
             Some(messages::Message::ClientToServerHandshake(c2s_handshake)) => {
                 log::debug!("Got C2S handshake, as expected. Sending S2C handshake.");
                 self.send_s2c_handshake(hardware, &c2s_handshake)?;

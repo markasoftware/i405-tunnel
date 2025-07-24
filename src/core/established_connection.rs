@@ -65,6 +65,7 @@ impl OutgoingConnection {
         &mut self,
         hardware: &impl Hardware,
         packet_builder: &mut messages::PacketBuilder,
+        _ack_elicited: &mut bool, // no IP messages are ack-eliciting
     ) {
         let write_cursor = packet_builder.write_cursor();
         'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
@@ -180,21 +181,31 @@ impl EstablishedConnection {
         let send_timestamp = timer_timestamp + self.wire_config.packet_finalize_delta;
         let seqno = self.next_outgoing_seqno;
         self.next_outgoing_seqno += 1;
+
+        let mut ack_elicited = false;
         let mut packet_builder = messages::PacketBuilder::new(self.i405_packet_length as usize);
 
-        let could_add_seqno = packet_builder
-            .try_add_message(&Message::SequenceNumber(messages::SequenceNumber { seqno }));
+        let could_add_seqno = packet_builder.try_add_message(
+            &Message::SequenceNumber(messages::SequenceNumber { seqno }),
+            &mut ack_elicited,
+        );
         assert!(
             could_add_seqno,
             "Wasn't able to add seqno to packet (it's smaller than handshake, so shouldn't be possible)"
         );
 
         self.outgoing_connection
-            .try_to_dequeue(hardware, &mut packet_builder);
+            .try_to_dequeue(hardware, &mut packet_builder, &mut ack_elicited);
 
         let outgoing_cleartext_packet = packet_builder.into_inner();
         let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
         hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
+
+        debug_assert_eq!(self.acked_outgoing_packets.tail_index(), seqno);
+        let popped_outgoing_ack = self.acked_outgoing_packets.push(!ack_elicited);
+        if let Some((_popped_seqno, false)) = popped_outgoing_ack {
+            todo!("Handle un-acked packet");
+        }
 
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
         // we don't forget to update here:
@@ -257,15 +268,11 @@ impl EstablishedConnection {
         hardware: &H,
         packet: &[u8],
     ) -> Result<()> {
-        let mut cursor = messages::ReadCursor::new(packet);
+        let mut reader = messages::PacketReader::new(packet);
         let mut incoming_seqno = None;
         let mut send_system_timestamp = None;
         let mut ack_elicited = false;
-        while messages::has_message(&cursor) {
-            let msg: Message = cursor.read()?;
-            if msg.is_ack_eliciting() {
-                ack_elicited = true;
-            }
+        while let Some(msg) = reader.try_read_message(&mut ack_elicited)? {
             match msg {
                 Message::ClientToServerHandshake(_) => {
                     log::warn!(
@@ -292,8 +299,28 @@ impl EstablishedConnection {
                         hardware.send_incoming_packet(&defragged_packet)?;
                     }
                 }
-                Message::Ack(_ack) => {
-                    todo!("handle ack");
+                Message::Ack(ack) => {
+                    for acked_seqno in ack.first_acked_seqno..=ack.last_acked_seqno {
+                        if acked_seqno >= self.next_outgoing_seqno {
+                            bail!("Received an ack of a seqno we haven't sent yet");
+                        }
+                        debug_assert_eq!(
+                            self.next_outgoing_seqno,
+                            self.acked_outgoing_packets.tail_index()
+                        );
+                        if self.acked_outgoing_packets.head_index() <= acked_seqno {
+                            if self.acked_outgoing_packets[acked_seqno] {
+                                // I'm not sure if there's any legitimate way for this to happen --
+                                // does wolfssl automatically filter out DTLS retransmissions for
+                                // us?
+                                log::error!(
+                                    "Got an ack for a packet that's already been acked, or didn't need to be acked."
+                                );
+                            }
+                            self.acked_outgoing_packets.set(acked_seqno, true);
+                            // TODO actually trigger relevant fns
+                        }
+                    }
                 }
                 Message::SequenceNumber(messages::SequenceNumber { seqno }) => {
                     if let Some(existing_incoming_seqno) = incoming_seqno {
@@ -328,19 +355,18 @@ impl EstablishedConnection {
         ))?;
 
         // update ack board
-        let incoming_seqno_usize = usize::try_from(incoming_seqno).unwrap();
-        for _ in self.acked_incoming_packets.tail_index()..=incoming_seqno_usize {
+        for _ in self.acked_incoming_packets.tail_index()..=incoming_seqno {
             // we don't care about pushed-off acks; that just means we failed to ack it. The other
             // side will send the contents again if this is important. TODO privacy concerns if this
             // causes a packet drop equivalent?
             self.acked_incoming_packets.push(false);
         }
-        debug_assert!(self.acked_incoming_packets.tail_index() > incoming_seqno_usize);
+        debug_assert!(self.acked_incoming_packets.tail_index() > incoming_seqno);
         // consider it already acked if no ack is elicited
         // TODO how can we unit-test this logic in the core tests? Ie, make we aren't needlessly
         // ack'ing packets that don't elicit acks.
-        if incoming_seqno_usize >= self.acked_incoming_packets.head_index() && !ack_elicited {
-            self.acked_incoming_packets.set(incoming_seqno_usize, true);
+        if incoming_seqno >= self.acked_incoming_packets.head_index() && !ack_elicited {
+            self.acked_incoming_packets.set(incoming_seqno, true);
         }
 
         Ok(())

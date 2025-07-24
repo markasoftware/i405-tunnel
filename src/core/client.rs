@@ -281,8 +281,8 @@ impl C2SHandshakeSent {
             s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
             server_timeout: config.server_wire_config.timeout,
         };
-        let did_add =
-            builder.try_add_message(&messages::Message::ClientToServerHandshake(c2s_handshake));
+        let did_add = builder
+            .try_add_message_no_ack(&messages::Message::ClientToServerHandshake(c2s_handshake));
         assert!(
             did_add,
             "Wasn't able to fit the C2S handshake in a single packet -- this will never work. Try increasing client-to-server packet size."
@@ -359,19 +359,13 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         // It really should be an S2C handshake. The server shouldn't send us anything but an
         // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
         // so we can't get anything out-of-order here.
-        let mut read_cursor = messages::ReadCursor::new(&cleartext_packet);
-        // TODO I'm not totally happy that we have to do `has_message` rather than being able to
-        // use `read`
-        if !messages::has_message(&read_cursor) {
-            bail!("The server sent an empty packet when it should have sent an S2C handshake");
-        }
-
-        let message = read_cursor.read()?;
-        match message {
-            messages::Message::ServerToClientHandshake(s2c_handshake) => {
-                // first, ensure there's nothing left in the cursor
-                if messages::has_message(&read_cursor) {
-                    bail!("There were other messages in the packet with the S2C handshake");
+        let mut reader = messages::PacketReader::new(&cleartext_packet);
+        match reader.try_read_message_no_ack()? {
+            Some(messages::Message::ServerToClientHandshake(s2c_handshake)) => {
+                if let Some(extra_msg) = reader.try_read_message_no_ack()? {
+                    bail!(
+                        "There were other messages in the packet with the S2C handshake: {extra_msg:?}"
+                    );
                 }
 
                 if !s2c_handshake.success {
@@ -405,10 +399,11 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                     )?,
                 ))
             }
-            other_msg => bail!(
+            Some(other_msg) => bail!(
                 "The server sent a different message instead of S2C handshake: {:?}",
                 other_msg
             ),
+            None => bail!("Server sent an empty packet when it should have sent an S2C handshake"),
         }
     }
 

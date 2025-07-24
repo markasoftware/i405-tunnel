@@ -38,17 +38,64 @@ impl PacketBuilder {
     }
 
     /// If there's space to add the given message to the packet, do so.
-    pub(crate) fn try_add_message(&mut self, message: &Message) -> bool {
+    pub(crate) fn try_add_message(&mut self, message: &Message, ack_elicited: &mut bool) -> bool {
         if message.serialized_length() > self.write_cursor.num_bytes_left() {
             return false;
         }
 
+        if message.is_ack_eliciting() {
+            *ack_elicited = true;
+        }
         message.serialize(&mut self.write_cursor);
         true
     }
 
+    pub(crate) fn try_add_message_no_ack(&mut self, message: &Message) -> bool {
+        let mut ack_elicited = false;
+        let result = self.try_add_message(message, &mut ack_elicited);
+        assert!(
+            !ack_elicited,
+            "unexpected elicited ack while building packet"
+        );
+        result
+    }
+
     pub(crate) fn write_cursor(&mut self) -> &mut WriteCursor<IpPacketBuffer> {
         &mut self.write_cursor
+    }
+}
+
+pub(crate) struct PacketReader<'a> {
+    read_cursor: ReadCursor<&'a [u8]>,
+}
+
+impl<'a> PacketReader<'a> {
+    pub(crate) fn new(packet: &'a [u8]) -> PacketReader<'a> {
+        PacketReader {
+            read_cursor: ReadCursor::new(packet),
+        }
+    }
+
+    pub(crate) fn try_read_message(&mut self, ack_elicited: &mut bool) -> Result<Option<Message>> {
+        if has_message(&self.read_cursor) {
+            let msg: Message = self.read_cursor.read()?;
+            if msg.is_ack_eliciting() {
+                *ack_elicited = true;
+            }
+            Ok(Some(msg))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn try_read_message_no_ack(&mut self) -> Result<Option<Message>> {
+        let mut ack_elicited = false;
+        let result = self.try_read_message(&mut ack_elicited);
+        assert!(
+            !ack_elicited,
+            "unexpected elicited ack while reading packet"
+        );
+        result
     }
 }
 
@@ -243,8 +290,8 @@ impl serdes::Deserializable for ServerToClientHandshake {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Ack {
-    pub(crate) first_acked_seqno: u32,
-    pub(crate) last_acked_seqno: u32,
+    pub(crate) first_acked_seqno: u64,
+    pub(crate) last_acked_seqno: u64,
 }
 
 impl Ack {
@@ -439,7 +486,7 @@ pub(crate) fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
 // Similar signature to std::io::Cursor but slightly nicer signatures, support for ArrayArray
 // writing, and no std::io::Result crap
 
-pub(crate) struct ReadCursor<T> {
+struct ReadCursor<T> {
     underlying: T,
     position: usize,
 }
@@ -448,7 +495,7 @@ impl<T> ReadCursor<T>
 where
     T: AsRef<[u8]>,
 {
-    pub(crate) fn new(underlying: T) -> ReadCursor<T> {
+    fn new(underlying: T) -> ReadCursor<T> {
         ReadCursor {
             underlying,
             position: 0,
@@ -492,7 +539,7 @@ where
         }
     }
 
-    pub(crate) fn read<D: serdes::Deserializable>(&mut self) -> Result<D> {
+    fn read<D: serdes::Deserializable>(&mut self) -> Result<D> {
         D::deserialize(self)
     }
 }
@@ -683,8 +730,9 @@ mod test {
 
     pub(crate) fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
+        let mut ack_elicited = false;
         assert!(
-            builder.try_add_message(msg),
+            builder.try_add_message(msg, &mut ack_elicited),
             "Failed to add message {:#?}",
             msg
         );

@@ -77,7 +77,7 @@ impl Index<usize> for BitArrDeque {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct GlobalBitArrDeque {
     bit_arr_deque: BitArrDeque,
-    head_global_idx: usize,
+    head_global_idx: u64,
 }
 
 impl GlobalBitArrDeque {
@@ -89,7 +89,7 @@ impl GlobalBitArrDeque {
     }
 
     /// If the deque filled up, report what got popped out
-    pub(crate) fn push(&mut self, value: bool) -> Option<(usize, bool)> {
+    pub(crate) fn push(&mut self, value: bool) -> Option<(u64, bool)> {
         self.bit_arr_deque.push(value).map(|popped| {
             let popped_idx = self.head_global_idx;
             self.head_global_idx += 1;
@@ -97,16 +97,16 @@ impl GlobalBitArrDeque {
         })
     }
 
-    pub(crate) fn head_index(&self) -> usize {
+    pub(crate) fn head_index(&self) -> u64 {
         self.head_global_idx
     }
 
     /// one past the end
-    pub(crate) fn tail_index(&self) -> usize {
-        self.head_global_idx + self.bit_arr_deque.len()
+    pub(crate) fn tail_index(&self) -> u64 {
+        self.head_global_idx + u64::try_from(self.bit_arr_deque.len()).unwrap()
     }
 
-    pub(crate) fn set(&mut self, index: usize, value: bool) {
+    pub(crate) fn set(&mut self, index: u64, value: bool) {
         // debug because subtraction below will check the same thing
         debug_assert!(
             index >= self.head_index(),
@@ -116,20 +116,22 @@ impl GlobalBitArrDeque {
         );
         // this is a unnecessary because the length will be checked in the main BitArrDeque
         debug_assert!(
-            index < self.head_index() + self.bit_arr_deque.len(),
+            index < self.head_index() + u64::try_from(self.bit_arr_deque.len()).unwrap(),
             "Tried to `set` index {}, greater than tail_index() {}",
             index,
             self.tail_index()
         );
-        self.bit_arr_deque.set(index - self.head_index(), value);
+        self.bit_arr_deque
+            .set(usize::try_from(index - self.head_index()).unwrap(), value);
     }
 }
 
-impl Index<usize> for GlobalBitArrDeque {
+impl Index<u64> for GlobalBitArrDeque {
     type Output = bool;
 
-    fn index(&self, index: usize) -> &Self::Output {
-        self.bit_arr_deque.index(index - self.head_global_idx)
+    fn index(&self, index: u64) -> &Self::Output {
+        self.bit_arr_deque
+            .index(usize::try_from(index - self.head_global_idx).unwrap())
     }
 }
 
