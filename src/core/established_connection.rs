@@ -76,6 +76,7 @@ impl OutgoingConnection {
                 FragmentResult::Done(msg) => msg.serialize(write_cursor),
                 FragmentResult::Partial(msg, new_queued_packet) => {
                     msg.serialize(write_cursor);
+                    // we just popped off the queued packets, so won't go over capacity
                     self.queued_packets.push_front(new_queued_packet);
                     break 'dequeue_loop;
                 }
@@ -385,4 +386,124 @@ pub(crate) enum IsConnectionOpen {
     Yes,
     TimedOut,
     TerminatedNormally,
+}
+
+/// Iterator of acks we need to send
+struct OutgoingAckIterator<'a> {
+    incoming_acks_deque: &'a mut GlobalBitArrDeque,
+    seqno: u64,
+}
+
+impl<'a> Iterator for OutgoingAckIterator<'a> {
+    type Item = messages::Ack;
+
+    fn next(&mut self) -> Option<messages::Ack> {
+        let tail_seqno = self.incoming_acks_deque.tail_index();
+        'find_start_of_ack_block: loop {
+            if self.seqno >= tail_seqno {
+                return None;
+            }
+            if !self.incoming_acks_deque[self.seqno] {
+                break 'find_start_of_ack_block;
+            }
+            self.seqno += 1;
+        }
+        // now self.pos is at the start of the next ack block
+        let first_seqno = self.seqno;
+        while self.seqno < tail_seqno && !self.incoming_acks_deque[self.seqno] {
+            self.incoming_acks_deque.set(self.seqno, true);
+            self.seqno += 1;
+        }
+        // now self.idx is one past the end of what we want to ack
+        Some(messages::Ack {
+            first_acked_seqno: first_seqno,
+            last_acked_seqno: self.seqno - 1,
+        })
+    }
+}
+
+/// Compute the Ack messages that should be sent immediately based on the deque, and also update the
+/// deque to account for the ack messages generated.
+fn outgoing_acks(incoming_acks_deque: &mut GlobalBitArrDeque) -> OutgoingAckIterator<'_> {
+    OutgoingAckIterator {
+        seqno: incoming_acks_deque.head_index(),
+        incoming_acks_deque,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::messages::Ack;
+
+    fn assert_outgoing_acks(pre_rotation: u64, incoming_acks: &[u8], expected_acks: &[Ack]) {
+        let mut deque = GlobalBitArrDeque::new(incoming_acks.len());
+        for _ in 0..pre_rotation {
+            deque.push(true);
+        }
+        for incoming_ack in incoming_acks {
+            deque.push(if *incoming_ack > 0 { true } else { false });
+        }
+        assert_eq!(
+            outgoing_acks(&mut deque).collect::<Vec<Ack>>(),
+            expected_acks
+        );
+        for i in pre_rotation..pre_rotation + u64::try_from(incoming_acks.len()).unwrap() {
+            assert_eq!(deque[i], true);
+        }
+    }
+
+    #[test]
+    fn compute_outgoing_acks() {
+        assert_outgoing_acks(
+            0,
+            &[1, 0, 0, 1, 1, 0, 1],
+            &[
+                Ack {
+                    first_acked_seqno: 1,
+                    last_acked_seqno: 2,
+                },
+                Ack {
+                    first_acked_seqno: 5,
+                    last_acked_seqno: 5,
+                },
+            ],
+        );
+        assert_outgoing_acks(
+            2,
+            &[1, 0, 0, 1, 1, 0, 1],
+            &[
+                Ack {
+                    first_acked_seqno: 3,
+                    last_acked_seqno: 4,
+                },
+                Ack {
+                    first_acked_seqno: 7,
+                    last_acked_seqno: 7,
+                },
+            ],
+        );
+        assert_outgoing_acks(
+            0,
+            &[0, 0, 0],
+            &[Ack {
+                first_acked_seqno: 0,
+                last_acked_seqno: 2,
+            }],
+        );
+        assert_outgoing_acks(
+            0,
+            &[0, 1, 0],
+            &[
+                Ack {
+                    first_acked_seqno: 0,
+                    last_acked_seqno: 0,
+                },
+                Ack {
+                    first_acked_seqno: 2,
+                    last_acked_seqno: 2,
+                },
+            ],
+        )
+    }
 }

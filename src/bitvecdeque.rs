@@ -130,8 +130,14 @@ impl Index<u64> for GlobalBitArrDeque {
     type Output = bool;
 
     fn index(&self, index: u64) -> &Self::Output {
-        self.bit_arr_deque
-            .index(usize::try_from(index - self.head_global_idx).unwrap())
+        self.bit_arr_deque.index(
+            usize::try_from(
+                index
+                    .checked_sub(self.head_global_idx)
+                    .expect("Tried to index before head index in global bit deque"),
+            )
+            .unwrap(),
+        )
     }
 }
 
@@ -153,6 +159,9 @@ mod test {
         assert_eq!(bad.push(true), Some(true));
         assert_eq!(bad.push(true), Some(false));
         assert_eq!(bad.len(), 3);
+        assert_eq!(bad.pop(), false);
+        assert_eq!(bad.len(), 2);
+        assert_eq!(bad[0], true);
     }
 
     #[test]
