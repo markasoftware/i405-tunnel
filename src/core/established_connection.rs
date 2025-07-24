@@ -192,8 +192,12 @@ impl EstablishedConnection {
         );
         assert!(
             could_add_seqno,
-            "Wasn't able to add seqno to packet (it's smaller than handshake, so shouldn't be possible)"
+            "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
         );
+
+        for ack in outgoing_acks(&mut self.acked_incoming_packets) {
+            packet_builder.try_add_message(&Message::Ack(ack), &mut ack_elicited);
+        }
 
         self.outgoing_connection
             .try_to_dequeue(hardware, &mut packet_builder, &mut ack_elicited);
@@ -360,14 +364,14 @@ impl EstablishedConnection {
             // we don't care about pushed-off acks; that just means we failed to ack it. The other
             // side will send the contents again if this is important. TODO privacy concerns if this
             // causes a packet drop equivalent?
-            self.acked_incoming_packets.push(false);
+            self.acked_incoming_packets.push(true);
         }
         debug_assert!(self.acked_incoming_packets.tail_index() > incoming_seqno);
-        // consider it already acked if no ack is elicited
+        // mark that it needs an ack if necessary
         // TODO how can we unit-test this logic in the core tests? Ie, make we aren't needlessly
         // ack'ing packets that don't elicit acks.
-        if incoming_seqno >= self.acked_incoming_packets.head_index() && !ack_elicited {
-            self.acked_incoming_packets.set(incoming_seqno, true);
+        if incoming_seqno >= self.acked_incoming_packets.head_index() && ack_elicited {
+            self.acked_incoming_packets.set(incoming_seqno, false);
         }
 
         Ok(())
@@ -398,6 +402,9 @@ impl<'a> Iterator for OutgoingAckIterator<'a> {
     type Item = messages::Ack;
 
     fn next(&mut self) -> Option<messages::Ack> {
+        // TODO this whole function could be optimized significantly by using BitVec methods like
+        // find first 0. The complication is that in our deque bitvec we would need to handle
+        // stitching these methods across two BitVecs.
         let tail_seqno = self.incoming_acks_deque.tail_index();
         'find_start_of_ack_block: loop {
             if self.seqno >= tail_seqno {
@@ -505,5 +512,18 @@ mod test {
                 },
             ],
         )
+    }
+
+    #[test]
+    fn compute_outgoing_acks_partial() {
+        let mut deque = GlobalBitArrDeque::new(3);
+        deque.push(false);
+        deque.push(true);
+        deque.push(false);
+        let mut iter = outgoing_acks(&mut deque);
+        iter.next();
+        assert_eq!(deque[0], true);
+        assert_eq!(deque[1], true);
+        assert_eq!(deque[2], false);
     }
 }
