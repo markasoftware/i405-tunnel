@@ -6,11 +6,11 @@ use hardware::{
 use wire_config::to_wire_configs;
 
 mod array_array;
-mod bitvecdeque;
 mod config_cli;
 mod constants;
 mod core;
 mod defragger;
+mod deques;
 mod deviation_stats;
 mod dtls;
 mod hardware;

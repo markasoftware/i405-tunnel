@@ -1,4 +1,7 @@
-use std::ops::Index;
+use std::{
+    collections::VecDeque,
+    ops::{Index, IndexMut},
+};
 
 use bitvec::{slice::BitSlice, vec::BitVec};
 
@@ -163,7 +166,7 @@ impl GlobalBitArrDeque {
         );
         // this is a unnecessary because the length will be checked in the main BitArrDeque
         debug_assert!(
-            index < self.head_index() + u64::try_from(self.bit_arr_deque.len()).unwrap(),
+            index < self.tail_index(),
             "Tried to `set` index {}, greater than tail_index() {}",
             index,
             self.tail_index()
@@ -199,6 +202,83 @@ impl Index<u64> for GlobalBitArrDeque {
             )
             .unwrap(),
         )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct GlobalArrDeque<T> {
+    arr_deque: VecDeque<T>,
+    head_global_idx: u64,
+}
+
+impl<T> GlobalArrDeque<T> {
+    pub(crate) fn new(capacity: usize) -> GlobalArrDeque<T> {
+        assert!(capacity > 0);
+        GlobalArrDeque {
+            arr_deque: VecDeque::with_capacity(capacity),
+            head_global_idx: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, value: T) -> Option<(u64, T)> {
+        let result = if self.arr_deque.len() == self.arr_deque.capacity() {
+            let popped_idx = self.head_global_idx;
+            self.head_global_idx += 1;
+            let popped = self.arr_deque.pop_front().unwrap();
+            Some((popped_idx, popped))
+        } else {
+            None
+        };
+        self.arr_deque.push_back(value);
+        result
+    }
+
+    pub(crate) fn head_index(&self) -> u64 {
+        self.head_global_idx
+    }
+
+    pub(crate) fn tail_index(&self) -> u64 {
+        self.head_global_idx + u64::try_from(self.arr_deque.len()).unwrap()
+    }
+}
+
+impl<T> Index<u64> for GlobalArrDeque<T> {
+    type Output = T;
+
+    fn index(&self, index: u64) -> &Self::Output {
+        debug_assert!(
+            index >= self.head_index(),
+            "Tried to `set` index {}, less than head_index() {}",
+            index,
+            self.head_index()
+        );
+        debug_assert!(
+            index < self.tail_index(),
+            "Tried to `set` index {}, greater than tail_index() {}",
+            index,
+            self.tail_index()
+        );
+        self.arr_deque
+            .index(usize::try_from(index - self.head_index()).unwrap())
+    }
+}
+
+impl<T> IndexMut<u64> for GlobalArrDeque<T> {
+    fn index_mut(&mut self, index: u64) -> &mut Self::Output {
+        debug_assert!(
+            index >= self.head_index(),
+            "Tried to `set` index {}, less than head_index() {}",
+            index,
+            self.head_index()
+        );
+        debug_assert!(
+            index < self.tail_index(),
+            "Tried to `set` index {}, greater than tail_index() {}",
+            index,
+            self.tail_index()
+        );
+        self.arr_deque
+            .index_mut(usize::try_from(index - self.head_index()).unwrap())
     }
 }
 
@@ -323,5 +403,26 @@ mod test {
         assert_eq!(gbad.first_zero_after(1), Some(2));
         assert_eq!(gbad.first_zero_after(2), Some(2));
         assert_eq!(gbad.first_zero_after(3), None);
+    }
+
+    #[test]
+    fn global_arr_deque() {
+        let mut gbad = GlobalArrDeque::<bool>::new(3);
+        assert_eq!(gbad.head_index(), 0);
+        assert_eq!(gbad.tail_index(), 0);
+        assert_eq!(gbad.push(true), None); // 0
+        assert_eq!(gbad.push(false), None); // 1
+        assert_eq!(gbad.push(true), None); // 2
+        assert_eq!(gbad.head_index(), 0);
+        assert_eq!(gbad.tail_index(), 3);
+        assert_eq!(gbad.push(true), Some((0, true))); // 3
+        assert_eq!(gbad.push(false), Some((1, false))); // 4
+        assert_eq!(gbad.head_index(), 2);
+        assert_eq!(gbad.tail_index(), 5);
+        assert_eq!(gbad[3], true);
+        assert_eq!(gbad[4], false);
+        gbad[3] = false;
+        assert_eq!(gbad.push(true), Some((2, true))); // 5
+        assert_eq!(gbad.push(true), Some((3, false))); // 6
     }
 }

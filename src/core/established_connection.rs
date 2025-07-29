@@ -2,7 +2,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use crate::{
     array_array::IpPacketBuffer,
-    bitvecdeque::GlobalBitArrDeque,
+    deques::GlobalBitArrDeque,
     constants::MAX_IP_PACKET_LENGTH,
     defragger::Defragger,
     dtls,
