@@ -2,6 +2,7 @@ mod ip_packet;
 
 use anyhow::{Result, anyhow, bail};
 use declarative_enum_dispatch::enum_dispatch;
+use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
@@ -170,8 +171,17 @@ pub(crate) struct ClientToServerHandshake {
     pub(crate) s2c_packet_length: u16,
     pub(crate) s2c_packet_interval_min: u64,
     pub(crate) s2c_packet_interval_max: u64,
+    pub(crate) c2s_packet_interval_max: u64,
     pub(crate) s2c_packet_finalize_delta: u64,
     pub(crate) server_timeout: u64,
+    pub(crate) monitor_packets: bool,
+}
+
+#[bitflags]
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum C2SHandshakeFlags {
+    MonitorPackets = 1 << 0,
 }
 
 impl ClientToServerHandshake {
@@ -191,15 +201,22 @@ impl MessageTrait for ClientToServerHandshake {
 
 impl serdes::Serializable for ClientToServerHandshake {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+        let mut flags = C2SHandshakeFlags::empty();
+        if self.monitor_packets {
+            flags |= C2SHandshakeFlags::MonitorPackets;
+        }
+
         Self::TYPE_BYTE.serialize(serializer);
         MAGIC_VALUE.serialize(serializer);
         SERDES_VERSION.serialize(serializer);
         self.protocol_version.serialize(serializer);
         self.oldest_compatible_protocol_version
             .serialize(serializer);
+        flags.bits().serialize(serializer);
         self.s2c_packet_length.serialize(serializer);
         self.s2c_packet_interval_min.serialize(serializer);
         self.s2c_packet_interval_max.serialize(serializer);
+        self.c2s_packet_interval_max.serialize(serializer);
         self.s2c_packet_finalize_delta.serialize(serializer);
         self.server_timeout.serialize(serializer);
     }
@@ -226,14 +243,22 @@ impl serdes::Deserializable for ClientToServerHandshake {
             );
         }
 
+        let protocol_version = read_cursor.read()?;
+        let oldest_compatible_protocol_version = read_cursor.read()?;
+        let flag_bits: u32 = read_cursor.read()?;
+        let flags: BitFlags<C2SHandshakeFlags> = BitFlags::try_from(flag_bits)
+            .map_err(|_| anyhow!("Unknown C2S handshake flags: {flag_bits:#x}"))?;
+
         Ok(ClientToServerHandshake {
-            protocol_version: read_cursor.read()?,
-            oldest_compatible_protocol_version: read_cursor.read()?,
+            protocol_version,
+            oldest_compatible_protocol_version,
             s2c_packet_length: read_cursor.read()?,
             s2c_packet_interval_min: read_cursor.read()?,
             s2c_packet_interval_max: read_cursor.read()?,
+            c2s_packet_interval_max: read_cursor.read()?,
             s2c_packet_finalize_delta: read_cursor.read()?,
             server_timeout: read_cursor.read()?,
+            monitor_packets: flags.contains(C2SHandshakeFlags::MonitorPackets),
         })
     }
 }
@@ -749,8 +774,9 @@ mod test {
         );
     }
 
-    #[test]
-    fn roundtrip_c2s_handshake() {
+    #[test_case(true)]
+    #[test_case(false)]
+    fn roundtrip_c2s_handshake(monitor_packets: bool) {
         assert_roundtrip_message(&Message::ClientToServerHandshake(ClientToServerHandshake {
             // make sure they're all long enough that endianness matters
             protocol_version: 5502,
@@ -758,8 +784,10 @@ mod test {
             s2c_packet_length: 2277,
             s2c_packet_interval_min: 992828,
             s2c_packet_interval_max: 1002838,
+            c2s_packet_interval_max: 2838239,
             s2c_packet_finalize_delta: 1_000_000,
             server_timeout: 2773818,
+            monitor_packets,
         }));
     }
 

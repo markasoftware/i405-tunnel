@@ -15,6 +15,12 @@ const MIN_MIN_INTERVAL: u64 = 50_000;
 pub(crate) const MIN_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const MIN_DEFAULT_TIMEOUT_PACKETS: u64 = 100;
 
+/// Contains the "symmetrical" part of the established connection settings; the stuff that would
+/// either have to be duplicated in each direction. The only purpose of this struct is to
+/// deduplicate logic and fields that would otherwise be identical for C2S and S2C directions. Don't
+/// add a new field here unless it is handled identically by client and server once the connection
+/// is established. For example, the "monitor packets" bool does not belong here, because that's
+/// always set to the same value in both directions.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct WireConfig {
     /// This is the length of the outgoing inner I405 packets, not IP packets

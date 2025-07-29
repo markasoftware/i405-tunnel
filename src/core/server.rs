@@ -5,7 +5,7 @@ use declarative_enum_dispatch::enum_dispatch;
 
 use crate::{
     constants::MAX_IP_PACKET_LENGTH,
-    core::established_connection::IsConnectionOpen,
+    core::established_connection::{self, IsConnectionOpen},
     dtls,
     hardware::{Hardware, real::QdiscSettings},
     messages,
@@ -476,18 +476,29 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                     packet_finalize_delta: c2s_handshake.s2c_packet_finalize_delta,
                     timeout: c2s_handshake.server_timeout,
                 };
+                let established_config = established_connection::Config {
+                    wire: s2c_wire_config,
+                    monitor_packets: if c2s_handshake.monitor_packets {
+                        established_connection::MonitorPackets::Remote
+                    } else {
+                        established_connection::MonitorPackets::No
+                    },
+                    peer,
+                };
+
                 log::info!(
                     "Handshake complete with {}, proceeding to established connection with {:?}",
                     peer,
-                    s2c_wire_config
+                    established_config,
                 );
+
                 if config.should_configure_qdisc {
                     hardware.configure_qdisc(&QdiscSettings::new(Duration::from_nanos(
                         c2s_handshake.s2c_packet_interval_max,
                     )))?;
                 }
                 let mut established_connection =
-                    EstablishedConnection::new(hardware, self.session, peer, s2c_wire_config)?;
+                    EstablishedConnection::new(hardware, self.session, established_config)?;
                 established_connection
                     .on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
                 Ok(ConnectionState::EstablishedConnection(

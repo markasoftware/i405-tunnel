@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use crate::wire_config::{MIN_DEFAULT_TIMEOUT, MIN_DEFAULT_TIMEOUT_PACKETS};
 
@@ -273,6 +273,7 @@ impl EzClap for CommonConfigCli {
 pub(crate) struct ClientConfigCli {
     pub(crate) common_configuration: CommonConfigCli,
     pub(crate) wire_configuration: WireConfigCli,
+    pub(crate) monitor_packets: Option<PathBuf>,
     pub(crate) peer: String,
 }
 
@@ -281,6 +282,11 @@ impl EzClap for ClientConfigCli {
         let mut result = Vec::new();
         result.extend(CommonConfigCli::to_args());
         result.extend(WireConfigCli::to_args());
+        result.push(
+            Arg::new("monitor_packets")
+                .long("monitor-packets")
+                .help("Measure packet drops and latencies in both directions. The argument is a directory where measurement result files will be placed"),
+        );
         result.push(
             Arg::new("peer")
                 .long("peer")
@@ -302,6 +308,7 @@ impl EzClap for ClientConfigCli {
         Self {
             common_configuration: CommonConfigCli::from_match(matches),
             wire_configuration: WireConfigCli::from_match(matches),
+            monitor_packets: matches.get_one::<PathBuf>("monitor_packets").cloned(),
             peer: matches.get_one::<String>("peer").unwrap().clone(),
         }
     }

@@ -1,14 +1,14 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 
 use crate::{
     array_array::IpPacketBuffer,
-    deques::GlobalBitArrDeque,
     constants::MAX_IP_PACKET_LENGTH,
     defragger::Defragger,
+    deques::GlobalBitArrDeque,
     dtls,
     hardware::Hardware,
     jitter::Jitterator,
-    messages::{self, Message, MessageTrait, Serializable as _},
+    messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     utils::ip_to_i405_length,
     wire_config::WireConfig,
@@ -21,8 +21,7 @@ const MAX_QUEUED_IP_PACKETS: usize = 64;
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
-    peer: std::net::SocketAddr,
-    wire_config: WireConfig,
+    config: Config,
     last_incoming_packet_timestamp: u64,
     next_outgoing_seqno: u64,
     jitterator: Jitterator,
@@ -123,33 +122,29 @@ impl EstablishedConnection {
     pub(crate) fn new(
         hardware: &impl Hardware,
         session: dtls::EstablishedSession,
-        peer: std::net::SocketAddr,
-        outgoing_wire_config: WireConfig,
+        config: Config,
     ) -> Result<Self> {
-        let mut jitterator = outgoing_wire_config.jitterator();
+        let mut jitterator = config.wire.jitterator();
         hardware.clear_event_listeners()?;
-        hardware.socket_connect(&peer)?;
+        hardware.socket_connect(&config.peer)?;
         hardware.set_timer(
-            hardware.timestamp() + jitterator.next_interval()
-                - outgoing_wire_config.packet_finalize_delta,
+            hardware.timestamp() + jitterator.next_interval() - config.wire.packet_finalize_delta,
         );
         // TODO make configurable. How long after sending a packet we will assume it to be dropped
         // if we haven't received an ack (and it's ack-eliciting)
         let outgoing_timeout = Duration::from_secs(1);
         let outgoing_ack_capacity = std::cmp::max(
             3,
-            outgoing_timeout.div_duration_f64(Duration::from_nanos(
-                outgoing_wire_config.packet_interval_min,
-            )) as usize
+            outgoing_timeout.div_duration_f64(Duration::from_nanos(config.wire.packet_interval_min))
+                as usize
                 + 1,
         );
         Ok(Self {
             session,
-            peer,
             outgoing_connection: OutgoingConnection::new(hardware),
-            i405_packet_length: ip_to_i405_length(outgoing_wire_config.packet_length, peer).into(),
+            i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer).into(),
             defragger: Defragger::new(),
-            wire_config: outgoing_wire_config,
+            config,
             // TODO the length of this should probably be chosen more intelligently; it should be at
             // least the number of incoming packets we receive for each outgoing packet we send
             // times a decent safety factor. May need to include reverse packet interval in the
@@ -169,7 +164,7 @@ impl EstablishedConnection {
     }
 
     pub(crate) fn peer(&self) -> std::net::SocketAddr {
-        self.peer
+        self.config.peer
     }
 
     pub(crate) fn on_timer(
@@ -179,7 +174,7 @@ impl EstablishedConnection {
     ) -> Result<IsConnectionOpen> {
         // timer means that it's about time to send a packet -- let's finalize the packet and send
         // it to the hardware!
-        let send_timestamp = timer_timestamp + self.wire_config.packet_finalize_delta;
+        let send_timestamp = timer_timestamp + self.config.wire.packet_finalize_delta;
         let seqno = self.next_outgoing_seqno;
         self.next_outgoing_seqno += 1;
 
@@ -208,12 +203,16 @@ impl EstablishedConnection {
 
         let outgoing_cleartext_packet = packet_builder.into_inner();
         let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
-        hardware.send_outgoing_packet(outgoing_packet.as_ref(), self.peer, Some(send_timestamp))?;
+        hardware.send_outgoing_packet(
+            outgoing_packet.as_ref(),
+            self.config.peer,
+            Some(send_timestamp),
+        )?;
 
         debug_assert_eq!(self.acked_outgoing_packets.tail_index(), seqno);
         let popped_outgoing_ack = self.acked_outgoing_packets.push(!ack_elicited);
-        if let Some((_popped_seqno, false)) = popped_outgoing_ack {
-            todo!("Handle un-acked packet");
+        if let Some((popped_seqno, false)) = popped_outgoing_ack {
+            self.on_nack(popped_seqno);
         }
 
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
@@ -225,10 +224,10 @@ impl EstablishedConnection {
         // );
         let next_interval = self.jitterator.next_interval();
         hardware.register_interval(next_interval);
-        hardware.set_timer(send_timestamp + next_interval - self.wire_config.packet_finalize_delta);
+        hardware.set_timer(send_timestamp + next_interval - self.config.wire.packet_finalize_delta);
 
         // check if the incoming connection timed out
-        if hardware.timestamp() > self.last_incoming_packet_timestamp + self.wire_config.timeout {
+        if hardware.timestamp() > self.last_incoming_packet_timestamp + self.config.wire.timeout {
             return Ok(IsConnectionOpen::TimedOut);
         }
 
@@ -263,7 +262,7 @@ impl EstablishedConnection {
             }
             dtls::DecryptResult::SendThese(send_these) => {
                 for packet in send_these {
-                    hardware.send_outgoing_packet(&packet, self.peer, None)?;
+                    hardware.send_outgoing_packet(&packet, self.config.peer, None)?;
                 }
                 Ok(IsConnectionOpen::Yes)
             }
@@ -325,9 +324,10 @@ impl EstablishedConnection {
                                 log::error!(
                                     "Got an ack for a packet that's already been acked, or didn't need to be acked."
                                 );
+                            } else {
+                                self.on_ack(acked_seqno);
                             }
                             self.acked_outgoing_packets.set(acked_seqno, true);
-                            // TODO actually trigger relevant fns
                         }
                     }
                 }
@@ -379,6 +379,16 @@ impl EstablishedConnection {
         }
 
         Ok(())
+    }
+
+    /// Called when our packet with the given seqno gets acknowledged
+    fn on_ack(&mut self, seqno: u64) {
+        todo!();
+    }
+
+    /// Called when our packet with the given seqno is assumed to be lost by the other side
+    fn on_nack(&mut self, seqno: u64) {
+        todo!();
     }
 
     // When I name this just `on_terminate`, there's a conflict with the name of the same method
@@ -433,6 +443,24 @@ fn outgoing_acks(incoming_acks_deque: &mut GlobalBitArrDeque) -> OutgoingAckIter
         seqno: incoming_acks_deque.head_index(),
         incoming_acks_deque,
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct Config {
+    pub(crate) wire: WireConfig,
+    pub(crate) peer: SocketAddr,
+    pub(crate) monitor_packets: MonitorPackets,
+}
+
+#[derive(Debug)]
+pub(crate) enum MonitorPackets {
+    No,
+    /// measure packet delays and drops, but do not send them to the hardware; instead, send
+    /// PacketStatus messages to the other side with info about the drops/delays.
+    Remote,
+    /// measure packet delays and drops, including those read from PacketStatus messages, and
+    /// immediately report to hardware
+    Local,
 }
 
 #[cfg(test)]

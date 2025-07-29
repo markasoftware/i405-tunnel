@@ -95,6 +95,7 @@ fn make_core(
                 peer_address: peer,
                 pre_shared_key: common_config_cli.pre_shared_key.clone(),
                 should_configure_qdisc: !common_config_cli.no_tun_qdisc,
+                monitor_packets: client_configuration.monitor_packets.is_some(),
             };
             core::ConcreteCore::Client(
                 core::client::Core::new(client_config, hardware)

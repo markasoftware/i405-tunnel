@@ -6,7 +6,10 @@ use declarative_enum_dispatch::enum_dispatch;
 
 use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
-use crate::core::{C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use crate::core::{
+    C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    established_connection,
+};
 use crate::hardware::Hardware;
 use crate::hardware::real::QdiscSettings;
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
@@ -278,8 +281,10 @@ impl C2SHandshakeSent {
             s2c_packet_length: config.server_wire_config.packet_length,
             s2c_packet_interval_min: config.server_wire_config.packet_interval_min,
             s2c_packet_interval_max: config.server_wire_config.packet_interval_max,
+            c2s_packet_interval_max: config.client_wire_config.packet_interval_max,
             s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
             server_timeout: config.server_wire_config.timeout,
+            monitor_packets: config.monitor_packets,
         };
         let did_add = builder
             .try_add_message_no_ack(&messages::Message::ClientToServerHandshake(c2s_handshake));
@@ -390,13 +395,17 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                 );
 
                 // maybe one day will pass in the server's protocol version here?
+                let config = established_connection::Config {
+                    wire: config.client_wire_config.clone(),
+                    peer: config.peer_address,
+                    monitor_packets: if config.monitor_packets {
+                        established_connection::MonitorPackets::Local
+                    } else {
+                        established_connection::MonitorPackets::No
+                    },
+                };
                 Ok(ConnectionState::EstablishedConnection(
-                    EstablishedConnection::new(
-                        hardware,
-                        self.session,
-                        config.peer_address,
-                        config.client_wire_config.clone(),
-                    )?,
+                    EstablishedConnection::new(hardware, self.session, config)?,
                 ))
             }
             Some(other_msg) => bail!(
@@ -494,4 +503,5 @@ pub(crate) struct Config {
     pub(crate) peer_address: SocketAddr,
     pub(crate) pre_shared_key: Vec<u8>,
     pub(crate) should_configure_qdisc: bool,
+    pub(crate) monitor_packets: bool,
 }
