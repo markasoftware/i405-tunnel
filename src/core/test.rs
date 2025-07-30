@@ -429,7 +429,10 @@ fn assert_statistics(vec: Vec<u64>, min: u64, max: u64, average_range: std::ops:
     );
 }
 
+// there's no explicit delay in this test, but it just takes a while to run inherently since many
+// iterations are required.
 #[test]
+#[ignore]
 fn jitter() {
     setup_logging();
     let (mut simulated_hardware, mut cores) =
