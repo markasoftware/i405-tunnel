@@ -425,9 +425,12 @@ impl serdes::Deserializable for SendSystemTimestamp {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct PacketStatus {
     pub(crate) seqno: u64,
-    // if set, then the packet was received after the given delay (may be negative due to clock
-    // skew). If unset, the packet was dropped.
-    pub(crate) delay: Option<i64>,
+    /// The PacketStatus is sent from the side that received the packet being referenced, to the
+    /// side that sent it. The tx_time is the time that the sender of the original packet (ie, the
+    /// recipient of the PacketStatus message) sent the original packet, and the rx_time is the time
+    /// that the recipient of the original packet (ie, the sender of the PacketStatus message)
+    /// received the original packet.
+    pub(crate) tx_rx_epoch_times: Option<(u64, u64)>,
 }
 
 impl PacketStatus {
@@ -448,17 +451,9 @@ impl serdes::Serializable for PacketStatus {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.seqno.serialize(serializer);
-        match self.delay {
-            None => i64::MIN.serialize(serializer),
-            Some(delay) => {
-                assert_ne!(
-                    delay,
-                    i64::MIN,
-                    "Can't serialize PacketStatus with Received(i64::MIN)"
-                );
-                delay.serialize(serializer);
-            }
-        }
+        let (tx_time, rx_time) = self.tx_rx_epoch_times.unwrap_or((0, 0));
+        tx_time.serialize(serializer);
+        rx_time.serialize(serializer);
     }
 }
 
@@ -467,10 +462,15 @@ impl serdes::Deserializable for PacketStatus {
         deserialize_type_byte!(read_cursor);
 
         let seqno = read_cursor.read()?;
-        let raw_delay: i64 = read_cursor.read()?;
-        let delay = (raw_delay != i64::MIN).then_some(raw_delay);
+        let raw_tx_time = read_cursor.read()?;
+        let raw_rx_time = read_cursor.read()?;
+        let tx_rx_epoch_times =
+            (raw_tx_time != 0 || raw_rx_time != 0).then_some((raw_tx_time, raw_rx_time));
 
-        Ok(PacketStatus { seqno, delay })
+        Ok(PacketStatus {
+            seqno,
+            tx_rx_epoch_times,
+        })
     }
 }
 
@@ -884,15 +884,11 @@ mod test {
     fn roundtrip_packet_status() {
         assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
             seqno: 2888,
-            delay: Some(-2299),
+            tx_rx_epoch_times: Some((277, 9929)),
         }));
         assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
             seqno: 2888,
-            delay: Some(2299),
-        }));
-        assert_roundtrip_message(&Message::PacketStatus(PacketStatus {
-            seqno: 2888,
-            delay: None,
+            tx_rx_epoch_times: None,
         }));
     }
 
