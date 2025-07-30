@@ -478,6 +478,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
                 };
                 let established_config = established_connection::Config {
                     wire: s2c_wire_config,
+                    reverse_packet_interval_min: c2s_handshake.c2s_packet_interval_min,
                     monitor_packets: if c2s_handshake.monitor_packets {
                         established_connection::MonitorPackets::Remote
                     } else {

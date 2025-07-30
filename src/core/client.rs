@@ -281,7 +281,7 @@ impl C2SHandshakeSent {
             s2c_packet_length: config.server_wire_config.packet_length,
             s2c_packet_interval_min: config.server_wire_config.packet_interval_min,
             s2c_packet_interval_max: config.server_wire_config.packet_interval_max,
-            c2s_packet_interval_max: config.client_wire_config.packet_interval_max,
+            c2s_packet_interval_min: config.client_wire_config.packet_interval_min,
             s2c_packet_finalize_delta: config.server_wire_config.packet_finalize_delta,
             server_timeout: config.server_wire_config.timeout,
             monitor_packets: config.monitor_packets,
@@ -397,6 +397,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
                 // maybe one day will pass in the server's protocol version here?
                 let config = established_connection::Config {
                     wire: config.client_wire_config.clone(),
+                    reverse_packet_interval_min: config.server_wire_config.packet_interval_max,
                     peer: config.peer_address,
                     monitor_packets: if config.monitor_packets {
                         established_connection::MonitorPackets::Local

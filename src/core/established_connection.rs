@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, net::SocketAddr, time::Duration};
+use std::{
+    collections::VecDeque,
+    net::SocketAddr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     array_array::IpPacketBuffer,
@@ -139,6 +143,13 @@ impl EstablishedConnection {
                 as usize
                 + 1,
         );
+        let incoming_ack_capacity = std::cmp::max(
+            3,
+            usize::try_from(
+                2 * config.wire.packet_interval_max / config.reverse_packet_interval_min,
+            )
+            .unwrap(),
+        );
         Ok(Self {
             session,
             outgoing_connection: OutgoingConnection::new(hardware),
@@ -149,7 +160,7 @@ impl EstablishedConnection {
             // least the number of incoming packets we receive for each outgoing packet we send
             // times a decent safety factor. May need to include reverse packet interval in the
             // handshake.
-            acked_incoming_packets: GlobalBitArrDeque::new(1000),
+            acked_incoming_packets: GlobalBitArrDeque::new(incoming_ack_capacity),
             acked_outgoing_packets: GlobalBitArrDeque::new(outgoing_ack_capacity),
             // this is a tiny bit jank in the client case, because the server won't start sending us
             // packets until it receives our first post-handshake packet. If we have fast incoming
@@ -189,6 +200,24 @@ impl EstablishedConnection {
             could_add_seqno,
             "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
         );
+
+        if self.config.monitor_packets != MonitorPackets::No {
+            let timestamp = u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            )
+            .unwrap();
+            let could_add_tx_epoch_time = packet_builder.try_add_message(
+                &Message::TxEpochTime(messages::TxEpochTime { timestamp }),
+                &mut ack_elicited,
+            );
+            assert!(
+                could_add_tx_epoch_time,
+                "Wasn't able to add tx epoch time to packet"
+            );
+        }
 
         // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
         // this is a substantial portion of the overall cost of building a new packet; it causes the
@@ -341,7 +370,7 @@ impl EstablishedConnection {
                     }
                     incoming_seqno = Some(seqno);
                 }
-                Message::SendSystemTimestamp(messages::SendSystemTimestamp { timestamp }) => {
+                Message::TxEpochTime(messages::TxEpochTime { timestamp }) => {
                     if let Some(existing_timestamp) = send_system_timestamp {
                         bail!(
                             "Multiple send system timestamps in the same packet: {}, then {}",
@@ -448,11 +477,14 @@ fn outgoing_acks(incoming_acks_deque: &mut GlobalBitArrDeque) -> OutgoingAckIter
 #[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) wire: WireConfig,
+    /// The packet_interval_max from the complementary WireConfig, used to set appropriate ack
+    /// timeout.
+    pub(crate) reverse_packet_interval_min: u64,
     pub(crate) peer: SocketAddr,
     pub(crate) monitor_packets: MonitorPackets,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MonitorPackets {
     No,
     /// measure packet delays and drops, but do not send them to the hardware; instead, send

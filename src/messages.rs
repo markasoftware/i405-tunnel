@@ -16,7 +16,7 @@ const CLIENT_TO_SERVER_HANDSHAKE_TYPE_BYTE: u8 = 0x01;
 const SERVER_TO_CLIENT_HANDSHAKE_TYPE_BYTE: u8 = 0x02;
 const ACK_TYPE_BYTE: u8 = 0x03;
 const SEQUENCE_NUMBER_TYPE_BYTE: u8 = 0x04;
-const SEND_SYSTEM_TIMESTAMP_TYPE_BYTE: u8 = 0x05;
+const TX_EPOCH_TIME_TYPE_BYTE: u8 = 0x05;
 const PACKET_STATUS_TYPE_BYTE: u8 = 0x06;
 // IpPacket takes 0x10 to 0x1F
 // IpPacketFragment takes 0x20 and 0x21
@@ -111,7 +111,7 @@ enum_dispatch! {
         ServerToClientHandshake(ServerToClientHandshake),
         Ack(Ack),
         SequenceNumber(SequenceNumber),
-        SendSystemTimestamp(SendSystemTimestamp),
+        TxEpochTime(TxEpochTime),
         PacketStatus(PacketStatus),
         IpPacket(IpPacket),
         IpPacketFragment(IpPacketFragment),
@@ -142,7 +142,7 @@ impl serdes::Serializable for Message {
             ServerToClientHandshake;
             Ack;
             SequenceNumber;
-            SendSystemTimestamp;
+            TxEpochTime;
             PacketStatus;
             IpPacket;
             IpPacketFragment
@@ -171,7 +171,7 @@ pub(crate) struct ClientToServerHandshake {
     pub(crate) s2c_packet_length: u16,
     pub(crate) s2c_packet_interval_min: u64,
     pub(crate) s2c_packet_interval_max: u64,
-    pub(crate) c2s_packet_interval_max: u64,
+    pub(crate) c2s_packet_interval_min: u64,
     pub(crate) s2c_packet_finalize_delta: u64,
     pub(crate) server_timeout: u64,
     pub(crate) monitor_packets: bool,
@@ -216,7 +216,7 @@ impl serdes::Serializable for ClientToServerHandshake {
         self.s2c_packet_length.serialize(serializer);
         self.s2c_packet_interval_min.serialize(serializer);
         self.s2c_packet_interval_max.serialize(serializer);
-        self.c2s_packet_interval_max.serialize(serializer);
+        self.c2s_packet_interval_min.serialize(serializer);
         self.s2c_packet_finalize_delta.serialize(serializer);
         self.server_timeout.serialize(serializer);
     }
@@ -255,7 +255,7 @@ impl serdes::Deserializable for ClientToServerHandshake {
             s2c_packet_length: read_cursor.read()?,
             s2c_packet_interval_min: read_cursor.read()?,
             s2c_packet_interval_max: read_cursor.read()?,
-            c2s_packet_interval_max: read_cursor.read()?,
+            c2s_packet_interval_min: read_cursor.read()?,
             s2c_packet_finalize_delta: read_cursor.read()?,
             server_timeout: read_cursor.read()?,
             monitor_packets: flags.contains(C2SHandshakeFlags::MonitorPackets),
@@ -388,35 +388,35 @@ impl serdes::Deserializable for SequenceNumber {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct SendSystemTimestamp {
+pub(crate) struct TxEpochTime {
     pub(crate) timestamp: u64,
 }
 
-impl SendSystemTimestamp {
-    const TYPE_BYTE: u8 = SEND_SYSTEM_TIMESTAMP_TYPE_BYTE;
+impl TxEpochTime {
+    const TYPE_BYTE: u8 = TX_EPOCH_TIME_TYPE_BYTE;
 
     fn does_type_byte_match(type_byte: u8) -> bool {
         type_byte == Self::TYPE_BYTE
     }
 }
 
-impl MessageTrait for SendSystemTimestamp {
+impl MessageTrait for TxEpochTime {
     fn is_ack_eliciting(&self) -> bool {
         false
     }
 }
 
-impl serdes::Serializable for SendSystemTimestamp {
+impl serdes::Serializable for TxEpochTime {
     fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.timestamp.serialize(serializer);
     }
 }
 
-impl serdes::Deserializable for SendSystemTimestamp {
+impl serdes::Deserializable for TxEpochTime {
     fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
         deserialize_type_byte!(read_cursor);
-        Ok(SendSystemTimestamp {
+        Ok(TxEpochTime {
             timestamp: read_cursor.read()?,
         })
     }
@@ -494,7 +494,7 @@ impl serdes::Deserializable for Message {
                 )+
             };
         }
-        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; SequenceNumber; SendSystemTimestamp; PacketStatus; IpPacket; IpPacketFragment);
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; SequenceNumber; TxEpochTime; PacketStatus; IpPacket; IpPacketFragment);
         Err(anyhow!("Unknown message type byte: {message_type:#x}"))
     }
 }
@@ -784,7 +784,7 @@ mod test {
             s2c_packet_length: 2277,
             s2c_packet_interval_min: 992828,
             s2c_packet_interval_max: 1002838,
-            c2s_packet_interval_max: 2838239,
+            c2s_packet_interval_min: 2838239,
             s2c_packet_finalize_delta: 1_000_000,
             server_timeout: 2773818,
             monitor_packets,
@@ -875,9 +875,7 @@ mod test {
 
     #[test]
     fn roundtrip_send_system_timestamp() {
-        assert_roundtrip_message(&Message::SendSystemTimestamp(SendSystemTimestamp {
-            timestamp: 1234,
-        }))
+        assert_roundtrip_message(&Message::TxEpochTime(TxEpochTime { timestamp: 1234 }))
     }
 
     #[test]
