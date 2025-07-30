@@ -500,7 +500,7 @@ impl serdes::Deserializable for Message {
 }
 
 /// Return whether there's another message to be read from this cursor. Does not move the cursor.
-pub(crate) fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
+fn has_message<T: AsRef<[u8]>>(read_cursor: &ReadCursor<T>) -> bool {
     read_cursor
         .peek_exact_comptime::<1>()
         .is_some_and(|x| x != [0])

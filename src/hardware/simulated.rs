@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::Core;
+use crate::utils::AbsoluteDirection;
 use crate::{core, hardware::Hardware};
 
 use super::real::QdiscSettings;
@@ -31,6 +32,7 @@ struct OneSideInfo {
 
     /// For each outgoing packet that's been read by the core, what timestamp was it read at?
     outgoing_read_times: RefCell<Vec<u64>>,
+
     // The next time we should wake up this thread.
     timer: Cell<Option<u64>>,
     should_read_outgoing: Cell<bool>,
@@ -409,6 +411,14 @@ impl<'a> Hardware for OneSideHardware<'a> {
     }
 
     fn register_interval(&self, _duration: u64) {}
+
+    fn register_packet_status(
+        &self,
+        _direction: AbsoluteDirection,
+        _seqno: u64,
+        _send_receive_epoch_times: Option<(u64, u64)>,
+    ) {
+    }
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
         self.our_side()

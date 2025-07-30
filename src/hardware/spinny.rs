@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     net::{SocketAddr, UdpSocket},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -16,7 +17,8 @@ use crate::{
     constants::MAX_IP_PACKET_LENGTH,
     core,
     deviation_stats::DeviationStatsThread,
-    utils::{instant_to_timestamp, timestamp_to_instant},
+    monitor_packets::MonitorPacketsThread,
+    utils::{AbsoluteDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
 const OVERSLEEP_WARNING: Duration = Duration::from_micros(10);
@@ -33,6 +35,7 @@ pub(crate) struct SpinnyHardware {
 
     next_outgoing_packet_id: Cell<u64>,
     deviation_stats_thread: Option<DeviationStatsThread>,
+    monitor_packets_thread: Option<MonitorPacketsThread>,
 
     socket: UdpSocket,
     tun: tun_rs::SyncDevice,
@@ -43,6 +46,7 @@ impl SpinnyHardware {
         listen_addr: SocketAddr,
         tun: tun_rs::SyncDevice,
         deviation_stats: Option<Duration>,
+        monitor_packets_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let socket = UdpSocket::bind(listen_addr)?;
         socket
@@ -73,6 +77,10 @@ impl SpinnyHardware {
 
             next_outgoing_packet_id: Cell::new(0),
             deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
+            // I love that `transpose()` exists
+            monitor_packets_thread: monitor_packets_dir
+                .map(MonitorPacketsThread::spawn)
+                .transpose()?,
 
             socket,
             tun,
@@ -219,6 +227,18 @@ impl Hardware for SpinnyHardware {
                 duration,
             );
         }
+    }
+
+    fn register_packet_status(
+        &self,
+        direction: AbsoluteDirection,
+        seqno: u64,
+        tx_rx_epoch_times: Option<(u64, u64)>,
+    ) {
+        self.monitor_packets_thread
+            .as_ref()
+            .expect("Tried to register_packet_status on hardware that isn't set up record them")
+            .register_packet_status(direction, seqno, tx_rx_epoch_times);
     }
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {

@@ -16,6 +16,7 @@ mod dtls;
 mod hardware;
 mod jitter;
 mod messages;
+mod monitor_packets;
 mod queued_ip_packet;
 mod utils;
 mod wire_config;
@@ -38,6 +39,12 @@ fn main() {
         .unwrap_or(default_listen_addr.to_string())
         .parse()
         .expect("Failed to parse listen address as IP:PORT");
+    let monitor_packets_dir =
+        if let config_cli::ConfigCli::Client(ref client_configuration) = configuration {
+            client_configuration.monitor_packets.clone()
+        } else {
+            None
+        };
 
     match common_config_cli.poll_mode {
         config_cli::PollMode::Sleepy => {
@@ -51,6 +58,7 @@ fn main() {
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
+                monitor_packets_dir,
             )
             .expect("Failed to construct SleepyHardware");
             let core = make_core(&configuration, &hardware);
@@ -67,6 +75,7 @@ fn main() {
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
+                monitor_packets_dir,
             )
             .expect("Failed to construct SpinnyHardware");
             let core = make_core(&configuration, &hardware);

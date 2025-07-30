@@ -127,6 +127,16 @@ impl<TX> ChannelThread<TX> {
     }
 }
 
+pub(crate) enum AbsoluteDirection {
+    S2C,
+    C2S,
+}
+
+pub(crate) enum RelativeDirection {
+    Outgoing,
+    Incoming,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

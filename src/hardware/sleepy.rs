@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     net::{SocketAddr, UdpSocket},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
@@ -13,7 +14,8 @@ use crate::{
     core,
     deviation_stats::DeviationStatsThread,
     hardware::Hardware,
-    utils::{ChannelThread, instant_to_timestamp, timestamp_to_instant},
+    monitor_packets::MonitorPacketsThread,
+    utils::{AbsoluteDirection, ChannelThread, instant_to_timestamp, timestamp_to_instant},
 };
 
 use super::real::{QdiscSettings, configure_qdisc};
@@ -42,6 +44,7 @@ pub(crate) struct SleepyHardware {
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
     _incoming_read_thread: ChannelThread<()>,
     deviation_stats_thread: Option<DeviationStatsThread>,
+    monitor_packets_thread: Option<MonitorPacketsThread>,
 
     // events_rx should be listed after the threads, because if it's dropped before the threads are
     // dropped, then the threads may try to send to their events_txs after the receiver has been
@@ -54,6 +57,7 @@ impl SleepyHardware {
         listen_addr: SocketAddr,
         tun: tun_rs::SyncDevice,
         deviation_stats: Option<Duration>,
+        monitor_packets_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let (outgoing_read_requests_tx, outgoing_read_requests_rx) = mpsc::channel();
         let (incoming_reads_tx, incoming_reads_rx) = mpsc::channel();
@@ -120,6 +124,9 @@ impl SleepyHardware {
                 )
             }),
             deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
+            monitor_packets_thread: monitor_packets_dir
+                .map(MonitorPacketsThread::spawn)
+                .transpose()?,
         })
     }
 
@@ -395,6 +402,18 @@ impl Hardware for SleepyHardware {
                 duration,
             );
         }
+    }
+
+    fn register_packet_status(
+        &self,
+        direction: AbsoluteDirection,
+        seqno: u64,
+        tx_rx_epoch_times: Option<(u64, u64)>,
+    ) {
+        self.monitor_packets_thread
+            .as_ref()
+            .expect("Tried to register packet status on hardware that isn't set up to record them")
+            .register_packet_status(direction, seqno, tx_rx_epoch_times);
     }
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {

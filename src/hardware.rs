@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use real::QdiscSettings;
 
+use crate::utils::AbsoluteDirection;
+
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
 /// only able to interact with the outside world through an instance of `Hardware`
 pub(crate) trait Hardware {
@@ -48,7 +50,16 @@ pub(crate) trait Hardware {
 
     /// See
     /// https://www.bufferbloat.net/projects/codel/wiki/Best_practices_for_benchmarking_Codel_and_FQ_Codel/
-    /// and the tc-codel man pages
-    /// Used to inform the
+    /// and the tc-codel man pages. Tries to set up the qdisc and txlen to minimize latency while
+    /// also preventing starvation.
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()>;
+
+    /// When monitor packets mode is on and we are the client, use this to inform the hardware of
+    /// the status of each packet (typically the hardware will just write it to a file).
+    fn register_packet_status(
+        &self,
+        direction: AbsoluteDirection,
+        seqno: u64,
+        tx_rx_epoch_times: Option<(u64, u64)>,
+    );
 }
