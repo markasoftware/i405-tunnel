@@ -469,7 +469,7 @@ impl LocalAckGenerator {
     // non-ack-eliciting packets, then an ack-eliciting packet -- it will rotate the queue millions
     // of times, causing a huge latency burst. So we want to keep rotating it continuously.
     fn on_non_ack_eliciting_incoming_packet(&mut self, seqno: u64) {
-        // TODO handle seqno being less than head, but add a regression test first!
+        // don't need to explicitly check seqno<head_index; the loop will just be empty.
         for _ in self.locally_acked_packets.tail_index()..=seqno {
             self.locally_acked_packets.push(true);
         }
@@ -791,6 +791,52 @@ mod test {
             &[Ack {
                 first_acked_seqno: 5,
                 last_acked_seqno: 5,
+            }]
+        );
+    }
+
+    // test what happens when we get an incoming packet with seqno that's already "clocked out" of
+    // our incoming packet tracker.
+    #[test]
+    fn compute_local_acks_ancient_incoming_packets() {
+        let mut generator = LocalAckGenerator::new(3);
+        generator.on_ack_eliciting_incoming_packet(7);
+        // should do absolutely nothing, just making sure it doesn't panic or nothin'
+        generator.on_non_ack_eliciting_incoming_packet(2);
+        generator.on_non_ack_eliciting_incoming_packet(3);
+        assert_eq!(
+            &generator_local_acks(&mut generator),
+            &[Ack {
+                first_acked_seqno: 7,
+                last_acked_seqno: 7
+            }]
+        );
+    }
+
+    #[test]
+    fn compute_local_acks_clocking_out() {
+        let mut generator = LocalAckGenerator::new(3);
+        // first, sanity check
+        generator.on_ack_eliciting_incoming_packet(3);
+        generator.on_non_ack_eliciting_incoming_packet(5);
+        assert_eq!(
+            &generator_local_acks(&mut generator),
+            &[Ack {
+                first_acked_seqno: 3,
+                last_acked_seqno: 3
+            }]
+        );
+        generator.on_ack_eliciting_incoming_packet(13);
+        generator.on_non_ack_eliciting_incoming_packet(16);
+        assert_eq!(&generator_local_acks(&mut generator), &[]);
+        // and make sure ack-eliciting packets do the same (though how could they not)
+        generator.on_ack_eliciting_incoming_packet(23);
+        generator.on_ack_eliciting_incoming_packet(26);
+        assert_eq!(
+            &generator_local_acks(&mut generator),
+            &[Ack {
+                first_acked_seqno: 26,
+                last_acked_seqno: 26,
             }]
         );
     }
