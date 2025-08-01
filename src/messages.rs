@@ -5,7 +5,7 @@ use declarative_enum_dispatch::enum_dispatch;
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
-use crate::reliability::{OutgoingPacketReliabilityActionBuilder, ReliabilityAction, ReliableMessage};
+use crate::reliability::{ReliabilityAction, ReliabilityActionBuilder, ReliableMessage};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
 pub(crate) use serdes::{Serializable, SerializableLength as _};
 
@@ -44,7 +44,11 @@ impl PacketBuilder {
     }
 
     /// If there's space to add the given message to the packet, do so.
-    pub(crate) fn try_add_message(&mut self, message: &Message, reliability_builder: &mut OutgoingPacketReliabilityActionBuilder<'_>) -> bool {
+    pub(crate) fn try_add_message(
+        &mut self,
+        message: &Message,
+        reliability_builder: &mut ReliabilityActionBuilder<'_>,
+    ) -> bool {
         let (added, ra) = self.try_add_message_explicit_reliability(message);
         if let Some(ra) = ra {
             reliability_builder.add_reliability_action(ra);
@@ -52,7 +56,12 @@ impl PacketBuilder {
         added
     }
 
-    pub(crate) fn try_add_message_explicit_reliability(&mut self, message: &Message) -> (bool, Option<ReliabilityAction>) {
+    // TODO would like to make the return type here more type safe, since (false, Some(..)) is be
+    // impossible. Should return a custom enum instead
+    pub(crate) fn try_add_message_explicit_reliability(
+        &mut self,
+        message: &Message,
+    ) -> (bool, Option<ReliabilityAction>) {
         if !self.can_add_message(message) {
             return (false, None);
         }
@@ -454,7 +463,9 @@ impl PacketStatus {
 
 impl MessageTrait for PacketStatus {
     fn reliability_action(&self) -> Option<ReliabilityAction> {
-        Some(ReliabilityAction::ReliableMessage(ReliableMessage::PacketStatus(self.clone())))
+        Some(ReliabilityAction::ReliableMessage(
+            ReliableMessage::PacketStatus(self.clone()),
+        ))
     }
 }
 

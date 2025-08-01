@@ -17,8 +17,10 @@ pub(crate) trait Hardware {
     /// Request a call to Core::on_timer at the given timestamp. If we're replacing an existing
     /// timer, returns the old timer.
     fn set_timer(&self, timestamp: u64) -> Option<u64>;
-    /// Return the current timestamp
+    /// Return the current timestamp. This is monotonic and should be used for all precise purposes.
     fn timestamp(&self) -> u64;
+    /// Return nanos since unix epoch. May go backwards and all that fun.
+    fn epoch_timestamp(&self) -> u64;
 
     /// Request to read an IP packet that the local system is trying to send through the tunnel. If
     /// Request a call to Core::on_read_outgoing_packet with a packet received no earlier than the

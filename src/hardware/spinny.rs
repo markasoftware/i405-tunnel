@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     Hardware,
-    real::{QdiscSettings, configure_qdisc},
+    real::{QdiscSettings, configure_qdisc, epoch_timestamp},
 };
 use crate::{
     array_array::IpPacketBuffer,
@@ -155,6 +155,10 @@ impl Hardware for SpinnyHardware {
             .as_nanos()
             .try_into()
             .unwrap()
+    }
+
+    fn epoch_timestamp(&self) -> u64 {
+        epoch_timestamp()
     }
 
     fn set_timer(&self, timestamp: u64) -> Option<u64> {

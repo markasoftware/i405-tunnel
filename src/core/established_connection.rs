@@ -1,22 +1,17 @@
-use std::{
-    collections::VecDeque,
-    net::SocketAddr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 
 use crate::{
     array_array::IpPacketBuffer,
-    constants::MAX_IP_PACKET_LENGTH,
     defragger::Defragger,
-    deques::GlobalBitArrDeque,
+    deques::{ArrDeque, GlobalBitArrDeque},
     dtls,
     hardware::Hardware,
     jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     reliability::{
-        LocalAckGenerator, OutgoingPacketReliabilityActionBuilder, ReliabilityAction,
-        ReliableMessage, RemoteAckHandler,
+        LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, ReliableMessage,
+        RemoteAckHandler,
     },
     utils::{AbsoluteDirection, ip_to_i405_length},
     wire_config::WireConfig,
@@ -24,10 +19,12 @@ use crate::{
 
 use anyhow::{Result, anyhow, bail};
 
-const MAX_QUEUED_IP_PACKETS: usize = 64;
+const MAX_QUEUED_IP_PACKETS: usize = 3;
 const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
-// TODO revisit this, and maybe it should scale inversely to the outgoing packet interval?
-const RELIABLE_MESSAGE_QUEUE_LENGTH: usize = 128;
+// TODO revisit this!!!
+const RELIABLE_MESSAGE_RTX_QUEUE_LENGTH: usize = 1024;
+// TODO also revisit this, should be long enough to queue all the incoming packets we get between outgoing packets.
+const PACKET_STATUS_QUEUE_LENGTH: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
@@ -43,11 +40,9 @@ pub(crate) struct EstablishedConnection {
     local_ack_generator: LocalAckGenerator,
     remote_ack_handler: RemoteAckHandler,
 
-    /// Either untransmitted packets or retransmissions
-    reliable_message_queue: VecDeque<ReliableMessage>,
+    reliable_message_rtx_queue: VecDeque<ReliableMessage>,
 
-    // For packet monitoring only: Set to 1 when we receive a packet with given seqno.
-    incoming_packets: GlobalBitArrDeque,
+    packet_monitor: PacketMonitor,
 }
 
 // OutgoingConnection is sort of historical cruft, there was once a grand plan for a "scheduled"
@@ -79,7 +74,7 @@ impl OutgoingConnection {
         &mut self,
         hardware: &impl Hardware,
         packet_builder: &mut messages::PacketBuilder,
-        _reliability_builder: &mut OutgoingPacketReliabilityActionBuilder<'_>, // no IP messages are ack-eliciting
+        _reliability_builder: &mut ReliabilityActionBuilder<'_>, // no IP messages are ack-eliciting
     ) {
         let write_cursor = packet_builder.write_cursor();
         'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
@@ -119,15 +114,7 @@ impl OutgoingConnection {
 
     /// If there is room left for another queued packet, queue one!
     fn maybe_request_outgoing_read<H: Hardware>(&mut self, hardware: &H) {
-        let mut queued_bytes = 0;
-        'summation_loop: for packet in self.queued_packets.iter() {
-            let len = packet.len();
-            if len == 0 {
-                break 'summation_loop;
-            }
-            queued_bytes += len;
-        }
-        if queued_bytes < MAX_IP_PACKET_LENGTH {
+        if self.queued_packets.len() < MAX_QUEUED_IP_PACKETS {
             hardware.read_outgoing_packet();
         }
     }
@@ -166,7 +153,6 @@ impl EstablishedConnection {
             outgoing_connection: OutgoingConnection::new(hardware),
             i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer).into(),
             defragger: Defragger::new(),
-            config,
             // this is a tiny bit jank in the client case, because the server won't start sending us
             // packets until it receives our first post-handshake packet. If we have fast incoming
             // intervals but long roundtrip time, it's possible that quite a few incoming intervals
@@ -183,9 +169,11 @@ impl EstablishedConnection {
                 remote_ack_capacity * MAX_AVERAGE_MESSAGES_PER_PACKET,
             ),
 
-            reliable_message_queue: VecDeque::with_capacity(RELIABLE_MESSAGE_QUEUE_LENGTH),
+            reliable_message_rtx_queue: VecDeque::with_capacity(RELIABLE_MESSAGE_RTX_QUEUE_LENGTH),
 
-            incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
+            packet_monitor: PacketMonitor::new(config.monitor_packets, local_ack_capacity),
+
+            config,
         })
     }
 
@@ -216,23 +204,11 @@ impl EstablishedConnection {
             "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
         );
 
-        if self.config.monitor_packets != MonitorPackets::No {
-            let timestamp = u64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-            )
-            .unwrap();
-            let could_add_tx_epoch_time = packet_builder.try_add_message(
-                &Message::TxEpochTime(messages::TxEpochTime { timestamp }),
-                &mut reliability_builder,
-            );
-            assert!(
-                could_add_tx_epoch_time,
-                "Wasn't able to add tx epoch time to packet"
-            );
-        }
+        self.packet_monitor.top_of_outgoing_packet(
+            hardware,
+            &mut packet_builder,
+            &mut reliability_builder,
+        );
 
         // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
         // computing the local acks is a substantial portion of the overall cost of building a new
@@ -258,6 +234,10 @@ impl EstablishedConnection {
                 break 'local_ack_loop;
             }
         }
+
+        // add PacketStatus messages
+        self.packet_monitor
+            .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder);
 
         self.outgoing_connection.try_to_dequeue(
             hardware,
@@ -357,6 +337,10 @@ impl EstablishedConnection {
                     log::warn!(
                         "Received ClientToServerHandshake during established session -- retransmission?"
                     );
+                    // It's very important that we instantly return here without trying to do the
+                    // rest of the logic -- eg, monitor packets will fail later because it expects
+                    // all established packets to have a tx epoch time, and we also look for seqnos.
+                    // TODO add a test with monitor packets on and a handshake rtx?
                     return Ok(());
                 }
                 Message::ServerToClientHandshake(_) => {
@@ -413,16 +397,8 @@ impl EstablishedConnection {
                     tx_epoch_time = Some(timestamp);
                 }
                 Message::PacketStatus(packet_status) => {
-                    assert!(
-                        self.config.monitor_packets == MonitorPackets::Local,
-                        "Unexpected PacketStatus message since we aren't monitoring packets (or aren't the client)"
-                    );
-                    // TODO don't hardcode absolute directions
-                    hardware.register_packet_status(
-                        AbsoluteDirection::C2S,
-                        packet_status.seqno,
-                        packet_status.tx_rx_epoch_times,
-                    );
+                    self.packet_monitor
+                        .on_incoming_packet_status(hardware, &packet_status)?;
                 }
             }
         }
@@ -435,6 +411,9 @@ impl EstablishedConnection {
 
         self.local_ack_generator
             .on_incoming_packet(incoming_seqno, ack_elicited);
+
+        self.packet_monitor
+            .on_incoming_packet(hardware, incoming_seqno, tx_epoch_time)?;
 
         Ok(())
     }
@@ -464,7 +443,7 @@ pub(crate) struct Config {
     pub(crate) monitor_packets: MonitorPackets,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub(crate) enum MonitorPackets {
     No,
     /// measure packet delays and drops, but do not send them to the hardware; instead, send
@@ -473,4 +452,171 @@ pub(crate) enum MonitorPackets {
     /// measure packet delays and drops, including those read from PacketStatus messages, and
     /// immediately report to hardware
     Local,
+}
+
+#[derive(Debug)]
+enum PacketMonitor {
+    No,
+    Yes {
+        received_incoming_packets: GlobalBitArrDeque,
+        // is set iff we should send packet statuses remotely
+        queued_packet_status_messages: Option<ArrDeque<messages::PacketStatus>>,
+    },
+}
+
+impl PacketMonitor {
+    fn new(monitor_packets: MonitorPackets, local_ack_capacity: usize) -> PacketMonitor {
+        match monitor_packets {
+            MonitorPackets::No => PacketMonitor::No,
+            MonitorPackets::Remote => PacketMonitor::Yes {
+                received_incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
+                queued_packet_status_messages: Some(ArrDeque::new(PACKET_STATUS_QUEUE_LENGTH)),
+            },
+            MonitorPackets::Local => PacketMonitor::Yes {
+                received_incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
+                queued_packet_status_messages: None,
+            },
+        }
+    }
+
+    /// Add the tx time to the top of outgoing packets
+    fn top_of_outgoing_packet(
+        &self,
+        hardware: &impl Hardware,
+        packet_builder: &mut messages::PacketBuilder,
+        reliability_builder: &mut ReliabilityActionBuilder<'_>,
+    ) {
+        match self {
+            PacketMonitor::No => (),
+            _ => {
+                let timestamp = hardware.epoch_timestamp();
+                let could_add_tx_epoch_time = packet_builder.try_add_message(
+                    &Message::TxEpochTime(messages::TxEpochTime { timestamp }),
+                    reliability_builder,
+                );
+                // we really should be adding this very close to the top of the packet, above acks and stuff.
+                assert!(
+                    could_add_tx_epoch_time,
+                    "Wasn't able to add tx epoch time to packet"
+                );
+            }
+        }
+    }
+
+    fn body_of_outgoing_packet(
+        &mut self,
+        packet_builder: &mut messages::PacketBuilder,
+        reliability_builder: &mut ReliabilityActionBuilder<'_>,
+    ) {
+        match self {
+            PacketMonitor::Yes {
+                received_incoming_packets: _,
+                queued_packet_status_messages: Some(queued_packet_status_messages),
+            } => {
+                'queue_loop: while queued_packet_status_messages.len() > 0 {
+                    // eww don't love this clone but oh well
+                    let msg = Message::PacketStatus(queued_packet_status_messages[0].clone());
+                    let could_add = packet_builder.try_add_message(&msg, reliability_builder);
+                    if could_add {
+                        queued_packet_status_messages.pop();
+                    } else {
+                        break 'queue_loop;
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn on_incoming_packet(
+        &mut self,
+        hardware: &impl Hardware,
+        seqno: u64,
+        tx_epoch_time: Option<u64>,
+    ) -> Result<()> {
+        match self {
+            PacketMonitor::No => Ok(()),
+            PacketMonitor::Yes {
+                received_incoming_packets,
+                queued_packet_status_messages,
+            } => {
+                let rx_epoch_time = hardware.epoch_timestamp();
+                let tx_epoch_time = tx_epoch_time.ok_or(anyhow!(
+                    "We are set up to monitor packets, but a packet was missing a tx time"
+                ))?;
+                let tx_rx_epoch_times = Some((tx_epoch_time, rx_epoch_time));
+                match queued_packet_status_messages {
+                    Some(queued_packet_status_messages) => {
+                        let popped_status =
+                            queued_packet_status_messages.push(messages::PacketStatus {
+                                seqno,
+                                tx_rx_epoch_times,
+                            });
+                        // TODO not this
+                        assert!(
+                            popped_status.is_none(),
+                            "Ran out of space for packet statuses"
+                        );
+                    }
+                    // TODO do not hardcode direction
+                    None => hardware.register_packet_status(
+                        AbsoluteDirection::S2C,
+                        seqno,
+                        tx_rx_epoch_times,
+                    ),
+                }
+                let popped = received_incoming_packets.push(true);
+                match popped {
+                    Some((lost_seqno, false)) => {
+                        match queued_packet_status_messages {
+                            Some(queued_packet_status_messages) => {
+                                let popped_status =
+                                    queued_packet_status_messages.push(messages::PacketStatus {
+                                        seqno: lost_seqno,
+                                        tx_rx_epoch_times: None,
+                                    });
+                                // TODO not this
+                                assert!(
+                                    popped_status.is_none(),
+                                    "Ran out of space for packet statuses"
+                                )
+                            }
+                            // TODO do not hardcode direction
+                            None => hardware.register_packet_status(
+                                AbsoluteDirection::S2C,
+                                lost_seqno,
+                                None,
+                            ),
+                        }
+                    }
+                    _ => (),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn on_incoming_packet_status(
+        &mut self,
+        hardware: &impl Hardware,
+        packet_status: &messages::PacketStatus,
+    ) -> Result<()> {
+        match self {
+            PacketMonitor::Yes {
+                received_incoming_packets: _,
+                queued_packet_status_messages: None,
+            } => {
+                // TODO don't hardcode direction
+                hardware.register_packet_status(
+                    AbsoluteDirection::C2S,
+                    packet_status.seqno,
+                    packet_status.tx_rx_epoch_times,
+                );
+                Ok(())
+            }
+            _ => bail!(
+                "Received a PacketStatus message but we aren't in the right packet monitoring mode"
+            ),
+        }
+    }
 }

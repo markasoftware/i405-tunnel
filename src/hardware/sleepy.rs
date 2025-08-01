@@ -18,7 +18,7 @@ use crate::{
     utils::{AbsoluteDirection, ChannelThread, instant_to_timestamp, timestamp_to_instant},
 };
 
-use super::real::{QdiscSettings, configure_qdisc};
+use super::real::{QdiscSettings, configure_qdisc, epoch_timestamp};
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
@@ -309,6 +309,10 @@ fn precise_sleep(wake_at: Instant) {
 impl Hardware for SleepyHardware {
     fn timestamp(&self) -> u64 {
         instant_to_timestamp(self.epoch, Instant::now())
+    }
+
+    fn epoch_timestamp(&self) -> u64 {
+        epoch_timestamp()
     }
 
     fn set_timer(&self, timestamp: u64) -> Option<u64> {

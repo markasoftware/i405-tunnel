@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     deques::{GlobalArrDeque, GlobalBitArrDeque},
-    messages,
+    messages::{self, Message},
 };
 
 // TODO move this somewhere else probably. In fact, if we ever have reliable datagrams that are
@@ -12,6 +12,16 @@ use crate::{
 pub(crate) enum ReliableMessage {
     // I'm not sure how I feel about including the literal PacketStatus message itself in here :|
     PacketStatus(messages::PacketStatus),
+}
+
+impl From<ReliableMessage> for Message {
+    fn from(value: ReliableMessage) -> Self {
+        // there's probably some way to automate the creation of this, punting until we have more
+        // types of messages.
+        match value {
+            ReliableMessage::PacketStatus(msg) => Message::PacketStatus(msg),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -118,8 +128,8 @@ impl RemoteAckHandler {
         }
     }
 
-    pub(crate) fn outgoing_packet_builder(&mut self) -> OutgoingPacketReliabilityActionBuilder<'_> {
-        OutgoingPacketReliabilityActionBuilder::new(self)
+    pub(crate) fn outgoing_packet_builder(&mut self) -> ReliabilityActionBuilder<'_> {
+        ReliabilityActionBuilder::new(self)
     }
 
     /// Returns ACK'd reliability actions.
@@ -163,12 +173,12 @@ impl RemoteAckHandler {
     }
 }
 
-pub(crate) struct OutgoingPacketReliabilityActionBuilder<'a> {
+pub(crate) struct ReliabilityActionBuilder<'a> {
     ack_handler: &'a mut RemoteAckHandler,
 }
 
 // this impl is tightly coupled with that of the RemoteAckHandler
-impl<'a> OutgoingPacketReliabilityActionBuilder<'a> {
+impl<'a> ReliabilityActionBuilder<'a> {
     fn new(ack_handler: &'a mut RemoteAckHandler) -> Self {
         assert!(
             ack_handler.current_builder_head_index.is_none(),

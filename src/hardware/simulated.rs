@@ -313,6 +313,11 @@ impl<'a> Hardware for OneSideHardware<'a> {
         self.simulated.timestamp.clone()
     }
 
+    fn epoch_timestamp(&self) -> u64 {
+        // May want to change this
+        self.timestamp()
+    }
+
     fn read_outgoing_packet(&self) {
         self.our_side().should_read_outgoing.set(true);
     }

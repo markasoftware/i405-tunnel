@@ -250,6 +250,14 @@ impl<T> ArrDeque<T> {
     }
 }
 
+impl<T> Index<usize> for ArrDeque<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.arr_deque.index(index)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct GlobalArrDeque<T> {
     arr_deque: VecDeque<T>,
@@ -357,6 +365,7 @@ mod test {
         assert_eq!(ad.push(2), None);
         assert_eq!(ad.push(3), None);
         assert_eq!(ad.len(), 3);
+        assert_eq!(ad[1], 2);
 
         assert_eq!(ad.push(4), Some(1));
         assert_eq!(ad.len(), 3);

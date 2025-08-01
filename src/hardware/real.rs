@@ -1,7 +1,7 @@
 /// Utilities for creating "real" hardware that are used by both sleepy and spinny implementations.
 use std::{
     net::{SocketAddr, ToSocketAddrs},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -23,6 +23,14 @@ pub(crate) fn disconnect_addr(listen_addr: SocketAddr) -> SocketAddr {
             0,
         )),
     }
+}
+
+pub(crate) fn epoch_timestamp() -> u64 {
+    (SystemTime::now().duration_since(UNIX_EPOCH))
+        .unwrap()
+        .as_nanos()
+        .try_into()
+        .unwrap()
 }
 
 pub(crate) struct TunConfig {

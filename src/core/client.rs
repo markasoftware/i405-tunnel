@@ -286,8 +286,9 @@ impl C2SHandshakeSent {
             server_timeout: config.server_wire_config.timeout,
             monitor_packets: config.monitor_packets,
         };
-        let did_add = builder
-            .try_add_message_no_reliability(&messages::Message::ClientToServerHandshake(c2s_handshake));
+        let did_add = builder.try_add_message_no_reliability(
+            &messages::Message::ClientToServerHandshake(c2s_handshake),
+        );
         assert!(
             did_add,
             "Wasn't able to fit the C2S handshake in a single packet -- this will never work. Try increasing client-to-server packet size."
