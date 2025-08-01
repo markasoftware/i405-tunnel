@@ -308,7 +308,7 @@ impl EzClap for ClientConfigCli {
         Self {
             common_configuration: CommonConfigCli::from_match(matches),
             wire_configuration: WireConfigCli::from_match(matches),
-            monitor_packets: matches.get_one::<PathBuf>("monitor_packets").cloned(),
+            monitor_packets: matches.get_one::<String>("monitor_packets").cloned().map(PathBuf::from),
             peer: matches.get_one::<String>("peer").unwrap().clone(),
         }
     }

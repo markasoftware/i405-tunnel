@@ -37,23 +37,24 @@ impl MonitorPacketsThread {
         let s2c_file = std::fs::File::create(s2c_path)?;
         let mut c2s_writer = BufWriter::new(c2s_file);
         let mut s2c_writer = BufWriter::new(s2c_file);
-        let header_line = b"seqno,tx_time,rx_time";
+        let header_line = b"seqno,tx_time,rx_time\n";
         c2s_writer.write_all(header_line)?;
         s2c_writer.write_all(header_line)?;
 
         let thread_fn = move || {
             let mut last_seqno = None;
             'command_loop: while let Ok(command) = rx.recv() {
-                if last_seqno.is_some_and(|last_seqno| command.seqno <= last_seqno) {
-                    log::warn!(
-                        "Tried to log packet status for the same packet multiple times -- retransmision?"
-                    );
-                    continue 'command_loop;
-                }
+                // TODO This needs to be per-direction
+                // if last_seqno.is_some_and(|last_seqno| command.seqno <= last_seqno) {
+                //     log::warn!(
+                //         "Tried to log packet status for the same packet multiple times -- retransmision?"
+                //     );
+                //     continue 'command_loop;
+                // }
                 last_seqno = Some(command.seqno);
 
                 let (tx_time, rx_time) = command.tx_rx_epoch_times.unwrap_or((0, 0));
-                let line = format!("{},{},{}", command.seqno, tx_time, rx_time);
+                let line = format!("{},{},{}\n", command.seqno, tx_time, rx_time);
                 let writer = match command.direction {
                     AbsoluteDirection::C2S => &mut c2s_writer,
                     AbsoluteDirection::S2C => &mut s2c_writer,

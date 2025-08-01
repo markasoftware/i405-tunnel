@@ -208,6 +208,7 @@ impl EstablishedConnection {
             hardware,
             &mut packet_builder,
             &mut reliability_builder,
+            send_timestamp,
         );
 
         // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
@@ -479,19 +480,21 @@ impl PacketMonitor {
         }
     }
 
-    /// Add the tx time to the top of outgoing packets
+    /// Add the tx time to the top of outgoing packets. `send_timestamp` is the intended time the
+    /// packet will be sent, not in epoch time. The tx epoch time will be based on this.
     fn top_of_outgoing_packet(
         &self,
         hardware: &impl Hardware,
         packet_builder: &mut messages::PacketBuilder,
         reliability_builder: &mut ReliabilityActionBuilder<'_>,
+        send_timestamp: u64,
     ) {
         match self {
             PacketMonitor::No => (),
             _ => {
-                let timestamp = hardware.epoch_timestamp();
+                let send_epoch_time = send_timestamp.saturating_sub(hardware.timestamp()) + hardware.epoch_timestamp();
                 let could_add_tx_epoch_time = packet_builder.try_add_message(
-                    &Message::TxEpochTime(messages::TxEpochTime { timestamp }),
+                    &Message::TxEpochTime(messages::TxEpochTime { timestamp: send_epoch_time }),
                     reliability_builder,
                 );
                 // we really should be adding this very close to the top of the packet, above acks and stuff.
