@@ -33,6 +33,10 @@ impl BitArrDeque {
         self.len
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.bitvec.len()
+    }
+
     pub(crate) fn set(&mut self, index: usize, value: bool) {
         let internal_index = self.external_to_internal_index(index);
         self.bitvec.set(internal_index, value);
@@ -138,6 +142,10 @@ impl GlobalBitArrDeque {
         }
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.bit_arr_deque.capacity()
+    }
+
     /// If the deque filled up, report what got popped out
     pub(crate) fn push(&mut self, value: bool) -> Option<(u64, bool)> {
         self.bit_arr_deque.push(value).map(|popped| {
@@ -205,8 +213,45 @@ impl Index<u64> for GlobalBitArrDeque {
     }
 }
 
+/// Like a VecDeque, but with size fixed at construction time (note: not compile time)
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct GlobalArrDeque<T> {
+pub(crate) struct ArrDeque<T> {
+    arr_deque: VecDeque<T>,
+}
+
+impl<T> ArrDeque<T> {
+    pub(crate) fn new(capacity: usize) -> ArrDeque<T> {
+        assert!(capacity > 0);
+        ArrDeque {
+            arr_deque: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.arr_deque.len()
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.arr_deque.capacity()
+    }
+
+    pub(crate) fn push(&mut self, value: T) -> Option<T> {
+        let result = if self.len() == self.arr_deque.capacity() {
+            self.arr_deque.pop_front()
+        } else {
+            None
+        };
+        self.arr_deque.push_back(value);
+        result
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.arr_deque.pop_front()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct GlobalArrDeque<T> {
     arr_deque: VecDeque<T>,
     head_global_idx: u64,
 }
@@ -220,8 +265,16 @@ impl<T> GlobalArrDeque<T> {
         }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.arr_deque.len()
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.arr_deque.capacity()
+    }
+
     pub(crate) fn push(&mut self, value: T) -> Option<(u64, T)> {
-        let result = if self.arr_deque.len() == self.arr_deque.capacity() {
+        let result = if self.len() == self.capacity() {
             let popped_idx = self.head_global_idx;
             self.head_global_idx += 1;
             let popped = self.arr_deque.pop_front().unwrap();
@@ -231,6 +284,14 @@ impl<T> GlobalArrDeque<T> {
         };
         self.arr_deque.push_back(value);
         result
+    }
+
+    pub(crate) fn pop(&mut self) -> (u64, T) {
+        debug_assert!(self.len() > 0, "Tried to pop from empty GlobalArrDeque");
+        let popped_idx = self.head_global_idx;
+        self.head_global_idx += 1;
+        let popped = self.arr_deque.pop_front().unwrap();
+        (popped_idx, popped)
     }
 
     pub(crate) fn head_index(&self) -> u64 {
@@ -287,9 +348,31 @@ mod test {
     use super::*;
 
     #[test]
+    fn arr_deque() {
+        let mut ad = ArrDeque::<i32>::new(3);
+        assert_eq!(ad.len(), 0);
+        assert_eq!(ad.capacity(), 3);
+
+        assert_eq!(ad.push(1), None);
+        assert_eq!(ad.push(2), None);
+        assert_eq!(ad.push(3), None);
+        assert_eq!(ad.len(), 3);
+
+        assert_eq!(ad.push(4), Some(1));
+        assert_eq!(ad.len(), 3);
+
+        assert_eq!(ad.pop(), Some(2));
+        assert_eq!(ad.pop(), Some(3));
+        assert_eq!(ad.pop(), Some(4));
+        assert_eq!(ad.pop(), None);
+        assert_eq!(ad.len(), 0);
+    }
+
+    #[test]
     fn bit_arr_deque() {
         let mut bad = BitArrDeque::new(3);
         assert_eq!(bad.len(), 0);
+        assert_eq!(bad.capacity(), 3);
         assert_eq!(bad.push(true), None);
         assert_eq!(bad.push(false), None);
         assert_eq!(bad.len(), 2);
@@ -308,6 +391,7 @@ mod test {
     #[test]
     fn bit_arr_deque_first_one_zero_after() {
         let mut bad = BitArrDeque::new(5);
+        assert_eq!(bad.capacity(), 5);
 
         // [t, f, t, f]
         bad.push(true);
@@ -359,6 +443,7 @@ mod test {
         let mut gbad = GlobalBitArrDeque::new(3);
         assert_eq!(gbad.head_index(), 0);
         assert_eq!(gbad.tail_index(), 0);
+        assert_eq!(gbad.capacity(), 3);
         assert_eq!(gbad.push(true), None); // 0
         assert_eq!(gbad.push(false), None); // 1
         assert_eq!(gbad.push(true), None); // 2
@@ -410,6 +495,7 @@ mod test {
         let mut gbad = GlobalArrDeque::<bool>::new(3);
         assert_eq!(gbad.head_index(), 0);
         assert_eq!(gbad.tail_index(), 0);
+        assert_eq!(gbad.capacity(), 3);
         assert_eq!(gbad.push(true), None); // 0
         assert_eq!(gbad.push(false), None); // 1
         assert_eq!(gbad.push(true), None); // 2
