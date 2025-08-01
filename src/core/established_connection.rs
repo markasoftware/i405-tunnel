@@ -54,7 +54,7 @@ enum ReliableMessage {
     PacketStatus(messages::PacketStatus),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum ReliabilityAction {
     // I'm not sure how I feel about including the literal PacketStatus message itself in here :|
     PacketStatus(messages::PacketStatus),
@@ -377,7 +377,8 @@ impl EstablishedConnection {
                 }
                 Message::Ack(ack) => {
                     for acked_seqno in ack.first_acked_seqno..=ack.last_acked_seqno {
-                        self.remote_ack_handler.on_remote_ack(acked_seqno)?;
+                        // TODO handle ack actions
+                        let _ack_actions = self.remote_ack_handler.on_remote_ack(acked_seqno)?;
                     }
                 }
                 Message::SequenceNumber(messages::SequenceNumber { seqno }) => {
@@ -547,7 +548,6 @@ impl RemoteAckHandler {
     /// Be sure to call this even if there were no reliability actions in an outgoing packet, to
     /// ensure that old outgoing packets get "clocked out" and considered lost. Returns NACK'd
     /// reliability actions.
-    #[must_use]
     fn on_outgoing_packet(
         &mut self,
         reliability_actions: impl IntoIterator<Item = ReliabilityAction>,
@@ -587,7 +587,6 @@ impl RemoteAckHandler {
     }
 
     /// Returns ACK'd reliability actions.
-    #[must_use]
     fn on_remote_ack(&mut self, acked_seqno: u64) -> Result<ReliabilityActionIterator<'_>> {
         // it's too late to ack this packet :(
         if acked_seqno < self.outgoing_packet_ack_statuses.head_index() {
@@ -625,6 +624,7 @@ impl RemoteAckHandler {
     }
 }
 
+#[must_use]
 struct ReliabilityActionIterator<'a> {
     reliability_actions: &'a mut GlobalArrDeque<Option<ReliabilityAction>>,
     next_index: u64,
@@ -672,7 +672,9 @@ impl<'a> Iterator for ReliabilityActionIterator<'a> {
 impl<'a> Drop for ReliabilityActionIterator<'a> {
     fn drop(&mut self) {
         // rotate the actions array as far as we can to free up space.
-        while self.reliability_actions.len() > 0 && self.reliability_actions[0].is_none() {
+        while self.reliability_actions.len() > 0
+            && self.reliability_actions[self.reliability_actions.head_index()].is_none()
+        {
             self.reliability_actions.pop();
         }
     }
@@ -839,5 +841,126 @@ mod test {
                 last_acked_seqno: 26,
             }]
         );
+    }
+
+    /// Return a Reliability action which is different iff the id passed is different
+    fn eg_ra(id: u64) -> ReliabilityAction {
+        ReliabilityAction::PacketStatus(messages::PacketStatus {
+            seqno: id,
+            tx_rx_epoch_times: None,
+        })
+    }
+
+    macro_rules! ras {
+        ($($id:expr),*) => {
+            vec![$(eg_ra($id)),*]
+        };
+    }
+
+    fn vec_collect<I>(iter: I) -> Vec<I::Item>
+    where
+        I: Iterator,
+    {
+        iter.collect()
+    }
+
+    // just put a few reliability actions in a handler, and then ack it and make sure the same ones come back out
+    #[test]
+    fn remote_ack_handler_single_ack() {
+        let mut handler = RemoteAckHandler::new(1, 3);
+        let nacked = handler.on_outgoing_packet(ras!(0, 1, 3));
+        assert!(vec_collect(nacked).is_empty());
+        let acked = handler.on_remote_ack(0).unwrap();
+        assert_eq!(ras!(0, 1, 3), vec_collect(acked));
+    }
+
+    // multiple acks, but still no nacks
+    #[test]
+    fn remote_ack_handler_several_acks() {
+        let mut handler = RemoteAckHandler::new(8, 16);
+        let nacked = handler.on_outgoing_packet(ras!(1, 2));
+        assert!(vec_collect(nacked).is_empty());
+        let nacked = handler.on_outgoing_packet(ras!(3));
+        assert!(vec_collect(nacked).is_empty());
+        let nacked = handler.on_outgoing_packet(ras!());
+        assert!(vec_collect(nacked).is_empty());
+
+        let acked = handler.on_remote_ack(0).unwrap();
+        assert_eq!(ras!(1, 2), vec_collect(acked));
+
+        let nacked = handler.on_outgoing_packet(ras!(4, 5, 6, 7));
+        assert!(vec_collect(nacked).is_empty());
+
+        let acked = handler.on_remote_ack(3).unwrap();
+        assert_eq!(ras!(4, 5, 6, 7), vec_collect(acked));
+
+        let acked = handler.on_remote_ack(2).unwrap();
+        assert!(vec_collect(acked).is_empty());
+    }
+
+    // there's actually something to nack
+    #[test]
+    fn remote_ack_handler_nack() {
+        let mut handler = RemoteAckHandler::new(2, 16);
+        let nacked = handler.on_outgoing_packet(ras!(1, 2));
+        assert!(vec_collect(nacked).is_empty());
+        let nacked = handler.on_outgoing_packet(ras!(3));
+        assert!(vec_collect(nacked).is_empty());
+        let nacked = handler.on_outgoing_packet(ras!(4, 5));
+        assert_eq!(ras!(1, 2), vec_collect(nacked));
+        // but if we ack the next one manually, it shouldn't get subsequently clocked out
+        let acked = handler.on_remote_ack(1).unwrap();
+        assert_eq!(ras!(3), vec_collect(acked));
+        let nacked = handler.on_outgoing_packet(ras!(6));
+        assert!(vec_collect(nacked).is_empty());
+        // just to make sure we're still operating normally, nack once more
+        let nacked = handler.on_outgoing_packet(ras!());
+        assert_eq!(ras!(4, 5), vec_collect(nacked));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of space for reliability actions")]
+    fn remote_ack_handler_max_reliability_actions() {
+        let mut handler = RemoteAckHandler::new(4, 8);
+        for i in 0..4 {
+            let nacked = handler.on_outgoing_packet(ras!(2 * i, 2 * i + 1));
+            assert!(vec_collect(nacked).is_empty());
+        }
+        // boom!
+        let _ = handler.on_outgoing_packet(ras!(69));
+    }
+
+    // test that space in the reliability actions ring buffer is cleared up after RAs are read.
+    #[test]
+    fn remote_ack_handler_clears_out_reliability_actions() {
+        let mut handler = RemoteAckHandler::new(4, 8);
+        for i in 0..4 {
+            let nacked = handler.on_outgoing_packet(ras!(2 * i, 2 * i + 1));
+            assert!(vec_collect(nacked).is_empty());
+        }
+        // we should be at max capacity now.
+        // ack out of order for good measure
+        let acked = handler.on_remote_ack(1).unwrap();
+        assert_eq!(ras!(2, 3), vec_collect(acked));
+        let acked = handler.on_remote_ack(0).unwrap();
+        assert_eq!(ras!(0, 1), vec_collect(acked));
+
+        let nacked = handler.on_outgoing_packet(ras!(8, 9));
+        assert!(vec_collect(nacked).is_empty());
+        let nacked = handler.on_outgoing_packet(ras!(10, 11));
+        assert!(vec_collect(nacked).is_empty());
+
+        // it's full again. Let's test if nack'ing frees up space. Now, you might think that just
+        // sending another outgoing packet with 2 RAs would work here, since we clock 2 out and
+        // clock 2 in. However, that's not true, since the 2 that were clocked out are going to
+        // remain in the deque until we drop the iterator returned by the nack (a reference to them
+        // has to be maintained somehow). So instead, let's clock in an empty packet, then 2 should
+        // get clocked out. We can test that 2 got clocked out by then clocking 2 more in.
+        let nacked = handler.on_outgoing_packet(ras!());
+        assert_eq!(ras!(4, 5), vec_collect(nacked));
+        let nacked = handler.on_outgoing_packet(ras!(69, 69));
+        assert_eq!(ras!(6, 7), vec_collect(nacked));
+        // TODO we may one day want a way to feedback into EstablishedConnection how many RA spots
+        // are left, in that case this test can probably be improved.
     }
 }
