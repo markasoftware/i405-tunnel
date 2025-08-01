@@ -435,26 +435,71 @@ pub(crate) enum IsConnectionOpen {
     TerminatedNormally,
 }
 
+/// Keeps track of which ack-eliciting remote packets need to be acked, and can generate the correct
+/// sequence of acks to acknowledge all of them.
+struct LocalAckGenerator {
+    locally_acked_packets: GlobalBitArrDeque,
+}
+
+impl LocalAckGenerator {
+    /// `capacity` is the maximum age (measured in number of incoming packets) between the latest
+    /// received incoming packet and the earliest incoming packet we will attempt to send an ack for
+    /// if received later.
+    fn new(capacity: usize) -> Self {
+        Self {
+            locally_acked_packets: GlobalBitArrDeque::new(capacity),
+        }
+    }
+
+    // this function isn't strictly necessary, since the ack-eliciting variant of the function also
+    // appends to `locally_acked_packets` as necessary. But imagine that we receive millions of
+    // non-ack-eliciting packets, then an ack-eliciting packet -- it will rotate the queue millions
+    // of times, causing a huge latency burst. So we want to keep rotating it continuously.
+    fn on_non_ack_eliciting_incoming_packet(&mut self, seqno: u64) {
+        for _ in self.locally_acked_packets.tail_index()..=seqno {
+            self.locally_acked_packets.push(true);
+        }
+    }
+
+    fn on_ack_eliciting_incoming_packet(&mut self, seqno: u64) {
+        if seqno < self.locally_acked_packets.head_index() {
+            return;
+        }
+        // Consider all packets received
+        for _ in self.locally_acked_packets.tail_index()..=seqno {
+            self.locally_acked_packets.push(true);
+        }
+        self.locally_acked_packets.set(seqno, false);
+    }
+
+    fn local_acks(&mut self) -> LocalAckIterator<'_> {
+        LocalAckIterator {
+            seqno: self.locally_acked_packets.head_index(),
+            locally_acked_packets: &mut self.locally_acked_packets,
+        }
+    }
+}
+
 /// Iterator of acks we need to send
-struct OutgoingAckIterator<'a> {
-    incoming_acks_deque: &'a mut GlobalBitArrDeque,
+struct LocalAckIterator<'a> {
+    locally_acked_packets: &'a mut GlobalBitArrDeque,
     seqno: u64,
 }
 
-impl<'a> Iterator for OutgoingAckIterator<'a> {
+impl<'a> Iterator for LocalAckIterator<'a> {
     type Item = messages::Ack;
 
     fn next(&mut self) -> Option<messages::Ack> {
-        if self.seqno >= self.incoming_acks_deque.tail_index() {
+        if self.seqno >= self.locally_acked_packets.tail_index() {
             return None;
         }
-        self.incoming_acks_deque
+        self.locally_acked_packets
             .first_zero_after(self.seqno)
             .map(|first_zero_seqno| {
-                let tail_seqno = self.incoming_acks_deque.tail_index();
+                let tail_seqno = self.locally_acked_packets.tail_index();
                 self.seqno = first_zero_seqno;
-                while self.seqno < tail_seqno && !self.incoming_acks_deque[self.seqno] {
-                    self.incoming_acks_deque.set(self.seqno, true);
+                while self.seqno < tail_seqno && !self.locally_acked_packets[self.seqno] {
+                    self.locally_acked_packets.set(self.seqno, true);
                     self.seqno += 1;
                 }
                 messages::Ack {
@@ -465,13 +510,161 @@ impl<'a> Iterator for OutgoingAckIterator<'a> {
     }
 }
 
-/// Compute the Ack messages that should be sent immediately based on the deque, and also update the
-/// deque to account for the ack messages generated.
-fn outgoing_acks(incoming_acks_deque: &mut GlobalBitArrDeque) -> OutgoingAckIterator<'_> {
-    OutgoingAckIterator {
-        seqno: incoming_acks_deque.head_index(),
-        incoming_acks_deque,
+/// Keeps track of which "reliability actions" need to be performed when an outgoing packet needs is
+/// either acked by the remote or assumed lost. Able to keep track of multiple reliability actions
+/// per outgoing packet, with only a global limit on the total number of reliability actions across
+/// all inflight outgoing packets.
+#[derive(Debug)]
+struct RemoteAckHandler {
+    outgoing_packet_ack_statuses: GlobalArrDeque<RemoteAckStatus>,
+    reliability_actions: GlobalArrDeque<Option<ReliabilityAction>>,
+}
+
+impl RemoteAckHandler {
+    /// An outgoing packet is considered lost if no acks for it are received after
+    /// `outgoing_packets_capacity` many more outgoing packets have been sent.
+    fn new(outgoing_packets_capacity: usize, reliability_actions_capacity: usize) -> Self {
+        Self {
+            outgoing_packet_ack_statuses: GlobalArrDeque::new(outgoing_packets_capacity),
+            reliability_actions: GlobalArrDeque::new(reliability_actions_capacity),
+        }
     }
+
+    /// Be sure to call this even if there were no reliability actions in an outgoing packet, to
+    /// ensure that old outgoing packets get "clocked out" and considered lost. Returns NACK'd
+    /// reliability actions.
+    fn on_outgoing_packet(
+        &mut self,
+        reliability_actions: impl IntoIterator<Item = ReliabilityAction>,
+    ) -> ReliabilityActionIterator<'_> {
+        let head_reliability_action_index = self.reliability_actions.tail_index();
+        for reliability_action in reliability_actions {
+            // TODO handle this case more gracefully. If we put a limit on the reliability actions
+            // per message, we may be able to guarantee this never happens.
+            let popped_action = self.reliability_actions.push(Some(reliability_action));
+            assert!(
+                popped_action.is_none(),
+                "Ran out of space for reliability actions!"
+            );
+        }
+        let tail_reliability_action_index = self.reliability_actions.tail_index();
+        let popped_ack_status = self
+            .outgoing_packet_ack_statuses
+            .push(RemoteAckStatus::Unacked {
+                head_reliability_action_index,
+                tail_reliability_action_index,
+            })
+            .map(|(_, b)| b);
+        if let Some(RemoteAckStatus::Unacked { head_reliability_action_index, tail_reliability_action_index }) = popped_ack_status {
+            ReliabilityActionIterator::new(&mut self.reliability_actions, head_reliability_action_index, tail_reliability_action_index)
+        } else {  // either packet had already been acked, or we just started up so nothing got clocked out yet.
+            ReliabilityActionIterator::new_empty(&mut self.reliability_actions)
+        }
+    }
+
+    /// Returns ACK'd reliability actions.
+    fn on_remote_ack(&mut self, acked_seqno: u64) -> Result<ReliabilityActionIterator<'_>> {
+        // it's too late to ack this packet :(
+        if acked_seqno < self.outgoing_packet_ack_statuses.head_index() {
+            return Ok(ReliabilityActionIterator::new_empty(
+                &mut self.reliability_actions,
+            ));
+        }
+        if acked_seqno >= self.outgoing_packet_ack_statuses.tail_index() {
+            bail!("Received an ACK for a packet that we never sent");
+        }
+        // typical case: Acking a packet that we have in store
+        match std::mem::replace(
+            &mut self.outgoing_packet_ack_statuses[acked_seqno],
+            RemoteAckStatus::Acked,
+        ) {
+            RemoteAckStatus::Acked => {
+                // TODO investigate whether this can happen under normal conditions. It's of course
+                // possible for the UDP packet containing the ack to be duplicated by the network,
+                // but will wolfSSL deliver it to us twice or does it have some protection against
+                // this since it's similar to a replay attack?
+                log::error!("Received a duplicate ack");
+                Ok(ReliabilityActionIterator::new_empty(&mut self.reliability_actions))
+            }
+            RemoteAckStatus::Unacked {
+                head_reliability_action_index,
+                tail_reliability_action_index,
+            } => {
+                Ok(ReliabilityActionIterator::new(
+                    &mut self.reliability_actions,
+                    head_reliability_action_index,
+                    tail_reliability_action_index,
+                ))
+            }
+        }
+    }
+}
+
+struct ReliabilityActionIterator<'a> {
+    reliability_actions: &'a mut GlobalArrDeque<Option<ReliabilityAction>>,
+    head_index: u64,
+    next_index: u64,
+    // tail of what we're going to return, not tail of the whole deque
+    tail_index: u64,
+}
+
+impl<'a> ReliabilityActionIterator<'a> {
+    fn new(
+        reliability_actions: &'a mut GlobalArrDeque<Option<ReliabilityAction>>,
+        head_index: u64,
+        tail_index: u64,
+    ) -> Self {
+        Self {
+            reliability_actions,
+            head_index,
+            next_index: head_index,
+            tail_index,
+        }
+    }
+
+    // it's a bit silly that we even need the argument; oh well
+    fn new_empty(reliability_actions: &'a mut GlobalArrDeque<Option<ReliabilityAction>>) -> Self {
+        Self::new(reliability_actions, 0, 0)
+    }
+}
+
+impl<'a> Iterator for ReliabilityActionIterator<'a> {
+    // TODO there's probably some way to return references instead of copying out the
+    // ReliabilityActions, but I'm not sure exactly how.
+    type Item = ReliabilityAction;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_index != self.tail_index {
+            let result = std::mem::take(&mut self.reliability_actions[self.next_index])
+                .expect("ReliabilityActionIterator over a range where not all actions were set.");
+            self.next_index += 1;
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
+// this logic could also be put in the RemoteAckHandler
+impl<'a> Drop for ReliabilityActionIterator<'a> {
+    fn drop(&mut self) {
+        // rotate the actions array as far as we can to free up space.
+        while self.reliability_actions.len() > 0 && self.reliability_actions[0].is_none() {
+            self.reliability_actions.pop();
+        }
+    }
+}
+
+#[derive(Debug)]
+enum RemoteAckStatus {
+    /// Already received an ack for this packet, or the packet is not ack-eliciting
+    Acked,
+    Unacked {
+        /// Index of first callback related to this packet
+        head_reliability_action_index: u64,
+        /// One past the index of the last callback related to this packet
+        tail_reliability_action_index: u64,
+    },
 }
 
 #[derive(Debug)]
