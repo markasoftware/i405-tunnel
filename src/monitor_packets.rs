@@ -39,8 +39,19 @@ impl MonitorPacketsThread {
         let mut s2c_writer = BufWriter::new(s2c_file);
         let header_line = b"seqno,tx_time,rx_time";
         c2s_writer.write_all(header_line)?;
+        s2c_writer.write_all(header_line)?;
+
         let thread_fn = move || {
-            while let Ok(command) = rx.recv() {
+            let mut last_seqno = None;
+            'command_loop: while let Ok(command) = rx.recv() {
+                if last_seqno.is_some_and(|last_seqno| command.seqno <= last_seqno) {
+                    log::warn!(
+                        "Tried to log packet status for the same packet multiple times -- retransmision?"
+                    );
+                    continue 'command_loop;
+                }
+                last_seqno = Some(command.seqno);
+
                 let (tx_time, rx_time) = command.tx_rx_epoch_times.unwrap_or((0, 0));
                 let line = format!("{},{},{}", command.seqno, tx_time, rx_time);
                 let writer = match command.direction {
@@ -54,6 +65,7 @@ impl MonitorPacketsThread {
             c2s_writer.flush().unwrap();
             s2c_writer.flush().unwrap();
         };
+
         Ok(MonitorPacketsThread {
             channel_thread: ChannelThread::spawn(tx, thread_fn),
         })
