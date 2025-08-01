@@ -605,6 +605,15 @@ impl<'a> OutgoingPacketReliabilityActionBuilder<'a> {
             ack_handler.current_builder_head_index.is_none(),
             "Cannot create a builder before finalize()ing the previous one"
         );
+
+        // Clear out any old reliability actions that we can
+        while ack_handler.reliability_actions.len() > 0
+            && ack_handler.reliability_actions[ack_handler.reliability_actions.head_index()]
+                .is_none()
+        {
+            ack_handler.reliability_actions.pop();
+        }
+
         ack_handler.current_builder_head_index = Some(ack_handler.reliability_actions.tail_index());
         Self { ack_handler }
     }
@@ -623,6 +632,7 @@ impl<'a> OutgoingPacketReliabilityActionBuilder<'a> {
     // by the new packed and are considered NACK'd.
     fn finalize(self) -> ReliabilityActionIterator<'a> {
         let tail_reliability_action_index = self.ack_handler.reliability_actions.tail_index();
+
         let popped_ack_status = self
             .ack_handler
             .outgoing_packet_ack_statuses
@@ -634,6 +644,7 @@ impl<'a> OutgoingPacketReliabilityActionBuilder<'a> {
                 tail_reliability_action_index,
             })
             .map(|(_, b)| b);
+
         if let Some(RemoteAckStatus::Unacked {
             head_reliability_action_index,
             tail_reliability_action_index,
@@ -691,18 +702,6 @@ impl<'a> Iterator for ReliabilityActionIterator<'a> {
             Some(result)
         } else {
             None
-        }
-    }
-}
-
-// this logic could also be put in the RemoteAckHandler
-impl<'a> Drop for ReliabilityActionIterator<'a> {
-    fn drop(&mut self) {
-        // rotate the actions array as far as we can to free up space.
-        while self.reliability_actions.len() > 0
-            && self.reliability_actions[self.reliability_actions.head_index()].is_none()
-        {
-            self.reliability_actions.pop();
         }
     }
 }
