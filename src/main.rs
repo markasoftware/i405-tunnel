@@ -18,6 +18,7 @@ mod jitter;
 mod messages;
 mod monitor_packets;
 mod queued_ip_packet;
+mod reliability;
 mod utils;
 mod wire_config;
 
