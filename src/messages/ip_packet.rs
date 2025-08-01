@@ -2,6 +2,7 @@ use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
 use crate::messages::{ReadCursor, serdes};
+use crate::reliability::ReliabilityAction;
 
 use super::MessageTrait;
 use super::serdes::SerializableLength as _;
@@ -44,8 +45,8 @@ enum IpPacketFlags {
 }
 
 impl MessageTrait for IpPacket {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -122,8 +123,8 @@ impl IpPacketFragment {
 }
 
 impl MessageTrait for IpPacketFragment {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 

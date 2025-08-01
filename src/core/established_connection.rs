@@ -209,7 +209,7 @@ impl EstablishedConnection {
 
         let could_add_seqno = packet_builder.try_add_message(
             &Message::SequenceNumber(messages::SequenceNumber { seqno }),
-            &mut ack_elicited,
+            &mut reliability_builder,
         );
         assert!(
             could_add_seqno,
@@ -226,7 +226,7 @@ impl EstablishedConnection {
             .unwrap();
             let could_add_tx_epoch_time = packet_builder.try_add_message(
                 &Message::TxEpochTime(messages::TxEpochTime { timestamp }),
-                &mut ack_elicited,
+                &mut reliability_builder,
             );
             assert!(
                 could_add_tx_epoch_time,
@@ -253,7 +253,7 @@ impl EstablishedConnection {
             // it would be natural to have `... && let Some(local_ack) = ...` in the while
             // condition, but that's not stable Rust yet.
             if let Some(local_ack) = local_ack_iter.next() {
-                packet_builder.try_add_message(&Message::Ack(local_ack), &mut ack_elicited);
+                packet_builder.try_add_message(&Message::Ack(local_ack), &mut reliability_builder);
             } else {
                 break 'local_ack_loop;
             }
@@ -278,6 +278,12 @@ impl EstablishedConnection {
             // just like in the ack case, I'd love to split this logic out into another function on
             // `self`, but then `self` would be mutably borrowed multiple times. Let's just nest it
             // for now. (Aside: I think the cool solution here would be )
+            match nack_action {
+                ReliabilityAction::ReliableMessage(_reliable_message) => {
+                    // add it back on to the reliable messages queue
+                    todo!();
+                }
+            }
         }
 
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,

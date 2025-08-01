@@ -5,6 +5,7 @@ use declarative_enum_dispatch::enum_dispatch;
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::{ArrayArray, IpPacketBuffer};
+use crate::reliability::{OutgoingPacketReliabilityActionBuilder, ReliabilityAction, ReliableMessage};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
 pub(crate) use serdes::{Serializable, SerializableLength as _};
 
@@ -43,26 +44,30 @@ impl PacketBuilder {
     }
 
     /// If there's space to add the given message to the packet, do so.
-    pub(crate) fn try_add_message(&mut self, message: &Message, ack_elicited: &mut bool) -> bool {
-        if !self.can_add_message(message) {
-            return false;
+    pub(crate) fn try_add_message(&mut self, message: &Message, reliability_builder: &mut OutgoingPacketReliabilityActionBuilder<'_>) -> bool {
+        let (added, ra) = self.try_add_message_explicit_reliability(message);
+        if let Some(ra) = ra {
+            reliability_builder.add_reliability_action(ra);
         }
-
-        if message.is_ack_eliciting() {
-            *ack_elicited = true;
-        }
-        message.serialize(&mut self.write_cursor);
-        true
+        added
     }
 
-    pub(crate) fn try_add_message_no_ack(&mut self, message: &Message) -> bool {
-        let mut ack_elicited = false;
-        let result = self.try_add_message(message, &mut ack_elicited);
+    pub(crate) fn try_add_message_explicit_reliability(&mut self, message: &Message) -> (bool, Option<ReliabilityAction>) {
+        if !self.can_add_message(message) {
+            return (false, None);
+        }
+
+        message.serialize(&mut self.write_cursor);
+        (true, message.reliability_action())
+    }
+
+    pub(crate) fn try_add_message_no_reliability(&mut self, message: &Message) -> bool {
+        let (added, reliability_action) = self.try_add_message_explicit_reliability(message);
         assert!(
-            !ack_elicited,
-            "unexpected elicited ack while building packet"
+            reliability_action.is_none(),
+            "unexpected reliability action while building packet"
         );
-        result
+        added
     }
 
     pub(crate) fn write_cursor(&mut self) -> &mut WriteCursor<IpPacketBuffer> {
@@ -84,7 +89,9 @@ impl<'a> PacketReader<'a> {
     pub(crate) fn try_read_message(&mut self, ack_elicited: &mut bool) -> Result<Option<Message>> {
         if has_message(&self.read_cursor) {
             let msg: Message = self.read_cursor.read()?;
-            if msg.is_ack_eliciting() {
+            // this is a little weird. We really shouldn't be trying to generate the reliability
+            // actions on the read side at all. But while the logic is simple, it works.
+            if msg.reliability_action().is_some() {
                 *ack_elicited = true;
             }
             Ok(Some(msg))
@@ -106,7 +113,7 @@ impl<'a> PacketReader<'a> {
 
 enum_dispatch! {
     pub(crate) trait MessageTrait {
-        fn is_ack_eliciting(&self) -> bool;
+        fn reliability_action(&self) -> Option<ReliabilityAction>;
     }
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -198,8 +205,8 @@ impl ClientToServerHandshake {
 
 // TODO should probably just remove this when/if we add packet type bytes
 impl MessageTrait for ClientToServerHandshake {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -285,8 +292,8 @@ impl ServerToClientHandshake {
 }
 
 impl MessageTrait for ServerToClientHandshake {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -332,8 +339,8 @@ impl Ack {
 }
 
 impl MessageTrait for Ack {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -370,8 +377,8 @@ impl SequenceNumber {
 }
 
 impl MessageTrait for SequenceNumber {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -405,8 +412,8 @@ impl TxEpochTime {
 }
 
 impl MessageTrait for TxEpochTime {
-    fn is_ack_eliciting(&self) -> bool {
-        false
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        None
     }
 }
 
@@ -446,8 +453,8 @@ impl PacketStatus {
 }
 
 impl MessageTrait for PacketStatus {
-    fn is_ack_eliciting(&self) -> bool {
-        true
+    fn reliability_action(&self) -> Option<ReliabilityAction> {
+        Some(ReliabilityAction::ReliableMessage(ReliableMessage::PacketStatus(self.clone())))
     }
 }
 
@@ -759,9 +766,8 @@ mod test {
 
     pub(crate) fn assert_roundtrip_message(msg: &Message) {
         let mut builder = PacketBuilder::new(MAX_IP_PACKET_LENGTH);
-        let mut ack_elicited = false;
         assert!(
-            builder.try_add_message(msg, &mut ack_elicited),
+            builder.try_add_message_explicit_reliability(msg).0,
             "Failed to add message {:#?}",
             msg
         );

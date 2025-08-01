@@ -368,7 +368,7 @@ impl InProtocolHandshake {
                 ip_to_i405_length(c2s_handshake.s2c_packet_length, self.peer).into(),
             );
             let did_add = builder
-                .try_add_message_no_ack(&messages::Message::ServerToClientHandshake(response));
+                .try_add_message_no_reliability(&messages::Message::ServerToClientHandshake(response));
             if !did_add {
                 bail!(
                     "Client requested us to send packets that are too short for the server-to-client handshake -- this will never work"
