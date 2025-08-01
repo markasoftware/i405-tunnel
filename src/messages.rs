@@ -38,9 +38,13 @@ impl PacketBuilder {
         self.write_cursor.into_inner()
     }
 
+    pub(crate) fn can_add_message(&mut self, message: &Message) -> bool {
+        message.serialized_length() <= self.write_cursor.num_bytes_left()
+    }
+
     /// If there's space to add the given message to the packet, do so.
     pub(crate) fn try_add_message(&mut self, message: &Message, ack_elicited: &mut bool) -> bool {
-        if message.serialized_length() > self.write_cursor.num_bytes_left() {
+        if !self.can_add_message(message) {
             return false;
         }
 

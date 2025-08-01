@@ -8,19 +8,22 @@ use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
     defragger::Defragger,
-    deques::GlobalBitArrDeque,
+    deques::{GlobalArrDeque, GlobalBitArrDeque},
     dtls,
     hardware::Hardware,
     jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
-    utils::ip_to_i405_length,
+    utils::{AbsoluteDirection, ip_to_i405_length},
     wire_config::WireConfig,
 };
 
 use anyhow::{Result, anyhow, bail};
 
 const MAX_QUEUED_IP_PACKETS: usize = 64;
+const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
+// TODO revisit this, and maybe it should scale inversely to the outgoing packet interval?
+const RELIABLE_MESSAGE_QUEUE_LENGTH: usize = 128;
 
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
@@ -30,13 +33,31 @@ pub(crate) struct EstablishedConnection {
     next_outgoing_seqno: u64,
     jitterator: Jitterator,
     outgoing_connection: OutgoingConnection,
-    /// which incoming packets we have already acked, or don't need to be acked (either because they
-    /// are not ack-eliciting, or we have not received them).
-    acked_incoming_packets: GlobalBitArrDeque,
-    /// Which outgoing packets we have received an ack back from.
-    acked_outgoing_packets: GlobalBitArrDeque,
     i405_packet_length: u16,
     defragger: Defragger,
+
+    local_ack_generator: LocalAckGenerator,
+    remote_ack_handler: RemoteAckHandler,
+
+    /// Either untransmitted packets or retransmissions
+    reliable_message_queue: VecDeque<ReliableMessage>,
+
+    // For packet monitoring only: Set to 1 when we receive a packet with given seqno.
+    incoming_packets: GlobalBitArrDeque,
+}
+
+// TODO move this somewhere else probably. In fact, if we ever have reliable datagrams that are
+// substantially different in size, we may want to store the binary messages in the queues above and
+// have them be byte-based, rather than message-based.
+#[derive(Debug)]
+enum ReliableMessage {
+    PacketStatus(messages::PacketStatus),
+}
+
+#[derive(Debug)]
+enum ReliabilityAction {
+    // I'm not sure how I feel about including the literal PacketStatus message itself in here :|
+    PacketStatus(messages::PacketStatus),
 }
 
 // OutgoingConnection is sort of historical cruft, there was once a grand plan for a "scheduled"
@@ -137,13 +158,13 @@ impl EstablishedConnection {
         // TODO make configurable. How long after sending a packet we will assume it to be dropped
         // if we haven't received an ack (and it's ack-eliciting)
         let outgoing_timeout = Duration::from_secs(1);
-        let outgoing_ack_capacity = std::cmp::max(
+        let remote_ack_capacity = std::cmp::max(
             3,
             outgoing_timeout.div_duration_f64(Duration::from_nanos(config.wire.packet_interval_min))
                 as usize
                 + 1,
         );
-        let incoming_ack_capacity = std::cmp::max(
+        let local_ack_capacity = std::cmp::max(
             3,
             usize::try_from(
                 2 * config.wire.packet_interval_max / config.reverse_packet_interval_min,
@@ -156,12 +177,6 @@ impl EstablishedConnection {
             i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer).into(),
             defragger: Defragger::new(),
             config,
-            // TODO the length of this should probably be chosen more intelligently; it should be at
-            // least the number of incoming packets we receive for each outgoing packet we send
-            // times a decent safety factor. May need to include reverse packet interval in the
-            // handshake.
-            acked_incoming_packets: GlobalBitArrDeque::new(incoming_ack_capacity),
-            acked_outgoing_packets: GlobalBitArrDeque::new(outgoing_ack_capacity),
             // this is a tiny bit jank in the client case, because the server won't start sending us
             // packets until it receives our first post-handshake packet. If we have fast incoming
             // intervals but long roundtrip time, it's possible that quite a few incoming intervals
@@ -171,6 +186,16 @@ impl EstablishedConnection {
             last_incoming_packet_timestamp: hardware.timestamp(),
             next_outgoing_seqno: 0,
             jitterator,
+
+            local_ack_generator: LocalAckGenerator::new(local_ack_capacity),
+            remote_ack_handler: RemoteAckHandler::new(
+                remote_ack_capacity,
+                remote_ack_capacity * MAX_AVERAGE_MESSAGES_PER_PACKET,
+            ),
+
+            reliable_message_queue: VecDeque::with_capacity(RELIABLE_MESSAGE_QUEUE_LENGTH),
+
+            incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
         })
     }
 
@@ -220,11 +245,28 @@ impl EstablishedConnection {
         }
 
         // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
-        // this is a substantial portion of the overall cost of building a new packet; it causes the
-        // jitter test to go measurably faster when this is commented out (even in release mode,
-        // though you have to increase the timespan of the jitter test to slow it down more)
-        for ack in outgoing_acks(&mut self.acked_incoming_packets) {
-            packet_builder.try_add_message(&Message::Ack(ack), &mut ack_elicited);
+        // computing the local acks is a substantial portion of the overall cost of building a new
+        // packet; it causes the jitter test to go measurably faster when this is commented out
+        // (even in release mode, though you have to increase the timespan of the jitter test to
+        // slow it down more)
+
+        // HACK: Every time the local_acks() iterator returns a new ack, it removes that ack from
+        // the generator. So we don't want to step through it until we're sure we have space to
+        // serialize the ack. So we have a dummy ack and make sure there's space for that each time.
+        // This would break for example if the acks became variable size (let's hope not!)
+        let dummy_ack = Message::Ack(messages::Ack {
+            first_acked_seqno: 0,
+            last_acked_seqno: 0,
+        });
+        let mut local_ack_iter = self.local_ack_generator.local_acks();
+        'local_ack_loop: while packet_builder.can_add_message(&dummy_ack) {
+            // it would be natural to have `... && let Some(local_ack) = ...` in the while
+            // condition, but that's not stable Rust yet.
+            if let Some(local_ack) = local_ack_iter.next() {
+                packet_builder.try_add_message(&Message::Ack(local_ack), &mut ack_elicited);
+            } else {
+                break 'local_ack_loop;
+            }
         }
 
         self.outgoing_connection
@@ -238,11 +280,8 @@ impl EstablishedConnection {
             Some(send_timestamp),
         )?;
 
-        debug_assert_eq!(self.acked_outgoing_packets.tail_index(), seqno);
-        let popped_outgoing_ack = self.acked_outgoing_packets.push(!ack_elicited);
-        if let Some((popped_seqno, false)) = popped_outgoing_ack {
-            self.on_nack(popped_seqno);
-        }
+        // TODO pass in the reliability actions here!
+        let _nack_actions = self.remote_ack_handler.on_outgoing_packet([]);
 
         // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
         // we don't forget to update here:
@@ -307,7 +346,7 @@ impl EstablishedConnection {
     ) -> Result<()> {
         let mut reader = messages::PacketReader::new(packet);
         let mut incoming_seqno = None;
-        let mut send_system_timestamp = None;
+        let mut tx_epoch_time = None;
         let mut ack_elicited = false;
         while let Some(msg) = reader.try_read_message(&mut ack_elicited)? {
             match msg {
@@ -338,26 +377,7 @@ impl EstablishedConnection {
                 }
                 Message::Ack(ack) => {
                     for acked_seqno in ack.first_acked_seqno..=ack.last_acked_seqno {
-                        if acked_seqno >= self.next_outgoing_seqno {
-                            bail!("Received an ack of a seqno we haven't sent yet");
-                        }
-                        debug_assert_eq!(
-                            self.next_outgoing_seqno,
-                            self.acked_outgoing_packets.tail_index()
-                        );
-                        if self.acked_outgoing_packets.head_index() <= acked_seqno {
-                            if self.acked_outgoing_packets[acked_seqno] {
-                                // I'm not sure if there's any legitimate way for this to happen --
-                                // does wolfssl automatically filter out DTLS retransmissions for
-                                // us?
-                                log::error!(
-                                    "Got an ack for a packet that's already been acked, or didn't need to be acked."
-                                );
-                            } else {
-                                self.on_ack(acked_seqno);
-                            }
-                            self.acked_outgoing_packets.set(acked_seqno, true);
-                        }
+                        self.remote_ack_handler.on_remote_ack(acked_seqno)?;
                     }
                 }
                 Message::SequenceNumber(messages::SequenceNumber { seqno }) => {
@@ -371,17 +391,26 @@ impl EstablishedConnection {
                     incoming_seqno = Some(seqno);
                 }
                 Message::TxEpochTime(messages::TxEpochTime { timestamp }) => {
-                    if let Some(existing_timestamp) = send_system_timestamp {
+                    if let Some(existing_tx_epoch_time) = tx_epoch_time {
                         bail!(
                             "Multiple send system timestamps in the same packet: {}, then {}",
-                            existing_timestamp,
+                            existing_tx_epoch_time,
                             timestamp
                         );
                     }
-                    send_system_timestamp = Some(timestamp);
+                    tx_epoch_time = Some(timestamp);
                 }
-                Message::PacketStatus(_packet_status) => {
-                    todo!("handle packet status")
+                Message::PacketStatus(packet_status) => {
+                    assert!(
+                        self.config.monitor_packets == MonitorPackets::Local,
+                        "Unexpected PacketStatus message since we aren't monitoring packets (or aren't the client)"
+                    );
+                    // TODO don't hardcode absolute directions
+                    hardware.register_packet_status(
+                        AbsoluteDirection::C2S,
+                        packet_status.seqno,
+                        packet_status.tx_rx_epoch_times,
+                    );
                 }
             }
         }
@@ -392,32 +421,15 @@ impl EstablishedConnection {
             "No sequence number in established session packet -- protocol violation"
         ))?;
 
-        // update ack board
-        for _ in self.acked_incoming_packets.tail_index()..=incoming_seqno {
-            // we don't care about pushed-off acks; that just means we failed to ack it. The other
-            // side will send the contents again if this is important. TODO privacy concerns if this
-            // causes a packet drop equivalent?
-            self.acked_incoming_packets.push(true);
-        }
-        debug_assert!(self.acked_incoming_packets.tail_index() > incoming_seqno);
-        // mark that it needs an ack if necessary
-        // TODO how can we unit-test this logic in the core tests? Ie, make we aren't needlessly
-        // ack'ing packets that don't elicit acks.
-        if incoming_seqno >= self.acked_incoming_packets.head_index() && ack_elicited {
-            self.acked_incoming_packets.set(incoming_seqno, false);
+        if ack_elicited {
+            self.local_ack_generator
+                .on_ack_eliciting_incoming_packet(incoming_seqno);
+        } else {
+            self.local_ack_generator
+                .on_non_ack_eliciting_incoming_packet(incoming_seqno);
         }
 
         Ok(())
-    }
-
-    /// Called when our packet with the given seqno gets acknowledged
-    fn on_ack(&mut self, seqno: u64) {
-        todo!();
-    }
-
-    /// Called when our packet with the given seqno is assumed to be lost by the other side
-    fn on_nack(&mut self, seqno: u64) {
-        todo!();
     }
 
     // When I name this just `on_terminate`, there's a conflict with the name of the same method
@@ -437,6 +449,7 @@ pub(crate) enum IsConnectionOpen {
 
 /// Keeps track of which ack-eliciting remote packets need to be acked, and can generate the correct
 /// sequence of acks to acknowledge all of them.
+#[derive(Debug)]
 struct LocalAckGenerator {
     locally_acked_packets: GlobalBitArrDeque,
 }
@@ -456,6 +469,7 @@ impl LocalAckGenerator {
     // non-ack-eliciting packets, then an ack-eliciting packet -- it will rotate the queue millions
     // of times, causing a huge latency burst. So we want to keep rotating it continuously.
     fn on_non_ack_eliciting_incoming_packet(&mut self, seqno: u64) {
+        // TODO handle seqno being less than head, but add a regression test first!
         for _ in self.locally_acked_packets.tail_index()..=seqno {
             self.locally_acked_packets.push(true);
         }
@@ -533,6 +547,7 @@ impl RemoteAckHandler {
     /// Be sure to call this even if there were no reliability actions in an outgoing packet, to
     /// ensure that old outgoing packets get "clocked out" and considered lost. Returns NACK'd
     /// reliability actions.
+    #[must_use]
     fn on_outgoing_packet(
         &mut self,
         reliability_actions: impl IntoIterator<Item = ReliabilityAction>,
@@ -555,14 +570,24 @@ impl RemoteAckHandler {
                 tail_reliability_action_index,
             })
             .map(|(_, b)| b);
-        if let Some(RemoteAckStatus::Unacked { head_reliability_action_index, tail_reliability_action_index }) = popped_ack_status {
-            ReliabilityActionIterator::new(&mut self.reliability_actions, head_reliability_action_index, tail_reliability_action_index)
-        } else {  // either packet had already been acked, or we just started up so nothing got clocked out yet.
+        if let Some(RemoteAckStatus::Unacked {
+            head_reliability_action_index,
+            tail_reliability_action_index,
+        }) = popped_ack_status
+        {
+            ReliabilityActionIterator::new(
+                &mut self.reliability_actions,
+                head_reliability_action_index,
+                tail_reliability_action_index,
+            )
+        } else {
+            // either packet had already been acked, or we just started up so nothing got clocked out yet.
             ReliabilityActionIterator::new_empty(&mut self.reliability_actions)
         }
     }
 
     /// Returns ACK'd reliability actions.
+    #[must_use]
     fn on_remote_ack(&mut self, acked_seqno: u64) -> Result<ReliabilityActionIterator<'_>> {
         // it's too late to ack this packet :(
         if acked_seqno < self.outgoing_packet_ack_statuses.head_index() {
@@ -584,25 +609,24 @@ impl RemoteAckHandler {
                 // but will wolfSSL deliver it to us twice or does it have some protection against
                 // this since it's similar to a replay attack?
                 log::error!("Received a duplicate ack");
-                Ok(ReliabilityActionIterator::new_empty(&mut self.reliability_actions))
+                Ok(ReliabilityActionIterator::new_empty(
+                    &mut self.reliability_actions,
+                ))
             }
             RemoteAckStatus::Unacked {
                 head_reliability_action_index,
                 tail_reliability_action_index,
-            } => {
-                Ok(ReliabilityActionIterator::new(
-                    &mut self.reliability_actions,
-                    head_reliability_action_index,
-                    tail_reliability_action_index,
-                ))
-            }
+            } => Ok(ReliabilityActionIterator::new(
+                &mut self.reliability_actions,
+                head_reliability_action_index,
+                tail_reliability_action_index,
+            )),
         }
     }
 }
 
 struct ReliabilityActionIterator<'a> {
     reliability_actions: &'a mut GlobalArrDeque<Option<ReliabilityAction>>,
-    head_index: u64,
     next_index: u64,
     // tail of what we're going to return, not tail of the whole deque
     tail_index: u64,
@@ -616,7 +640,6 @@ impl<'a> ReliabilityActionIterator<'a> {
     ) -> Self {
         Self {
             reliability_actions,
-            head_index,
             next_index: head_index,
             tail_index,
         }
@@ -693,28 +716,19 @@ mod test {
     use super::*;
     use crate::messages::Ack;
 
-    fn assert_outgoing_acks(pre_rotation: u64, incoming_acks: &[u8], expected_acks: &[Ack]) {
-        let mut deque = GlobalBitArrDeque::new(incoming_acks.len());
-        for _ in 0..pre_rotation {
-            deque.push(true);
-        }
-        for incoming_ack in incoming_acks {
-            deque.push(if *incoming_ack > 0 { true } else { false });
-        }
-        assert_eq!(
-            outgoing_acks(&mut deque).collect::<Vec<Ack>>(),
-            expected_acks
-        );
-        for i in pre_rotation..pre_rotation + u64::try_from(incoming_acks.len()).unwrap() {
-            assert_eq!(deque[i], true);
-        }
+    fn generator_local_acks(generator: &mut LocalAckGenerator) -> Vec<Ack> {
+        generator.local_acks().collect::<Vec<Ack>>()
     }
 
     #[test]
-    fn compute_outgoing_acks() {
-        assert_outgoing_acks(
-            0,
-            &[1, 0, 0, 1, 1, 0, 1],
+    fn local_ack_generator() {
+        let mut generator = LocalAckGenerator::new(7);
+        generator.on_ack_eliciting_incoming_packet(1);
+        generator.on_ack_eliciting_incoming_packet(2);
+        generator.on_ack_eliciting_incoming_packet(5);
+        // This also tests that we can correctly compute acks when the generator isn't "full" yet
+        assert_eq!(
+            &generator_local_acks(&mut generator),
             &[
                 Ack {
                     first_acked_seqno: 1,
@@ -726,54 +740,58 @@ mod test {
                 },
             ],
         );
-        assert_outgoing_acks(
-            2,
-            &[1, 0, 0, 1, 1, 0, 1],
-            &[
-                Ack {
-                    first_acked_seqno: 3,
-                    last_acked_seqno: 4,
-                },
-                Ack {
-                    first_acked_seqno: 7,
-                    last_acked_seqno: 7,
-                },
-            ],
-        );
-        assert_outgoing_acks(
-            0,
-            &[0, 0, 0],
+        assert_eq!(&generator_local_acks(&mut generator), &[]);
+        // make sure it also works after it gets rotated
+        generator.on_ack_eliciting_incoming_packet(8);
+        generator.on_ack_eliciting_incoming_packet(9);
+        assert_eq!(
+            &generator_local_acks(&mut generator),
             &[Ack {
-                first_acked_seqno: 0,
-                last_acked_seqno: 2,
-            }],
+                first_acked_seqno: 8,
+                last_acked_seqno: 9,
+            },],
         );
-        assert_outgoing_acks(
-            0,
-            &[0, 1, 0],
-            &[
-                Ack {
-                    first_acked_seqno: 0,
-                    last_acked_seqno: 0,
-                },
-                Ack {
-                    first_acked_seqno: 2,
-                    last_acked_seqno: 2,
-                },
-            ],
-        )
+        assert_eq!(&generator_local_acks(&mut generator), &[]);
     }
 
     #[test]
-    fn compute_outgoing_acks_partial() {
-        let mut deque = GlobalBitArrDeque::new(3);
-        deque.push(false);
-        deque.push(true);
-        deque.push(false);
-        let mut iter = outgoing_acks(&mut deque);
-        iter.next();
-        assert_eq!(deque[0], true);
-        assert_eq!(deque[1], true);
-        assert_eq!(deque[2], false);
+    fn local_ack_generator_all_unacked() {
+        let mut generator = LocalAckGenerator::new(3);
+        generator.on_ack_eliciting_incoming_packet(0);
+        generator.on_ack_eliciting_incoming_packet(1);
+        generator.on_ack_eliciting_incoming_packet(2);
+        assert_eq!(
+            &generator_local_acks(&mut generator),
+            &[Ack {
+                first_acked_seqno: 0,
+                last_acked_seqno: 2
+            }]
+        );
+        assert_eq!(&generator_local_acks(&mut generator), &[]);
+    }
+
+    // If we only consume part of the iterator, ensure that the remaining acks are returned the next time.
+    #[test]
+    fn compute_local_acks_partial() {
+        let mut generator = LocalAckGenerator::new(7);
+        generator.on_ack_eliciting_incoming_packet(1);
+        generator.on_ack_eliciting_incoming_packet(2);
+        generator.on_ack_eliciting_incoming_packet(5);
+        let mut iter = generator.local_acks();
+        assert_eq!(
+            iter.next(),
+            Some(Ack {
+                first_acked_seqno: 1,
+                last_acked_seqno: 2,
+            })
+        );
+        // now let's generate a new iterator and make sure it returns the remaining ack
+        assert_eq!(
+            &generator_local_acks(&mut generator),
+            &[Ack {
+                first_acked_seqno: 5,
+                last_acked_seqno: 5,
+            }]
+        );
     }
 }
