@@ -176,7 +176,9 @@ impl SleepyHardware {
                         self.currently_reading_outgoing.replace(false);
                         core.on_read_outgoing_packet(self, &packet, timestamp);
                     } else {
-                        log::warn!("Dropping packet because currently_reading_outgoing=false (this is normal after reconnection)");
+                        log::warn!(
+                            "Dropping packet because currently_reading_outgoing=false (this is normal after reconnection)"
+                        );
                     }
                 }
                 Ok(Event::IncomingRead { addr, packet }) => {

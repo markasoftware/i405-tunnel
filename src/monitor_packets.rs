@@ -7,7 +7,12 @@ use std::{
 
 use anyhow::Result;
 
-use crate::utils::{AbsoluteDirection, ChannelThread};
+use crate::{
+    deques::GlobalArrDeque,
+    utils::{AbsoluteDirection, ChannelThread},
+};
+
+const MONITOR_REORDER_BUFFER_LENGTH: usize = 10000;
 
 pub(crate) struct MonitorPacketsThread {
     channel_thread: ChannelThread<RegisterPacketStatusCommand>,
@@ -18,6 +23,23 @@ struct RegisterPacketStatusCommand {
     seqno: u64,
     /// None if the packet was dropped
     tx_rx_epoch_times: Option<(u64, u64)>,
+}
+
+fn write_prefix(
+    reorder_buffer: &mut GlobalArrDeque<Option<Option<(u64, u64)>>>,
+    writer: &mut BufWriter<std::fs::File>,
+) {
+    while reorder_buffer.len() > 0 && reorder_buffer[reorder_buffer.head_index()].is_some() {
+        let (seqno, tx_rx_epoch_times) = reorder_buffer.pop();
+        let tx_rx_epoch_times = tx_rx_epoch_times.unwrap().unwrap_or((0, 0));
+        let line = format!(
+            "{},{},{}\n",
+            seqno, tx_rx_epoch_times.0, tx_rx_epoch_times.1
+        );
+        writer
+            .write_all(line.as_bytes())
+            .expect("Failed to write packet status to file");
+    }
 }
 
 impl MonitorPacketsThread {
@@ -41,27 +63,26 @@ impl MonitorPacketsThread {
         c2s_writer.write_all(header_line)?;
         s2c_writer.write_all(header_line)?;
 
-        let thread_fn = move || {
-            let mut last_seqno = None;
-            'command_loop: while let Ok(command) = rx.recv() {
-                // TODO This needs to be per-direction
-                // if last_seqno.is_some_and(|last_seqno| command.seqno <= last_seqno) {
-                //     log::warn!(
-                //         "Tried to log packet status for the same packet multiple times -- retransmision?"
-                //     );
-                //     continue 'command_loop;
-                // }
-                last_seqno = Some(command.seqno);
+        let mut c2s_reorder_buffer =
+            GlobalArrDeque::<Option<Option<(u64, u64)>>>::new(MONITOR_REORDER_BUFFER_LENGTH);
+        let mut s2c_reorder_buffer =
+            GlobalArrDeque::<Option<Option<(u64, u64)>>>::new(MONITOR_REORDER_BUFFER_LENGTH);
 
-                let (tx_time, rx_time) = command.tx_rx_epoch_times.unwrap_or((0, 0));
-                let line = format!("{},{},{}\n", command.seqno, tx_time, rx_time);
-                let writer = match command.direction {
-                    AbsoluteDirection::C2S => &mut c2s_writer,
-                    AbsoluteDirection::S2C => &mut s2c_writer,
+        let thread_fn = move || {
+            while let Ok(command) = rx.recv() {
+                let (buffer, writer) = match command.direction {
+                    AbsoluteDirection::C2S => (&mut c2s_reorder_buffer, &mut c2s_writer),
+                    AbsoluteDirection::S2C => (&mut s2c_reorder_buffer, &mut s2c_writer),
                 };
-                writer
-                    .write_all(line.as_bytes())
-                    .expect("Failed to write packet status to file");
+                for _ in buffer.tail_index()..=command.seqno {
+                    if let Some((_popped_seqno, popped_cmd)) = buffer.push(None) {
+                        log::error!("Monitor packets reorder buffer filled!");
+                        assert!(popped_cmd.is_none()); // because we always get rid of prefixes
+                        write_prefix(buffer, writer);
+                    }
+                    buffer[command.seqno] = Some(command.tx_rx_epoch_times);
+                }
+                write_prefix(buffer, writer);
             }
             c2s_writer.flush().unwrap();
             s2c_writer.flush().unwrap();

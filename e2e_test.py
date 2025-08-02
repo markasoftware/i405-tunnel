@@ -5,6 +5,7 @@
 
 import subprocess
 import shlex
+import tempfile
 import time
 import os
 import json
@@ -13,12 +14,13 @@ import sys
 import signal
 from typing import Any
 
-# Configuration variables
 SERVER_NS: str = "i405-server"
 CLIENT_NS: str = "i405-client"
 SERVER_VETH: str = "veth-server"
 CLIENT_VETH: str = "veth-client"
 
+# TODO check if these are routable before the test starts, which would indicate conflicts with the
+# existing system configuration.
 SERVER_VETH_IP: str = "192.168.99.0"
 CLIENT_VETH_IP: str = "192.168.99.1"
 SERVER_PORT: int = 1405
@@ -34,7 +36,8 @@ I405_ENV = {"RUST_BACKTRACE": "1"} | os.environ
 
 IPERF_TIMEOUT_SECS = 10
 
-# we run our tests across all poll modes, and use this global variable to keep track of which one is currently set
+# we run our tests across all poll modes, and use this global variable to keep track of which one is
+# currently set
 global_poll_mode: str = "undefined"
 
 # so we can terminate everything when we clean up
@@ -183,7 +186,7 @@ class TcpPerformanceTester:
 
     # return upload and download speeds (if requested)
     def finish(self) -> tuple[float | None, float | None, float]:
-        iperf_client_stdout, iperf_client_stderr = self.iperf_client_process.communicate(timeout=self.timeout+1)
+        iperf_client_stdout, iperf_client_stderr = self.iperf_client_process.communicate(timeout=self.timeout+5)
         all_popens.remove(self.iperf_client_process)
         if self.iperf_client_process.returncode != 0:
             raise RuntimeError(f"iperf3 nonzero exit code: {self.iperf_client_process.returncode}. Stdout: {iperf_client_stdout}, Stderr: {iperf_client_stderr}")
@@ -265,6 +268,7 @@ def main() -> None:
                 print(f"About to test in poll-mode: {global_poll_mode}")
                 basic_test()
                 reconnect_test()
+                monitor_packets_test()
                 tcp_throughput_test()
 
         print()
@@ -330,11 +334,48 @@ def tcp_throughput_test():
 
     # the speed is reliably higher when we're not pushing both directions at the same time.
     # Honestly, that's a bit worrying, but I'm willing to chalk it up to bufferbloat on the acks for
-    # now :|
+    # now :| I've observed it being higher than 100,000 in at least one case, maybe due to socket
+    # buffer? idk man.
     assert 80_000 < upload_speed < 100_000
     assert 0 < max_rtt_us < 100_000
 
     shutdown(client, server)
+
+def monitor_packets_test():
+    print()
+    print("E2E TEST: Monitor packets")
+    print()
+
+    # create temp dir
+    with tempfile.TemporaryDirectory() as monitor_packets_dir:
+        server = launch_server()
+        client = launch_client({
+            "monitor-packets": monitor_packets_dir,
+        })
+
+        time.sleep(1)
+
+        shutdown(client, server)
+        # check that exactly one subdirectory was created
+        subdirs = [d for d in os.listdir(monitor_packets_dir) if os.path.isdir(os.path.join(monitor_packets_dir, d))]
+        assert len(subdirs) == 1, f"Expected exactly one subdirectory in {monitor_packets_dir}, found {len(subdirs)}: {subdirs}"
+        # check that the subdirectory contains exactly client_to_server.csv and server_to_client.csv
+        subdir_path = os.path.join(monitor_packets_dir, subdirs[0])
+        files = os.listdir(subdir_path)
+        expected_files = {"client_to_server.csv", "server_to_client.csv"}
+        assert set(files) == expected_files, f"Expected files {expected_files} in {subdir_path}, found {set(files)}"
+        # Check that the files each have at least 10 rows, where first row is a header, and
+        # remaining rows have three comma-separated numbers. Thanks github copilot
+        for filename in files:
+            file_path = os.path.join(subdir_path, filename)
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+                assert len(lines) >= 10, f"Expected at least 10 lines in {file_path}, found {len(lines)}"
+                for line in lines[1:]:
+                    parts = line.strip().split(',')
+                    assert len(parts) == 3, f"Expected 3 comma-separated values in {line.strip()} from {file_path}, found {len(parts)}"
+                    for part in parts:
+                        assert re.match(r'^\d+$', part), f"Expected numeric value in {part} from {file_path}"
 
 if __name__ == "__main__":
     main()
