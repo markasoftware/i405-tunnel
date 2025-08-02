@@ -175,6 +175,8 @@ impl SleepyHardware {
                         // event handler may set it back to true:
                         self.currently_reading_outgoing.replace(false);
                         core.on_read_outgoing_packet(self, &packet, timestamp);
+                    } else {
+                        log::warn!("Dropping packet because currently_reading_outgoing=false (this is normal after reconnection)");
                     }
                 }
                 Ok(Event::IncomingRead { addr, packet }) => {
@@ -326,8 +328,14 @@ impl Hardware for SleepyHardware {
     }
 
     fn read_outgoing_packet(&self) {
-        self.currently_reading_outgoing.replace(true);
-        self.outgoing_read_thread.tx().send(()).unwrap();
+        // there was a serious bug here previously, where we'd send an outgoing read request to the
+        // outgoing read thread even if we already had an outstanding request. The problem is, we
+        // set currently_reading_outgoing to false when we receive an incoming packet, so if
+        // multiple requests were sent to the thread, we'd drop the second one upon receipt. I'm not
+        // sure how to test this super effectively other than the TCP throughput end-to-end test.
+        if !self.currently_reading_outgoing.replace(true) {
+            self.outgoing_read_thread.tx().send(()).unwrap();
+        }
     }
 
     // TODO consider remove Result from signature since it always succeeds (or, at least, we don't

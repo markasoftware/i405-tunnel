@@ -19,6 +19,10 @@ use crate::{
 
 use anyhow::{Result, anyhow, bail};
 
+// TODO this number shouldn't be quite so fixed. At high bitrates, it might be small enough to cause
+// starvation. At low bitrates, it might cause a little bit of extra bufferbloat. We should probably
+// make it based on buffer size instead, but last time I tried that actually somehow slowed things
+// down.
 const MAX_QUEUED_IP_PACKETS: usize = 3;
 const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
 // TODO revisit this!!!
@@ -492,9 +496,12 @@ impl PacketMonitor {
         match self {
             PacketMonitor::No => (),
             _ => {
-                let send_epoch_time = send_timestamp.saturating_sub(hardware.timestamp()) + hardware.epoch_timestamp();
+                let send_epoch_time = send_timestamp.saturating_sub(hardware.timestamp())
+                    + hardware.epoch_timestamp();
                 let could_add_tx_epoch_time = packet_builder.try_add_message(
-                    &Message::TxEpochTime(messages::TxEpochTime { timestamp: send_epoch_time }),
+                    &Message::TxEpochTime(messages::TxEpochTime {
+                        timestamp: send_epoch_time,
+                    }),
                     reliability_builder,
                 );
                 // we really should be adding this very close to the top of the packet, above acks and stuff.
