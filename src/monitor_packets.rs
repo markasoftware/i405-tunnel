@@ -67,25 +67,20 @@ impl<W: Write> CsvWriters<W> {
         })
     }
 
-    fn register_packet_status(
-        &mut self,
-        direction: AbsoluteDirection,
-        seqno: u64,
-        tx_rx_epoch_times: Option<(u64, u64)>,
-    ) {
-        let (buffer, writer) = match direction {
+    fn register_packet_status(&mut self, command: &RegisterPacketStatusCommand) {
+        let (buffer, writer) = match command.direction {
             AbsoluteDirection::C2S => (&mut self.c2s_reorder_buffer, &mut self.c2s_writer),
             AbsoluteDirection::S2C => (&mut self.s2c_reorder_buffer, &mut self.s2c_writer),
         };
 
-        for _ in buffer.tail_index()..=seqno {
+        for _ in buffer.tail_index()..=command.seqno {
             if let Some((_popped_seqno, popped_cmd)) = buffer.push(None) {
                 log::error!("Monitor packets reorder buffer filled!");
                 assert!(popped_cmd.is_none());
                 write_prefix(buffer, writer);
             }
         }
-        buffer[seqno] = Some(tx_rx_epoch_times);
+        buffer[command.seqno] = Some(command.tx_rx_epoch_times);
         write_prefix(buffer, writer);
     }
 
@@ -118,11 +113,7 @@ impl MonitorPacketsThread {
 
         let thread_fn = move || {
             while let Ok(command) = rx.recv() {
-                monitor.register_packet_status(
-                    command.direction,
-                    command.seqno,
-                    command.tx_rx_epoch_times,
-                );
+                monitor.register_packet_status(&command);
             }
             monitor.flush().unwrap();
         };
@@ -159,10 +150,26 @@ mod tests {
         let s2c_buf = Vec::new();
         let mut monitor = CsvWriters::new(c2s_buf, s2c_buf).unwrap();
 
-        monitor.register_packet_status(AbsoluteDirection::C2S, 0, Some((100, 200)));
-        monitor.register_packet_status(AbsoluteDirection::C2S, 1, None);
-        monitor.register_packet_status(AbsoluteDirection::C2S, 2, Some((120, 220)));
-        monitor.register_packet_status(AbsoluteDirection::S2C, 0, Some((300, 400)));
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 0,
+            tx_rx_epoch_times: Some((100, 200)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 1,
+            tx_rx_epoch_times: None,
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 2,
+            tx_rx_epoch_times: Some((120, 220)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::S2C,
+            seqno: 0,
+            tx_rx_epoch_times: Some((300, 400)),
+        });
 
         monitor.flush().unwrap();
 
@@ -180,9 +187,21 @@ mod tests {
         let s2c_buf = Vec::new();
         let mut monitor = CsvWriters::new(c2s_buf, s2c_buf).unwrap();
 
-        monitor.register_packet_status(AbsoluteDirection::C2S, 2, Some((120, 220)));
-        monitor.register_packet_status(AbsoluteDirection::C2S, 0, Some((100, 200)));
-        monitor.register_packet_status(AbsoluteDirection::C2S, 1, Some((110, 210)));
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 2,
+            tx_rx_epoch_times: Some((120, 220)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 0,
+            tx_rx_epoch_times: Some((100, 200)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 1,
+            tx_rx_epoch_times: Some((110, 210)),
+        });
 
         monitor.flush().unwrap();
 
@@ -197,9 +216,21 @@ mod tests {
         let s2c_buf = Vec::new();
         let mut monitor = CsvWriters::new(c2s_buf, s2c_buf).unwrap();
 
-        monitor.register_packet_status(AbsoluteDirection::C2S, 0, Some((100, 200)));
-        monitor.register_packet_status(AbsoluteDirection::C2S, 5, Some((150, 250)));
-        monitor.register_packet_status(AbsoluteDirection::C2S, 2, Some((120, 220)));
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 0,
+            tx_rx_epoch_times: Some((100, 200)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 5,
+            tx_rx_epoch_times: Some((150, 250)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 2,
+            tx_rx_epoch_times: Some((120, 220)),
+        });
 
         monitor.flush().unwrap();
 
