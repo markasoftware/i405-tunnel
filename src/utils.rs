@@ -127,6 +127,7 @@ impl<TX> ChannelThread<TX> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbsoluteDirection {
     S2C,
     C2S,

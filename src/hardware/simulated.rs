@@ -33,6 +33,9 @@ struct OneSideInfo {
     /// For each outgoing packet that's been read by the core, what timestamp was it read at?
     outgoing_read_times: RefCell<Vec<u64>>,
 
+    /// Packet statuses registered by this peer
+    packet_statuses: RefCell<Vec<PacketStatus>>,
+
     // The next time we should wake up this thread.
     timer: Cell<Option<u64>>,
     should_read_outgoing: Cell<bool>,
@@ -49,6 +52,7 @@ impl OneSideInfo {
             unread_incoming_packets: RefCell::new(BinaryHeap::new()),
             sent_incoming_packets: RefCell::new(Vec::new()),
             outgoing_read_times: RefCell::new(Vec::new()),
+            packet_statuses: RefCell::new(Vec::new()),
             timer: Cell::new(None),
             should_read_outgoing: Cell::new(false),
         }
@@ -84,6 +88,13 @@ impl PartialOrd for WanPacket {
 pub(crate) struct LocalPacket {
     pub(crate) buffer: IpPacketBuffer,
     pub(crate) timestamp: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PacketStatus {
+    pub(crate) direction: AbsoluteDirection,
+    pub(crate) seqno: u64,
+    pub(crate) tx_rx_epoch_times: Option<(u64, u64)>,
 }
 
 /// Hardware implementation for testing only.
@@ -150,6 +161,10 @@ impl SimulatedHardware {
 
     pub(crate) fn qdisc_settings(&self, addr: &SocketAddr) -> Option<QdiscSettings> {
         self.peers[addr].qdisc_settings.get()
+    }
+
+    pub(crate) fn packet_statuses(&self, addr: &SocketAddr) -> Vec<PacketStatus> {
+        self.peers[addr].packet_statuses.borrow().clone()
     }
 
     pub(crate) fn drop_packet(&mut self, nth: u64) {
@@ -419,10 +434,18 @@ impl<'a> Hardware for OneSideHardware<'a> {
 
     fn register_packet_status(
         &self,
-        _direction: AbsoluteDirection,
-        _seqno: u64,
-        _send_receive_epoch_times: Option<(u64, u64)>,
+        direction: AbsoluteDirection,
+        seqno: u64,
+        tx_rx_epoch_times: Option<(u64, u64)>,
     ) {
+        self.our_side()
+            .packet_statuses
+            .borrow_mut()
+            .push(PacketStatus {
+                direction,
+                seqno,
+                tx_rx_epoch_times,
+            });
     }
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {

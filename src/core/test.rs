@@ -894,6 +894,102 @@ fn client_not_responding() {
     );
 }
 
+/// Test that packet timings are recorded in both directions when monitor_packets is enabled
+#[test]
+fn monitor_packets() {
+    setup_logging();
+    let delay = ms(2.2);
+    let simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], delay);
+    let server_core = core::server::Core::new(
+        default_server_config(),
+        &simulated_hardware.hardware(server_addr()),
+    )
+    .unwrap();
+    let mut client_config = default_client_config();
+    client_config.monitor_packets = true;
+    let client_core =
+        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+            .unwrap();
+    let mut cores = BTreeMap::from([
+        (client_addr(), client_core.into()),
+        (server_addr(), server_core.into()),
+    ]);
+    let mut simulated_hardware = simulated_hardware;
+
+    // First establish the connection by running for a few milliseconds
+    simulated_hardware.run_until(&mut cores, ms(10.0));
+
+    // Now drop some packets after connection is established
+    simulated_hardware.drop_packet(5);
+    simulated_hardware.drop_packet(6);
+    simulated_hardware.drop_packet(7);
+    simulated_hardware.drop_packet(8);
+
+    // Run to trigger packet drops and detection
+    simulated_hardware.run_until(&mut cores, ms(2000.0));
+
+    // Check that packet statuses were recorded on the client side
+    let packet_statuses = simulated_hardware.packet_statuses(&client_addr());
+    assert!(!packet_statuses.is_empty(), "No packet statuses recorded");
+
+    // Should have recorded packets in both directions
+    let c2s_statuses: Vec<_> = packet_statuses
+        .iter()
+        .filter(|s| matches!(s.direction, crate::utils::AbsoluteDirection::C2S))
+        .collect();
+    let s2c_statuses: Vec<_> = packet_statuses
+        .iter()
+        .filter(|s| matches!(s.direction, crate::utils::AbsoluteDirection::S2C))
+        .collect();
+
+    assert!(!c2s_statuses.is_empty(), "No C2S packet statuses recorded");
+    assert!(!s2c_statuses.is_empty(), "No S2C packet statuses recorded");
+
+    // All successful packets should have timing information
+    let mut num_dropped = 0;
+    for status in &packet_statuses {
+        if let Some((tx_time, rx_time)) = status.tx_rx_epoch_times {
+            assert_eq!(rx_time - tx_time, delay, "rx_time should be >= tx_time");
+        } else {
+            num_dropped += 1;
+        }
+    }
+    assert_eq!(num_dropped, 4, "4 packets recorded as dropped");
+
+    // Check that we have consecutive sequence numbers starting from 0
+    let mut c2s_seqnos: Vec<u64> = c2s_statuses.iter().map(|s| s.seqno).collect();
+    c2s_seqnos.sort();
+    c2s_seqnos.dedup();
+
+    let mut s2c_seqnos: Vec<u64> = s2c_statuses.iter().map(|s| s.seqno).collect();
+    s2c_seqnos.sort();
+    s2c_seqnos.dedup();
+
+    // Should have recorded status for consecutive seqnos starting from 0
+    if !c2s_seqnos.is_empty() {
+        assert_eq!(c2s_seqnos[0], 0, "C2S seqnos should start from 0");
+    }
+    if !s2c_seqnos.is_empty() {
+        assert_eq!(s2c_seqnos[0], 0, "S2C seqnos should start from 0");
+    }
+
+    // Verify no gaps in sequence numbers - retransmits should ensure every seqno gets recorded
+    for i in 1..c2s_seqnos.len() {
+        assert_eq!(
+            c2s_seqnos[i],
+            c2s_seqnos[i - 1] + 1,
+            "Gap in C2S seqnos: {c2s_seqnos:?}"
+        );
+    }
+    for i in 1..s2c_seqnos.len() {
+        assert_eq!(
+            s2c_seqnos[i],
+            s2c_seqnos[i - 1] + 1,
+            "Gap in S2C seqnos: {c2s_seqnos:?}"
+        );
+    }
+}
+
 // TODO more tests:
 // + DTLS handshake from a client when another client already has an established connection
 // + Packet finalization time (ie, submitted to hardware with the right buffer before they /need/ to be sent)

@@ -244,6 +244,19 @@ impl EstablishedConnection {
         self.packet_monitor
             .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder);
 
+        // Retransmit reliable messages from rtx queue (after acks, before general IP packets)
+        while let Some(reliable_message) = self.reliable_message_rtx_queue.pop_front() {
+            let message = Message::from(reliable_message.clone());
+            let could_add = packet_builder.try_add_message(&message, &mut reliability_builder);
+            if could_add {
+                log::debug!("Retransmitting message {message:?}");
+            } else {
+                // No space left in packet, put the message back at the front of the queue
+                self.reliable_message_rtx_queue.push_front(reliable_message);
+                break;
+            }
+        }
+
         self.outgoing_connection.try_to_dequeue(
             hardware,
             &mut packet_builder,
@@ -258,15 +271,24 @@ impl EstablishedConnection {
             Some(send_timestamp),
         )?;
 
-        // TODO pass in the reliability actions here!
+        // Handle nacked reliability actions by adding them back to the rtx queue
         for nack_action in reliability_builder.finalize() {
             // just like in the ack case, I'd love to split this logic out into another function on
             // `self`, but then `self` would be mutably borrowed multiple times. Let's just nest it
             // for now. (Aside: I think the cool solution here would be )
             match nack_action {
-                ReliabilityAction::ReliableMessage(_reliable_message) => {
-                    // add it back on to the reliable messages queue
-                    todo!();
+                ReliabilityAction::ReliableMessage(reliable_message) => {
+                    // add it back on to the reliable messages queue, respecting capacity limit
+                    if self.reliable_message_rtx_queue.len() < RELIABLE_MESSAGE_RTX_QUEUE_LENGTH {
+                        log::debug!("NACK, pushing {reliable_message:?} onto rtx queue");
+                        self.reliable_message_rtx_queue.push_back(reliable_message);
+                    } else {
+                        // Queue is full, return an error
+                        bail!(
+                            "Reliable message RTX queue is full (capacity: {}), cannot add nacked message",
+                            RELIABLE_MESSAGE_RTX_QUEUE_LENGTH
+                        );
+                    }
                 }
             }
         }
@@ -544,38 +566,41 @@ impl PacketMonitor {
         seqno: u64,
         tx_epoch_time: Option<u64>,
     ) -> Result<()> {
-        match self {
-            PacketMonitor::No => Ok(()),
-            PacketMonitor::Yes {
-                received_incoming_packets,
-                queued_packet_status_messages,
-            } => {
-                let rx_epoch_time = hardware.epoch_timestamp();
-                let tx_epoch_time = tx_epoch_time.ok_or(anyhow!(
-                    "We are set up to monitor packets, but a packet was missing a tx time"
-                ))?;
-                let tx_rx_epoch_times = Some((tx_epoch_time, rx_epoch_time));
-                match queued_packet_status_messages {
-                    Some(queued_packet_status_messages) => {
-                        let popped_status =
-                            queued_packet_status_messages.push(messages::PacketStatus {
-                                seqno,
-                                tx_rx_epoch_times,
-                            });
-                        // TODO not this
-                        assert!(
-                            popped_status.is_none(),
-                            "Ran out of space for packet statuses"
-                        );
-                    }
-                    // TODO do not hardcode direction
-                    None => hardware.register_packet_status(
-                        AbsoluteDirection::S2C,
-                        seqno,
-                        tx_rx_epoch_times,
-                    ),
+        if let PacketMonitor::Yes {
+            received_incoming_packets,
+            queued_packet_status_messages,
+        } = self
+        {
+            let rx_epoch_time = hardware.epoch_timestamp();
+            let tx_epoch_time = tx_epoch_time.ok_or(anyhow!(
+                "We are set up to monitor packets, but a packet was missing a tx time"
+            ))?;
+            let tx_rx_epoch_times = Some((tx_epoch_time, rx_epoch_time));
+            match queued_packet_status_messages {
+                Some(queued_packet_status_messages) => {
+                    let popped_status =
+                        queued_packet_status_messages.push(messages::PacketStatus {
+                            seqno,
+                            tx_rx_epoch_times,
+                        });
+                    // TODO not this
+                    assert!(
+                        popped_status.is_none(),
+                        "Ran out of space for packet statuses"
+                    );
                 }
-                let popped = received_incoming_packets.push(true);
+                // TODO do not hardcode direction
+                None => hardware.register_packet_status(
+                    AbsoluteDirection::S2C,
+                    seqno,
+                    tx_rx_epoch_times,
+                ),
+            }
+            // mark any packets between the current tail and the new seqno as not having been
+            // received yet, and also treat any un-received packets that are "clocked out" of
+            // received_incoming_packets as part of this process as lost.
+            for _ in received_incoming_packets.tail_index()..=seqno {
+                let popped = received_incoming_packets.push(false);
                 match popped {
                     Some((lost_seqno, false)) => {
                         match queued_packet_status_messages {
@@ -601,9 +626,11 @@ impl PacketMonitor {
                     }
                     _ => (),
                 }
-                Ok(())
             }
+            // mark that this one isn't lost
+            received_incoming_packets.set(seqno, true);
         }
+        Ok(())
     }
 
     fn on_incoming_packet_status(
