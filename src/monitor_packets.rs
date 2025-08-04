@@ -80,7 +80,10 @@ impl<W: Write> CsvWriters<W> {
                 write_prefix(buffer, writer);
             }
         }
-        buffer[command.seqno] = Some(command.tx_rx_epoch_times);
+        // this can happen when the server has to retransmit the PacketStatus (dropped C2S ack)
+        if command.seqno >= buffer.head_index() {
+            buffer[command.seqno] = Some(command.tx_rx_epoch_times);
+        }
         write_prefix(buffer, writer);
     }
 
@@ -237,6 +240,34 @@ mod tests {
         let c2s_output = String::from_utf8(monitor.c2s_writer).unwrap();
         // Only packet 0 should be written because packet 1 is missing, preventing 2+ from being written
         let expected = "seqno,tx_time,rx_time\n0,100,200\n";
+        assert_eq!(c2s_output, expected);
+    }
+
+    #[test]
+    fn test_rtx() {
+        let c2s_buf = Vec::new();
+        let s2c_buf = Vec::new();
+        let mut monitor = CsvWriters::new(c2s_buf, s2c_buf).unwrap();
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 0,
+            tx_rx_epoch_times: Some((100, 200)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 1,
+            tx_rx_epoch_times: Some((150, 250)),
+        });
+        monitor.register_packet_status(&RegisterPacketStatusCommand {
+            direction: AbsoluteDirection::C2S,
+            seqno: 0,
+            tx_rx_epoch_times: Some((100, 200)),
+        });
+        monitor.flush().unwrap();
+
+        let c2s_output = String::from_utf8(monitor.c2s_writer).unwrap();
+        // Only packet 0 should be written because packet 1 is missing, preventing 2+ from being written
+        let expected = "seqno,tx_time,rx_time\n0,100,200\n1,150,250\n";
         assert_eq!(c2s_output, expected);
     }
 }
