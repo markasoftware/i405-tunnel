@@ -1,3 +1,5 @@
+#![allow(clippy::four_forward_slashes)]
+
 mod ip_packet;
 
 use anyhow::{Result, anyhow, bail};
@@ -833,6 +835,7 @@ mod test {
         let mut write_cursor = WriteCursor::new(arr_arr);
         // TODO Test both handshakes
         write_cursor.write(type_byte);
+        #[allow(clippy::unnecessary_cast)]
         write_cursor.write(MAGIC_VALUE + 1 as u32);
         let buf = write_cursor.into_inner();
 
@@ -859,7 +862,9 @@ mod test {
         let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
         let mut write_cursor = WriteCursor::new(arr_arr);
         write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
+        #[allow(clippy::unnecessary_cast)]
         write_cursor.write(MAGIC_VALUE as u32);
+        #[allow(clippy::unnecessary_cast)]
         write_cursor.write(SERDES_VERSION + 1 as u32);
         let buf = write_cursor.into_inner();
 

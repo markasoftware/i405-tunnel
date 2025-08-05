@@ -94,6 +94,7 @@ pub(crate) fn set_sched_fifo() -> Result<()> {
     }
 }
 
+// should it really be Copy? IDK, but in order to derive Clone in simulated, we need it
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct QdiscSettings {
     fq_flow_limit: u64,

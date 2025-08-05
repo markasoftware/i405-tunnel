@@ -136,6 +136,7 @@ impl QueuedIpPacket {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum FragmentResult {
     /// The remaining packet fit into a single message, contained within

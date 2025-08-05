@@ -80,7 +80,7 @@ impl Ord for WanPacket {
 
 impl PartialOrd for WanPacket {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 
@@ -129,7 +129,7 @@ impl SimulatedHardware {
         }
     }
 
-    pub(crate) fn hardware<'a>(&'a self, addr: SocketAddr) -> OneSideHardware<'a> {
+    pub(crate) fn hardware(&self, addr: SocketAddr) -> OneSideHardware<'_> {
         OneSideHardware {
             simulated: self,
             our_addr: addr,
@@ -224,7 +224,7 @@ impl SimulatedHardware {
                     );
                     if timer == timestamp {
                         self.debug(format!("Timer triggered for {} at {}ns", addr, timestamp));
-                        core.on_timer(&mut self.hardware(addr), timestamp);
+                        core.on_timer(&self.hardware(addr), timestamp);
                         // the continue serves two purposes: (1) ensure that if handling one event
                         // causes other events to happen at the same timestamp, we don't advance the
                         // timestamp and (2) help the borrow checker by letting it discard our other
@@ -308,13 +308,13 @@ pub(crate) struct OneSideHardware<'a> {
     our_addr: SocketAddr,
 }
 
-impl<'a> OneSideHardware<'a> {
+impl OneSideHardware<'_> {
     fn our_side(&self) -> &OneSideInfo {
         self.simulated.peers.get(&self.our_addr).unwrap()
     }
 }
 
-impl<'a> Hardware for OneSideHardware<'a> {
+impl Hardware for OneSideHardware<'_> {
     fn set_timer(&self, timestamp: u64) -> Option<u64> {
         let old_timestamp = self.our_side().timer.replace(Some(timestamp));
         self.simulated.debug(format!(
@@ -325,7 +325,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
     }
 
     fn timestamp(&self) -> u64 {
-        self.simulated.timestamp.clone()
+        self.simulated.timestamp
     }
 
     fn epoch_timestamp(&self) -> u64 {
@@ -364,8 +364,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
                 .simulated
                 .packets_to_delay
                 .get(&packet_counter)
-                .unwrap_or(&0)
-                .clone();
+                .unwrap_or(&0);
         let receipt_timestamp = sent_timestamp + delay;
         self.simulated.debug(format!(
             "Sending packet from {} to {} of size {} at {}ns (delay {}ns, to be received at {}ns)",
@@ -449,9 +448,7 @@ impl<'a> Hardware for OneSideHardware<'a> {
     }
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
-        self.our_side()
-            .qdisc_settings
-            .replace(Some(settings.clone()));
+        self.our_side().qdisc_settings.replace(Some(*settings));
         Ok(())
     }
 }

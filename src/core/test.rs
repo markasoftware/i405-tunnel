@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+#[allow(unused_imports)]
 use test_case::test_matrix;
 
 const PSK: &[u8] = b"password";
@@ -205,18 +206,14 @@ fn dont_configure_qdisc() {
     let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
     let mut server_config = default_server_config();
     server_config.should_configure_qdisc = false;
-    let server_core = core::server::Core::new(
-        server_config,
-        &mut simulated_hardware.hardware(server_addr()),
-    )
-    .unwrap();
+    let server_core =
+        core::server::Core::new(server_config, &simulated_hardware.hardware(server_addr()))
+            .unwrap();
     let mut client_config = default_client_config();
     client_config.should_configure_qdisc = false;
-    let client_core = core::client::Core::new(
-        client_config,
-        &mut simulated_hardware.hardware(client_addr()),
-    )
-    .unwrap();
+    let client_core =
+        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+            .unwrap();
     let mut cores = BTreeMap::from([
         (client_addr(), client_core.into()),
         (server_addr(), server_core.into()),
@@ -482,12 +479,12 @@ fn drop_and_reorder() {
     simulated_hardware.delay_packet(4, ms(1500.0));
     let server_core = core::server::Core::new(
         default_server_config(),
-        &mut simulated_hardware.hardware(server_addr()),
+        &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let client_core = core::client::Core::new(
         default_client_config(),
-        &mut simulated_hardware.hardware(client_addr()),
+        &simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
     let mut cores = BTreeMap::from([
@@ -586,16 +583,14 @@ fn wrong_psk() {
         SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
     let server_core = core::server::Core::new(
         default_server_config(),
-        &mut simulated_hardware.hardware(server_addr()),
+        &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.pre_shared_key = "wrong password".into();
-    let client_core = core::client::Core::new(
-        client_config,
-        &mut simulated_hardware.hardware(client_addr()),
-    )
-    .unwrap();
+    let client_core =
+        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+            .unwrap();
     let mut cores = BTreeMap::from([
         (client_addr(), client_core.into()),
         (server_addr(), server_core.into()),
@@ -628,18 +623,17 @@ fn multiple_ongoing_negotiations() {
     );
     let server_core = core::server::Core::new(
         default_server_config(),
-        &mut simulated_hardware.hardware(server_addr()),
+        &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.pre_shared_key = "wrong password".into();
     let evil_client_core = core::client::Core::new(
         client_config,
-        &mut simulated_hardware.hardware(evil_client_addr),
+        &simulated_hardware.hardware(evil_client_addr),
     )
     .unwrap();
-    let noop_core =
-        core::noop::Core::new(&mut simulated_hardware.hardware(good_client_addr)).unwrap();
+    let noop_core = core::noop::Core::new(&simulated_hardware.hardware(good_client_addr)).unwrap();
     let mut cores = BTreeMap::from([
         (evil_client_addr, evil_client_core.into()),
         (good_client_addr, noop_core.into()),
@@ -651,7 +645,7 @@ fn multiple_ongoing_negotiations() {
 
     let good_client_core = core::client::Core::new(
         default_client_config(),
-        &mut simulated_hardware.hardware(good_client_addr),
+        &simulated_hardware.hardware(good_client_addr),
     )
     .unwrap();
     cores.insert(good_client_addr, good_client_core.into());
@@ -690,16 +684,16 @@ fn client_termination_and_reconnect() {
 
     let original_client_core = cores.insert(
         client_addr(),
-        core::noop::Core::new(&mut simulated_hardware.hardware(client_addr()))
+        core::noop::Core::new(&simulated_hardware.hardware(client_addr()))
             .unwrap()
             .into(),
     );
     original_client_core
         .unwrap()
-        .on_terminate(&mut simulated_hardware.hardware(client_addr()));
+        .on_terminate(&simulated_hardware.hardware(client_addr()));
     let new_client_core = core::client::Core::new(
         default_client_config(),
-        &mut simulated_hardware.hardware(client_addr()),
+        &simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
     cores.insert(client_addr(), new_client_core.into());
@@ -732,16 +726,16 @@ fn server_termination_and_reconnect() {
 
     let original_server_core = cores.insert(
         server_addr(),
-        core::noop::Core::new(&mut simulated_hardware.hardware(server_addr()))
+        core::noop::Core::new(&simulated_hardware.hardware(server_addr()))
             .unwrap()
             .into(),
     );
     original_server_core
         .unwrap()
-        .on_terminate(&mut simulated_hardware.hardware(server_addr()));
+        .on_terminate(&simulated_hardware.hardware(server_addr()));
     let new_server_core = core::server::Core::new(
         default_server_config(),
-        &mut simulated_hardware.hardware(server_addr()),
+        &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     cores.insert(server_addr(), new_server_core.into());
@@ -802,7 +796,7 @@ fn server_not_responding() {
         server_addr(),
         core::server::Core::new(
             default_server_config(),
-            &mut simulated_hardware.hardware(server_addr()),
+            &simulated_hardware.hardware(server_addr()),
         )
         .unwrap()
         .into(),
@@ -868,12 +862,9 @@ fn client_not_responding() {
     client_config.server_wire_config = LONGER_SERVER_WIRE_CONFIG;
     cores.insert(
         client_addr(),
-        core::client::Core::new(
-            client_config,
-            &mut simulated_hardware.hardware(client_addr()),
-        )
-        .unwrap()
-        .into(),
+        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+            .unwrap()
+            .into(),
     );
 
     simulated_hardware.run_until(&mut cores, ms(11_000.0));

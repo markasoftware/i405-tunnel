@@ -1,3 +1,5 @@
+#![allow(clippy::bool_assert_comparison)]
+
 use std::{
     collections::VecDeque,
     ops::{Index, IndexMut},

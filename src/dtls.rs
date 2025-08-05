@@ -326,6 +326,7 @@ impl EstablishedSession {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum DecryptResult {
     Decrypted(IpPacketBuffer),
@@ -443,7 +444,7 @@ mod test {
         let mut out_packets = Vec::new();
         let mut new_timeout = None;
         for packet in packets {
-            match session.make_progress(&packet, timestamp) {
+            match session.make_progress(packet, timestamp) {
                 NegotiateResult::NeedRead(new_session, cur_out_packets, cur_new_timeout) => {
                     out_packets.extend(cur_out_packets);
                     new_timeout = Some(cur_new_timeout);
