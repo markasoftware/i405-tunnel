@@ -391,7 +391,6 @@ impl EstablishedConnection {
                 }
                 Message::Ack(ack) => {
                     for acked_seqno in ack.first_acked_seqno..=ack.last_acked_seqno {
-                        // TODO handle ack actions
                         let ack_action_iter = self.remote_ack_handler.on_remote_ack(acked_seqno)?;
                         for ack_action in ack_action_iter {
                             // it would be nice to split this out into another function, but there's
@@ -429,9 +428,9 @@ impl EstablishedConnection {
                 }
             }
         }
-        // TODO I at one point considered having a "packet header" that would contain the sequence
-        // number in a fixed location to make inclusion of seqno more "safe". Chose not to implement
-        // until we do FEC because those both require changes to the packet format.
+        // I at one point considered having a "packet header" that would contain the sequence number
+        // in a fixed location to make inclusion of seqno more "safe". Chose not to implement until
+        // we do FEC because those both require changes to the packet format.
         let incoming_seqno = incoming_seqno.ok_or(anyhow!(
             "No sequence number in established session packet -- protocol violation"
         ))?;

@@ -5,9 +5,8 @@ use crate::{
     messages::{self, Message},
 };
 
-// TODO move this somewhere else probably. In fact, if we ever have reliable datagrams that are
-// substantially different in size, we may want to store the binary messages in the queues above and
-// have them be byte-based, rather than message-based.
+// If we ever have reliable datagrams that are substantially different in size, we may want to store
+// the binary messages in the queues above and have them be byte-based, rather than message-based.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum ReliableMessage {
     // I'm not sure how I feel about including the literal PacketStatus message itself in here :|

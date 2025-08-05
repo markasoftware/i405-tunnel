@@ -214,7 +214,8 @@ impl ClientToServerHandshake {
     }
 }
 
-// TODO should probably just remove this when/if we add packet type bytes
+// If we ever switch to using packet type bytes, then the handshakes will have different type bytes,
+// and we can remove the MessageTrait implementation.
 impl MessageTrait for ClientToServerHandshake {
     fn reliability_action(&self) -> Option<ReliabilityAction> {
         None
