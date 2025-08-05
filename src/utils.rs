@@ -134,6 +134,7 @@ pub(crate) enum AbsoluteDirection {
     C2S,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RelativeDirection {
     Outgoing,
     Incoming,

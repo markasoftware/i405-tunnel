@@ -15,7 +15,7 @@ use crate::{
     deviation_stats::DeviationStatsThread,
     hardware::Hardware,
     monitor_packets::MonitorPacketsThread,
-    utils::{AbsoluteDirection, ChannelThread, instant_to_timestamp, timestamp_to_instant},
+    utils::{ChannelThread, RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
 use super::real::{QdiscSettings, configure_qdisc, epoch_timestamp};
@@ -420,7 +420,7 @@ impl Hardware for SleepyHardware {
 
     fn register_packet_status(
         &self,
-        direction: AbsoluteDirection,
+        direction: RelativeDirection,
         seqno: u64,
         tx_rx_epoch_times: Option<(u64, u64)>,
     ) {

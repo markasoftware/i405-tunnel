@@ -50,12 +50,12 @@ impl PacketBuilder {
         &mut self,
         message: &Message,
         reliability_builder: &mut ReliabilityActionBuilder<'_>,
-    ) -> bool {
+    ) -> Result<bool> {
         let (added, ra) = self.try_add_message_explicit_reliability(message);
         if let Some(ra) = ra {
-            reliability_builder.add_reliability_action(ra);
+            reliability_builder.add_reliability_action(ra)?;
         }
-        added
+        Ok(added)
     }
 
     // TODO would like to make the return type here more type safe, since (false, Some(..)) is be

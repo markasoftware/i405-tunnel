@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
 use crate::core::Core;
-use crate::utils::AbsoluteDirection;
+use crate::utils::RelativeDirection;
 use crate::{core, hardware::Hardware};
 
 use super::real::QdiscSettings;
@@ -92,7 +92,7 @@ pub(crate) struct LocalPacket {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PacketStatus {
-    pub(crate) direction: AbsoluteDirection,
+    pub(crate) direction: RelativeDirection,
     pub(crate) seqno: u64,
     pub(crate) tx_rx_epoch_times: Option<(u64, u64)>,
 }
@@ -433,7 +433,7 @@ impl Hardware for OneSideHardware<'_> {
 
     fn register_packet_status(
         &self,
-        direction: AbsoluteDirection,
+        direction: RelativeDirection,
         seqno: u64,
         tx_rx_epoch_times: Option<(u64, u64)>,
     ) {

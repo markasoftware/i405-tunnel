@@ -5,7 +5,7 @@ use crate::array_array::IpPacketBuffer;
 use crate::constants::{IPV4_HEADER_LENGTH, UDP_HEADER_LENGTH};
 use crate::core::{self, Core};
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
-use crate::utils::ip_to_i405_length;
+use crate::utils::{RelativeDirection, ip_to_i405_length};
 use crate::wire_config::WireConfig;
 
 use std::collections::BTreeMap;
@@ -926,11 +926,11 @@ fn monitor_packets() {
     // Should have recorded packets in both directions
     let c2s_statuses: Vec<_> = packet_statuses
         .iter()
-        .filter(|s| matches!(s.direction, crate::utils::AbsoluteDirection::C2S))
+        .filter(|s| matches!(s.direction, RelativeDirection::Outgoing))
         .collect();
     let s2c_statuses: Vec<_> = packet_statuses
         .iter()
-        .filter(|s| matches!(s.direction, crate::utils::AbsoluteDirection::S2C))
+        .filter(|s| matches!(s.direction, RelativeDirection::Incoming))
         .collect();
 
     assert!(!c2s_statuses.is_empty(), "No C2S packet statuses recorded");

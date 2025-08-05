@@ -576,7 +576,7 @@ fn monitor_packets_test(env: &mut TestEnvironment) {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
 
-    let expected_files = ["client_to_server.csv", "server_to_client.csv"];
+    let expected_files = ["outgoing.csv", "incoming.csv"];
     for expected in expected_files {
         assert!(files.contains(&expected.to_string()));
     }

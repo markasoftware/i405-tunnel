@@ -196,13 +196,14 @@ impl<'a> ReliabilityActionBuilder<'a> {
         Self { ack_handler }
     }
 
-    pub(crate) fn add_reliability_action(&mut self, ra: ReliabilityAction) {
+    pub(crate) fn add_reliability_action(&mut self, ra: ReliabilityAction) -> Result<()> {
         let popped_ra = self.ack_handler.reliability_actions.push(Some(ra));
-        // TODO handle more gracefully.
-        assert!(
-            popped_ra.is_none(),
-            "Ran out of space for reliability actions"
-        );
+        if popped_ra.is_some() {
+            // TODO maybe revisit. One could argue that we shouldn't completely bail out here. Maybe
+            // we should just allocate memory instead?
+            bail!("Ran out of space for reliability actions -- cannot guarantee reliable delivery");
+        }
+        Ok(())
     }
 
     // When all reliability actions have been added, call this to add the outgoing packet to the
@@ -453,7 +454,7 @@ mod test {
     ) -> ReliabilityActionIterator<'_> {
         let mut builder = handler.outgoing_packet_builder();
         for ra in ras {
-            builder.add_reliability_action(ra);
+            builder.add_reliability_action(ra).unwrap();
         }
         builder.finalize()
     }

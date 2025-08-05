@@ -13,7 +13,7 @@ use crate::{
         LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, ReliableMessage,
         RemoteAckHandler,
     },
-    utils::{AbsoluteDirection, ip_to_i405_length},
+    utils::{RelativeDirection, ip_to_i405_length},
     wire_config::WireConfig,
 };
 
@@ -25,10 +25,9 @@ use anyhow::{Result, anyhow, bail};
 // down.
 const MAX_QUEUED_IP_PACKETS: usize = 3;
 const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
-// TODO revisit this!!!
+// This is pretty arbitrary, just the max number of reliable messages I think are likely to be lost
+// in a reasonable connection. If this is exceeded, the connection is killed.
 const RELIABLE_MESSAGE_RTX_QUEUE_LENGTH: usize = 1024;
-// TODO also revisit this, should be long enough to queue all the incoming packets we get between outgoing packets.
-const PACKET_STATUS_QUEUE_LENGTH: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
@@ -136,8 +135,10 @@ impl EstablishedConnection {
         hardware.set_timer(
             hardware.timestamp() + jitterator.next_interval() - config.wire.packet_finalize_delta,
         );
-        // TODO make configurable. How long after sending a packet we will assume it to be dropped
-        // if we haven't received an ack (and it's ack-eliciting)
+        // TODO make configurable. Basically a retransmit timeout. How long after sending a packet
+        // we will assume it to be dropped if we haven't received an ack (and it's ack-eliciting).
+        // In addition to any estimated round-trip time provided by the user, we should probably at
+        // least add the max reverse packet interval.
         let outgoing_timeout = Duration::from_secs(1);
         let remote_ack_capacity = std::cmp::max(
             3,
@@ -145,10 +146,15 @@ impl EstablishedConnection {
                 as usize
                 + 1,
         );
+        // How many incoming packets we will track ack status for. If we are missing a packet, then
+        // receive `local_ack_capacity` many packets, and then get an ack for that first
+        // packet, we will not send an ack for the first packet. The default is how many packets we receive for
+        // each packet we send out, times a safety factor.
         let local_ack_capacity = std::cmp::max(
-            3,
+            32,
             usize::try_from(
-                2 * config.wire.packet_interval_max / config.reverse_packet_interval_min,
+                // the 4 here is arbitrary.
+                4 * config.wire.packet_interval_max / config.reverse_packet_interval_min,
             )
             .unwrap(),
         );
@@ -202,7 +208,7 @@ impl EstablishedConnection {
         let could_add_seqno = packet_builder.try_add_message(
             &Message::SequenceNumber(messages::SequenceNumber { seqno }),
             &mut reliability_builder,
-        );
+        )?;
         assert!(
             could_add_seqno,
             "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
@@ -213,7 +219,7 @@ impl EstablishedConnection {
             &mut packet_builder,
             &mut reliability_builder,
             send_timestamp,
-        );
+        )?;
 
         // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
         // computing the local acks is a substantial portion of the overall cost of building a new
@@ -234,7 +240,8 @@ impl EstablishedConnection {
             // it would be natural to have `... && let Some(local_ack) = ...` in the while
             // condition, but that's not stable Rust yet.
             if let Some(local_ack) = local_ack_iter.next() {
-                packet_builder.try_add_message(&Message::Ack(local_ack), &mut reliability_builder);
+                packet_builder
+                    .try_add_message(&Message::Ack(local_ack), &mut reliability_builder)?;
             } else {
                 break 'local_ack_loop;
             }
@@ -242,12 +249,12 @@ impl EstablishedConnection {
 
         // add PacketStatus messages
         self.packet_monitor
-            .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder);
+            .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder)?;
 
         // Retransmit reliable messages from rtx queue (after acks, before general IP packets)
         while let Some(reliable_message) = self.reliable_message_rtx_queue.pop_front() {
             let message = Message::from(reliable_message.clone());
-            let could_add = packet_builder.try_add_message(&message, &mut reliability_builder);
+            let could_add = packet_builder.try_add_message(&message, &mut reliability_builder)?;
             if could_add {
                 log::debug!("Retransmitting message {message:?}");
             } else {
@@ -496,7 +503,7 @@ impl PacketMonitor {
             MonitorPackets::No => PacketMonitor::No,
             MonitorPackets::Remote => PacketMonitor::Yes {
                 received_incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
-                queued_packet_status_messages: Some(ArrDeque::new(PACKET_STATUS_QUEUE_LENGTH)),
+                queued_packet_status_messages: Some(ArrDeque::new(local_ack_capacity)),
             },
             MonitorPackets::Local => PacketMonitor::Yes {
                 received_incoming_packets: GlobalBitArrDeque::new(local_ack_capacity),
@@ -513,7 +520,7 @@ impl PacketMonitor {
         packet_builder: &mut messages::PacketBuilder,
         reliability_builder: &mut ReliabilityActionBuilder<'_>,
         send_timestamp: u64,
-    ) {
+    ) -> Result<()> {
         match self {
             PacketMonitor::No => (),
             _ => {
@@ -524,7 +531,7 @@ impl PacketMonitor {
                         timestamp: send_epoch_time,
                     }),
                     reliability_builder,
-                );
+                )?;
                 // we really should be adding this very close to the top of the packet, above acks and stuff.
                 assert!(
                     could_add_tx_epoch_time,
@@ -532,13 +539,14 @@ impl PacketMonitor {
                 );
             }
         }
+        Ok(())
     }
 
     fn body_of_outgoing_packet(
         &mut self,
         packet_builder: &mut messages::PacketBuilder,
         reliability_builder: &mut ReliabilityActionBuilder<'_>,
-    ) {
+    ) -> Result<()> {
         if let PacketMonitor::Yes {
             received_incoming_packets: _,
             queued_packet_status_messages: Some(queued_packet_status_messages),
@@ -547,7 +555,7 @@ impl PacketMonitor {
             'queue_loop: while queued_packet_status_messages.len() > 0 {
                 // eww don't love this clone but oh well
                 let msg = Message::PacketStatus(queued_packet_status_messages[0].clone());
-                let could_add = packet_builder.try_add_message(&msg, reliability_builder);
+                let could_add = packet_builder.try_add_message(&msg, reliability_builder)?;
                 if could_add {
                     queued_packet_status_messages.pop();
                 } else {
@@ -555,6 +563,7 @@ impl PacketMonitor {
                 }
             }
         }
+        Ok(())
     }
 
     fn on_incoming_packet(
@@ -580,15 +589,16 @@ impl PacketMonitor {
                             seqno,
                             tx_rx_epoch_times,
                         });
-                    // TODO not this
-                    assert!(
-                        popped_status.is_none(),
-                        "Ran out of space for packet statuses"
-                    );
+                    if popped_status.is_some() {
+                        // one could argue that we shouldn't disconnect in this case but instead
+                        // print an error. See also the same logic below. TODO maybe revisit?
+                        bail!(
+                            "Ran out of queue space for PacketStatus messages (during incoming packet) -- cannot guarantee reliable delivery"
+                        );
+                    }
                 }
-                // TODO do not hardcode direction
                 None => hardware.register_packet_status(
-                    AbsoluteDirection::S2C,
+                    RelativeDirection::Incoming,
                     seqno,
                     tx_rx_epoch_times,
                 ),
@@ -606,15 +616,14 @@ impl PacketMonitor {
                                     seqno: lost_seqno,
                                     tx_rx_epoch_times: None,
                                 });
-                            // TODO not this
-                            assert!(
-                                popped_status.is_none(),
-                                "Ran out of space for packet statuses"
-                            )
+                            if popped_status.is_some() {
+                                bail!(
+                                    "Ran out of queue space for PacketStatus messages (during lost packet) -- cannot guarantee reliable delivery"
+                                );
+                            }
                         }
-                        // TODO do not hardcode direction
                         None => hardware.register_packet_status(
-                            AbsoluteDirection::S2C,
+                            RelativeDirection::Incoming,
                             lost_seqno,
                             None,
                         ),
@@ -637,9 +646,8 @@ impl PacketMonitor {
                 received_incoming_packets: _,
                 queued_packet_status_messages: None,
             } => {
-                // TODO don't hardcode direction
                 hardware.register_packet_status(
-                    AbsoluteDirection::C2S,
+                    RelativeDirection::Outgoing,
                     packet_status.seqno,
                     packet_status.tx_rx_epoch_times,
                 );

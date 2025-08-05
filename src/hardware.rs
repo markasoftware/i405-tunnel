@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use real::QdiscSettings;
 
-use crate::utils::AbsoluteDirection;
+use crate::utils::RelativeDirection;
 
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
 /// only able to interact with the outside world through an instance of `Hardware`
@@ -60,7 +60,7 @@ pub(crate) trait Hardware {
     /// the status of each packet (typically the hardware will just write it to a file).
     fn register_packet_status(
         &self,
-        direction: AbsoluteDirection,
+        direction: RelativeDirection,
         seqno: u64,
         tx_rx_epoch_times: Option<(u64, u64)>,
     );

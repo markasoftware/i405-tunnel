@@ -18,7 +18,7 @@ use crate::{
     core,
     deviation_stats::DeviationStatsThread,
     monitor_packets::MonitorPacketsThread,
-    utils::{AbsoluteDirection, instant_to_timestamp, timestamp_to_instant},
+    utils::{RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
 const OVERSLEEP_WARNING: Duration = Duration::from_micros(10);
@@ -235,7 +235,7 @@ impl Hardware for SpinnyHardware {
 
     fn register_packet_status(
         &self,
-        direction: AbsoluteDirection,
+        direction: RelativeDirection,
         seqno: u64,
         tx_rx_epoch_times: Option<(u64, u64)>,
     ) {
