@@ -171,10 +171,12 @@ pub(crate) fn configure_qdisc(
 pub(crate) fn resolve_socket_addr_string(socket_addr_str: &str) -> Option<SocketAddr> {
     let addrs: Vec<SocketAddr> = socket_addr_str
         .to_socket_addrs()
-        .expect(&format!(
-            "Failed to resolve peer address {}. Make sure to include a port number",
-            socket_addr_str
-        ))
+        .unwrap_or_else(|_| {
+            panic!(
+                "Failed to resolve peer address {}. Make sure to include a port number",
+                socket_addr_str
+            )
+        })
         .collect();
     // prefer IPv6, but fall back to IPv4
     let ipv6_addr = addrs.iter().find(|addr| {

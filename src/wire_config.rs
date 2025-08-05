@@ -69,7 +69,7 @@ impl PartialWireConfig {
         let packet_length: u16 = user_ip_packet_length
             .map(|pl| {
                 pl.try_into()
-                    .expect(&format!("Packet length {pl} is too long; must be <={}", u16::MAX))
+                    .unwrap_or_else(|_| panic!("Packet length {pl} is too long; must be <={}", u16::MAX))
             })
             .unwrap_or_else(|| {
                 log::info!(
@@ -92,7 +92,7 @@ impl PartialWireConfig {
         };
         let (packet_interval_min, packet_interval_max) = match interval.jitter {
             Some(jitter) => (
-                average_interval.checked_sub(jitter).expect(&format!(
+                average_interval.checked_sub(jitter).unwrap_or_else(|| panic!(
                     "Specified jitter of {} is larger than the average inter-packet interval {}",
                     ns_to_str(jitter),
                     ns_to_str(average_interval)

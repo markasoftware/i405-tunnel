@@ -70,9 +70,10 @@ impl BasicStats {
     }
 }
 
-impl ToString for BasicStats {
-    fn to_string(&self) -> String {
-        format!(
+impl std::fmt::Display for BasicStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "Average : {}\nVariance: {}\nP50     : {}\nP99     : {}\nP99.9   : {}\nMax     : {}",
             ns_to_str(self.average),
             ns_to_str(self.variance),

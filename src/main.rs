@@ -94,7 +94,7 @@ fn make_core(
 
     match &configuration {
         config_cli::ConfigCli::Client(client_configuration) => {
-            let peer = resolve_socket_addr_string(&client_configuration.peer).expect(&format!(
+            let peer = resolve_socket_addr_string(&client_configuration.peer).unwrap_or_else(|| panic!(
                 "No route to host {} (but DNS resolved successfully); check your internet connectivity",
                 client_configuration.peer
             ));

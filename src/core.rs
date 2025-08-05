@@ -6,6 +6,7 @@ use crate::hardware::Hardware;
 
 pub(crate) mod client;
 mod established_connection;
+#[cfg(test)]
 pub(crate) mod noop;
 pub(crate) mod server;
 #[cfg(test)]
@@ -38,6 +39,7 @@ enum_dispatch! {
     pub(crate) enum ConcreteCore {
         Client(client::Core),
         Server(server::Core),
+        #[cfg(test)]
         NoOp(noop::Core)
     }
 }

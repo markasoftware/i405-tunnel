@@ -78,7 +78,7 @@ pub(crate) struct LocalAckIterator<'a> {
     seqno: u64,
 }
 
-impl<'a> Iterator for LocalAckIterator<'a> {
+impl Iterator for LocalAckIterator<'_> {
     type Item = messages::Ack;
 
     fn next(&mut self) -> Option<messages::Ack> {
@@ -268,7 +268,7 @@ impl<'a> ReliabilityActionIterator<'a> {
     }
 }
 
-impl<'a> Iterator for ReliabilityActionIterator<'a> {
+impl Iterator for ReliabilityActionIterator<'_> {
     // TODO there's probably some way to return references instead of copying out the
     // ReliabilityActions, but I'm not sure exactly how.
     type Item = ReliabilityAction;

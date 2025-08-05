@@ -573,12 +573,16 @@ impl ServerConnectionStateTrait for EstablishedConnection {
         packet: &[u8],
         peer: SocketAddr,
     ) -> Result<ConnectionState> {
-        // TODO actually call .connect on the hardware
-        assert_eq!(
-            peer,
-            self.peer(),
-            "should only be receiving from the correct peer once established"
-        );
+        // TODO actually call .connect on the hardware. And perhaps we can uncomment this at said time:
+        // assert_eq!(
+        //     peer,
+        //     self.peer(),
+        //     "should only be receiving from the correct peer once established"
+        // );
+        if peer != self.peer() {
+            return Ok(ConnectionState::EstablishedConnection(self));
+        }
+
         let is_connection_open =
             EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
         self.handle_is_connection_open_s(hardware, is_connection_open)

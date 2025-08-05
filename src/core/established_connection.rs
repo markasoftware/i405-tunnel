@@ -155,7 +155,7 @@ impl EstablishedConnection {
         Ok(Self {
             session,
             outgoing_connection: OutgoingConnection::new(hardware),
-            i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer).into(),
+            i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer),
             defragger: Defragger::new(),
             // this is a tiny bit jank in the client case, because the server won't start sending us
             // packets until it receives our first post-handshake packet. If we have fast incoming
@@ -345,7 +345,7 @@ impl EstablishedConnection {
                 Ok(IsConnectionOpen::Yes)
             }
             dtls::DecryptResult::Terminated => Ok(IsConnectionOpen::TerminatedNormally),
-            dtls::DecryptResult::Err(err) => Err(err.into()),
+            dtls::DecryptResult::Err(err) => Err(err),
         }
     }
 
@@ -540,23 +540,21 @@ impl PacketMonitor {
         packet_builder: &mut messages::PacketBuilder,
         reliability_builder: &mut ReliabilityActionBuilder<'_>,
     ) {
-        match self {
-            PacketMonitor::Yes {
-                received_incoming_packets: _,
-                queued_packet_status_messages: Some(queued_packet_status_messages),
-            } => {
-                'queue_loop: while queued_packet_status_messages.len() > 0 {
-                    // eww don't love this clone but oh well
-                    let msg = Message::PacketStatus(queued_packet_status_messages[0].clone());
-                    let could_add = packet_builder.try_add_message(&msg, reliability_builder);
-                    if could_add {
-                        queued_packet_status_messages.pop();
-                    } else {
-                        break 'queue_loop;
-                    }
+        if let PacketMonitor::Yes {
+            received_incoming_packets: _,
+            queued_packet_status_messages: Some(queued_packet_status_messages),
+        } = self
+        {
+            'queue_loop: while queued_packet_status_messages.len() > 0 {
+                // eww don't love this clone but oh well
+                let msg = Message::PacketStatus(queued_packet_status_messages[0].clone());
+                let could_add = packet_builder.try_add_message(&msg, reliability_builder);
+                if could_add {
+                    queued_packet_status_messages.pop();
+                } else {
+                    break 'queue_loop;
                 }
             }
-            _ => (),
         }
     }
 
@@ -601,30 +599,27 @@ impl PacketMonitor {
             // received_incoming_packets as part of this process as lost.
             for _ in received_incoming_packets.tail_index()..=seqno {
                 let popped = received_incoming_packets.push(false);
-                match popped {
-                    Some((lost_seqno, false)) => {
-                        match queued_packet_status_messages {
-                            Some(queued_packet_status_messages) => {
-                                let popped_status =
-                                    queued_packet_status_messages.push(messages::PacketStatus {
-                                        seqno: lost_seqno,
-                                        tx_rx_epoch_times: None,
-                                    });
-                                // TODO not this
-                                assert!(
-                                    popped_status.is_none(),
-                                    "Ran out of space for packet statuses"
-                                )
-                            }
-                            // TODO do not hardcode direction
-                            None => hardware.register_packet_status(
-                                AbsoluteDirection::S2C,
-                                lost_seqno,
-                                None,
-                            ),
+                if let Some((lost_seqno, false)) = popped {
+                    match queued_packet_status_messages {
+                        Some(queued_packet_status_messages) => {
+                            let popped_status =
+                                queued_packet_status_messages.push(messages::PacketStatus {
+                                    seqno: lost_seqno,
+                                    tx_rx_epoch_times: None,
+                                });
+                            // TODO not this
+                            assert!(
+                                popped_status.is_none(),
+                                "Ran out of space for packet statuses"
+                            )
                         }
+                        // TODO do not hardcode direction
+                        None => hardware.register_packet_status(
+                            AbsoluteDirection::S2C,
+                            lost_seqno,
+                            None,
+                        ),
                     }
-                    _ => (),
                 }
             }
             // mark that this one isn't lost
