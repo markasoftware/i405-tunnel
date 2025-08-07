@@ -10,8 +10,7 @@ use crate::{
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     reliability::{
-        LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, ReliableMessage,
-        RemoteAckHandler,
+        LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, RemoteAckHandler,
     },
     utils::{RelativeDirection, ip_to_i405_length},
     wire_config::WireConfig,
@@ -27,7 +26,7 @@ const MAX_QUEUED_IP_PACKETS: usize = 3;
 const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
 // This is pretty arbitrary, just the max number of reliable messages I think are likely to be lost
 // in a reasonable connection. If this is exceeded, the connection is killed.
-const RELIABLE_MESSAGE_RTX_QUEUE_LENGTH: usize = 1024;
+const RELIABILITY_ACTION_RTX_QUEUE_LENGTH: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) struct EstablishedConnection {
@@ -43,7 +42,7 @@ pub(crate) struct EstablishedConnection {
     local_ack_generator: LocalAckGenerator,
     remote_ack_handler: RemoteAckHandler,
 
-    reliable_message_rtx_queue: VecDeque<ReliableMessage>,
+    reliability_action_rtx_queue: VecDeque<ReliabilityAction>,
 
     packet_monitor: PacketMonitor,
 }
@@ -179,7 +178,9 @@ impl EstablishedConnection {
                 remote_ack_capacity * MAX_AVERAGE_MESSAGES_PER_PACKET,
             ),
 
-            reliable_message_rtx_queue: VecDeque::with_capacity(RELIABLE_MESSAGE_RTX_QUEUE_LENGTH),
+            reliability_action_rtx_queue: VecDeque::with_capacity(
+                RELIABILITY_ACTION_RTX_QUEUE_LENGTH,
+            ),
 
             packet_monitor: PacketMonitor::new(config.monitor_packets, local_ack_capacity),
 
@@ -252,15 +253,24 @@ impl EstablishedConnection {
             .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder)?;
 
         // Retransmit reliable messages from rtx queue (after acks, before general IP packets)
-        while let Some(reliable_message) = self.reliable_message_rtx_queue.pop_front() {
-            let message = Message::from(reliable_message.clone());
-            let could_add = packet_builder.try_add_message(&message, &mut reliability_builder)?;
-            if could_add {
-                log::debug!("Retransmitting message {message:?}");
-            } else {
-                // No space left in packet, put the message back at the front of the queue
-                self.reliable_message_rtx_queue.push_front(reliable_message);
-                break;
+        while let Some(reliability_action) = self.reliability_action_rtx_queue.pop_front() {
+            match reliability_action {
+                ReliabilityAction::ReliableMessage(reliable_message) => {
+                    let message = Message::from(reliable_message.clone());
+                    let could_add =
+                        packet_builder.try_add_message(&message, &mut reliability_builder)?;
+                    if could_add {
+                        log::debug!("Retransmitting message {message:?}");
+                    } else {
+                        // No space left in packet, put the message back at the front of the queue
+                        self.reliability_action_rtx_queue
+                            .push_front(ReliabilityAction::ReliableMessage(reliable_message));
+                        break;
+                    }
+                }
+                ReliabilityAction::StreamData(_stream_data) => {
+                    todo!("Fragment the StreamData, push remaining onto the front of the queue");
+                }
             }
         }
 
@@ -283,20 +293,16 @@ impl EstablishedConnection {
             // just like in the ack case, I'd love to split this logic out into another function on
             // `self`, but then `self` would be mutably borrowed multiple times. Let's just nest it
             // for now. (Aside: I think the cool solution here would be )
-            match nack_action {
-                ReliabilityAction::ReliableMessage(reliable_message) => {
-                    // add it back on to the reliable messages queue, respecting capacity limit
-                    if self.reliable_message_rtx_queue.len() < RELIABLE_MESSAGE_RTX_QUEUE_LENGTH {
-                        log::debug!("NACK, pushing {reliable_message:?} onto rtx queue");
-                        self.reliable_message_rtx_queue.push_back(reliable_message);
-                    } else {
-                        // Queue is full, return an error
-                        bail!(
-                            "Reliable message RTX queue is full (capacity: {}), cannot add nacked message",
-                            RELIABLE_MESSAGE_RTX_QUEUE_LENGTH
-                        );
-                    }
-                }
+            // add it back on to the reliable messages queue, respecting capacity limit
+            if self.reliability_action_rtx_queue.len() < RELIABILITY_ACTION_RTX_QUEUE_LENGTH {
+                log::debug!("NACK, pushing {nack_action:?} onto rtx queue");
+                self.reliability_action_rtx_queue.push_back(nack_action);
+            } else {
+                // Queue is full, return an error
+                bail!(
+                    "Reliable message RTX queue is full (capacity: {}), cannot add nacked message",
+                    RELIABILITY_ACTION_RTX_QUEUE_LENGTH
+                );
             }
         }
 
@@ -405,6 +411,7 @@ impl EstablishedConnection {
                             // the logic is simple, let's just tank the deep nesting.
                             match ack_action {
                                 ReliabilityAction::ReliableMessage(_) => (),
+                                ReliabilityAction::StreamData(_) => (),
                             }
                         }
                     }
@@ -433,6 +440,10 @@ impl EstablishedConnection {
                     self.packet_monitor
                         .on_incoming_packet_status(hardware, &packet_status)?;
                 }
+                Message::StreamData(_) => todo!(),
+                Message::StreamFin(_) => todo!(),
+                Message::StreamRst(_) => todo!(),
+                Message::StreamWindowUpdate(_) => todo!(),
             }
         }
         // I at one point considered having a "packet header" that would contain the sequence number

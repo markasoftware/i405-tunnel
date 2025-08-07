@@ -1,6 +1,7 @@
 #![allow(clippy::four_forward_slashes)]
 
 mod ip_packet;
+mod streams;
 
 use anyhow::{Result, anyhow, bail};
 use declarative_enum_dispatch::enum_dispatch;
@@ -10,6 +11,7 @@ use crate::array_array::{ArrayArray, IpPacketBuffer};
 use crate::reliability::{ReliabilityAction, ReliabilityActionBuilder, ReliableMessage};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
 pub(crate) use serdes::{Serializable, SerializableLength as _};
+pub(crate) use streams::{StreamData, StreamFin, StreamRst, StreamWindowUpdate};
 
 const SERDES_VERSION: u32 = 0;
 const MAGIC_VALUE: u32 = 0x14051405;
@@ -23,6 +25,10 @@ const TX_EPOCH_TIME_TYPE_BYTE: u8 = 0x05;
 const PACKET_STATUS_TYPE_BYTE: u8 = 0x06;
 // IpPacket takes 0x10 to 0x1F
 // IpPacketFragment takes 0x20 and 0x21
+const STREAM_DATA_TYPE_BYTE: u8 = 0x30;
+const STREAM_FIN_TYPE_BYTE: u8 = 0x31;
+const STREAM_RST_TYPE_BYTE: u8 = 0x32;
+const STREAM_WINDOW_UPDATE_TYPE_BYTE: u8 = 0x33;
 
 pub(crate) struct PacketBuilder {
     write_cursor: WriteCursor<IpPacketBuffer>,
@@ -137,6 +143,10 @@ enum_dispatch! {
         PacketStatus(PacketStatus),
         IpPacket(IpPacket),
         IpPacketFragment(IpPacketFragment),
+        StreamData(StreamData),
+        StreamFin(StreamFin),
+        StreamRst(StreamRst),
+        StreamWindowUpdate(StreamWindowUpdate),
     }
 }
 
@@ -167,7 +177,11 @@ impl serdes::Serializable for Message {
             TxEpochTime;
             PacketStatus;
             IpPacket;
-            IpPacketFragment
+            IpPacketFragment;
+            StreamData;
+            StreamFin;
+            StreamRst;
+            StreamWindowUpdate
         );
     }
 }
@@ -519,7 +533,7 @@ impl serdes::Deserializable for Message {
                 )+
             };
         }
-        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; SequenceNumber; TxEpochTime; PacketStatus; IpPacket; IpPacketFragment);
+        deserialize_messages!(ClientToServerHandshake; ServerToClientHandshake; Ack; SequenceNumber; TxEpochTime; PacketStatus; IpPacket; IpPacketFragment; StreamData; StreamFin; StreamRst; StreamWindowUpdate);
         Err(anyhow!("Unknown message type byte: {message_type:#x}"))
     }
 }

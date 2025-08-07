@@ -11,6 +11,9 @@ use crate::{
 pub(crate) enum ReliableMessage {
     // I'm not sure how I feel about including the literal PacketStatus message itself in here :|
     PacketStatus(messages::PacketStatus),
+    StreamFin(messages::StreamFin),
+    StreamRst(messages::StreamRst),
+    StreamWindowUpdate(messages::StreamWindowUpdate),
 }
 
 impl From<ReliableMessage> for Message {
@@ -19,6 +22,9 @@ impl From<ReliableMessage> for Message {
         // types of messages.
         match value {
             ReliableMessage::PacketStatus(msg) => Message::PacketStatus(msg),
+            ReliableMessage::StreamFin(msg) => Message::StreamFin(msg),
+            ReliableMessage::StreamRst(msg) => Message::StreamRst(msg),
+            ReliableMessage::StreamWindowUpdate(msg) => Message::StreamWindowUpdate(msg),
         }
     }
 }
@@ -26,6 +32,7 @@ impl From<ReliableMessage> for Message {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum ReliabilityAction {
     ReliableMessage(ReliableMessage),
+    StreamData(messages::StreamData),
 }
 
 /// Keeps track of which ack-eliciting remote packets need to be acked, and can generate the correct
