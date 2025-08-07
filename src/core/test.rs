@@ -573,7 +573,7 @@ fn long_distance_reorder(packet_1: u64, packet_2: u64, reorder_1st_instead_of_dr
     // send a packet to ensure we are actually in established mode
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, next_time);
-    assert_eq!(simulated_hardware.incoming_packets(&server_addr()).len(), 1);
+    assert_eq!(simulated_hardware.sent_incoming_packets(&server_addr()).len(), 1);
 }
 
 #[test]
