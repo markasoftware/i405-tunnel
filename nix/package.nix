@@ -12,7 +12,7 @@ in
 
 rustPlatform.buildRustPackage {
   pname = "i405-tunnel";
-  version = "0.0.1";
+  version = "0.1.1";
 
   src = fs.toSource {
     root = ./..;
@@ -20,6 +20,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      ../tests
     ];
   };
 
