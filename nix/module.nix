@@ -56,7 +56,11 @@ let inherit (lib) types;
       # TODO should this actually be put earlier, since I405-tunnel is kinda part of the network?
       wantedBy = [ "multi-user.target" ];
       path = [ pkgs.iproute2 ];
+      startLimitIntervalSec = 90;
+      startLimitBurst = 4;
       serviceConfig = {
+        Restart = "on-failure";
+
         # inspired by the Navidrome module
         RestrictNamespaces = true;
         ProtectHome = true;
