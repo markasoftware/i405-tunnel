@@ -169,3 +169,51 @@ impl WriteCursor for VecDeque<u8> {
         have_enough_space
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn read_contiguous() {
+        let mut cursor = ReadCursorContiguous::new([1u8, 2, 3, 4, 5]);
+        assert_eq!(cursor.peek_exact_comptime::<3>(), Some([1, 2, 3]));
+        assert_eq!(cursor.peek_exact_comptime::<6>(), None);
+        assert_eq!(cursor.read_exact_comptime::<3>(), Some([1, 2, 3]));
+        assert_eq!(cursor.read_exact_comptime::<3>(), None);
+        assert_eq!(cursor.peek_exact_comptime::<2>(), Some([4, 5]));
+        assert_eq!(cursor.peek_exact_comptime::<3>(), None);
+
+        let mut buf = [0u8; 2];
+        assert!(cursor.read_exact_runtime(&mut buf));
+        assert_eq!(buf, [4, 5]);
+        assert!(!cursor.read_exact_runtime(&mut buf));
+    }
+
+    #[test]
+    fn write_contiguous() {
+        let mut cursor = WriteCursorContiguous::new(ArrayArray::<u8, 5>::new_empty(5));
+        assert!(cursor.write_exact(&[1, 2, 3]));
+        assert!(!cursor.write_exact(&[4, 5, 6]));
+        assert!(cursor.write_exact(&[4, 5]));
+        assert_eq!(cursor.into_inner().as_ref(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn vec_deque() {
+        let mut cursor = VecDeque::from([1u8, 2, 3, 4, 5]);
+        cursor.rotate_left(1); // doesn't affect current impl, but in future might use as_slices
+        assert_eq!(cursor.peek_exact_comptime::<3>(), Some([2, 3, 4]));
+        assert_eq!(cursor.peek_exact_comptime::<6>(), None);
+        assert_eq!(cursor.read_exact_comptime::<3>(), Some([2, 3, 4]));
+        assert_eq!(cursor.read_exact_comptime::<3>(), None);
+        assert_eq!(cursor.peek_exact_comptime::<2>(), Some([5, 1]));
+        assert_eq!(cursor.peek_exact_comptime::<3>(), None);
+
+        let mut buf = [0u8; 2];
+        assert!(cursor.read_exact_runtime(&mut buf));
+        assert_eq!(buf, [5, 1]);
+        assert!(!cursor.read_exact_runtime(&mut buf));
+        // If we switch to as_slices, would want even more tests here.
+    }
+}
