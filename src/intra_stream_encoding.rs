@@ -1,266 +1,175 @@
 use anyhow::{Result, anyhow};
 
 use crate::{
-    array_array::{ArrayArray, IpPacketBuffer}, constants::MAX_IP_PACKET_LENGTH, cursors::{ReadCursor, ReadCursorContiguous, WriteCursorContiguous}, serdes::{Deserializable, DeserializeError, Serializable, SerializableLength}, socks5_serdes::SocksDestination
+    array_array::{ArrayArray, IpPacketBuffer},
+    constants::MAX_IP_PACKET_LENGTH,
+    cursors::{ReadCursor, ReadCursorContiguous, WriteCursorContiguous},
+    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength},
+    socks5_serdes::SocksDestination,
 };
 
-pub(crate) fn make_encoder(destination: &SocksDestination) -> EncoderNeedsOutput {
-    let mut write_cursor = WriteCursorContiguous::new(ArrayArray::new_empty(destination.serialized_length()));
+pub(crate) fn make_encoder(destination: &SocksDestination) -> InitiatorEncoderNeedsOutput {
+    let mut write_cursor =
+        WriteCursorContiguous::new(ArrayArray::new_empty(destination.serialized_length()));
     destination.serialize(&mut write_cursor);
-    EncoderNeedsOutput {
-        cursor: ReadCursorContiguous::new(write_cursor.into_inner())
+    InitiatorEncoderNeedsOutput {
+        cursor: ReadCursorContiguous::new(write_cursor.into_inner()),
     }
 }
 
+/// Encoder for the "initiator" side of the connection, that sends destination address.
 #[derive(Debug)]
-pub(crate) enum Encoder {
-    NeedsInput(EncoderNeedsInput),
-    NeedsOutput(EncoderNeedsOutput),
+pub(crate) enum InitiatorEncoder {
+    NeedsInput(InitiatorEncoderNeedsInput),
+    NeedsOutput(InitiatorEncoderNeedsOutput),
 }
 
-/// An encoder that needs more input before it can proceed
 #[derive(Debug)]
-pub(crate) struct EncoderNeedsInput {}
+pub(crate) struct InitiatorEncoderNeedsInput {
+    _zst: (),
+}
 
 #[derive(Debug)]
-pub(crate) struct EncoderNeedsOutput {
+pub(crate) struct InitiatorEncoderNeedsOutput {
     cursor: ReadCursorContiguous<IpPacketBuffer>,
 }
 
-impl EncoderNeedsInput {
-    pub(crate) fn write(self, packet: &[u8]) -> EncoderNeedsOutput {
+impl InitiatorEncoderNeedsInput {
+    pub(crate) fn encode(self, packet: &[u8]) -> InitiatorEncoderNeedsOutput {
         // at some point in the future we may add scheduling framing information here
-        EncoderNeedsOutput {
+        InitiatorEncoderNeedsOutput {
             cursor: ReadCursorContiguous::new(IpPacketBuffer::new(packet)),
         }
     }
 }
 
-impl EncoderNeedsOutput {
+impl InitiatorEncoderNeedsOutput {
     /// Return how much of the output was filled, and a new Encoder
-    pub(crate) fn read(mut self, output: &mut [u8]) -> (usize, Encoder) {
+    pub(crate) fn encode(mut self, output: &mut [u8]) -> (usize, InitiatorEncoder) {
         let num_bytes_written = self.cursor.read_as_much_as_possible(output);
         let new_encoder = if self.cursor.empty() {
-            Encoder::NeedsInput(EncoderNeedsInput {})
+            InitiatorEncoder::NeedsInput(InitiatorEncoderNeedsInput { _zst: () })
         } else {
-            Encoder::NeedsOutput(self)
+            InitiatorEncoder::NeedsOutput(self)
         };
         (num_bytes_written, new_encoder)
     }
 }
 
-pub(crate) enum Decoder {
-    Destination,
-    Body,
+#[derive(Debug)]
+pub(crate) enum InitiatorDecoder {
+    Destination(InitiatorDestinationDecoder),
+    Body(InitiatorBodyDecoder),
 }
 
-pub(crate) enum T2IEvent {
-    StreamOpened { destination: SocksDestination },
-    StreamData { data: IpPacketBuffer },
+#[derive(Debug)]
+pub(crate) struct InitiatorDestinationDecoder {
+    _zst: (),
 }
 
-impl Decoder {
+impl InitiatorDestinationDecoder {
     pub(crate) fn new() -> Self {
-        Decoder::Destination
+        InitiatorDestinationDecoder { _zst: () }
     }
+}
 
-    pub(crate) fn decode(&mut self, input: &[u8]) -> Result<Option<(usize, T2IEvent)>> {
-        match self {
-            Decoder::Destination => {
-                let mut read_cursor = ReadCursorContiguous::new(input);
-                match SocksDestination::deserialize(&mut read_cursor) {
-                    Ok(destination) => {
-                        let num_bytes_read = read_cursor.position();
-                        Ok(Some((
-                            num_bytes_read,
-                            T2IEvent::StreamOpened { destination },
-                        )))
-                    }
-                    Err(DeserializeError::Truncated) => Ok(None),
-                    Err(e) => Err(anyhow!(e)),
-                }
-            }
-            Decoder::Body => {
-                let amount_to_read = std::cmp::min(input.len(), MAX_IP_PACKET_LENGTH);
-                Ok(Some((
-                    amount_to_read,
-                    T2IEvent::StreamData {
-                        data: IpPacketBuffer::new(&input[0..amount_to_read]),
-                    },
-                )))
-            }
+impl InitiatorDestinationDecoder {
+    pub(crate) fn decode(
+        self,
+        read_cursor: &mut impl ReadCursor,
+    ) -> Result<(InitiatorDecoder, Option<SocksDestination>)> {
+        match SocksDestination::deserialize(read_cursor) {
+            Ok(destination) => Ok((
+                InitiatorDecoder::Body(InitiatorBodyDecoder { _zst: () }),
+                Some(destination),
+            )),
+            Err(DeserializeError::Truncated) => Ok((InitiatorDecoder::Destination(self), None)),
+            Err(e) => Err(anyhow!(e)),
         }
+    }
+}
+
+// no actual methods, just exists as a token so that you can't use it until you've read a destination
+#[derive(Debug)]
+pub(crate) struct InitiatorBodyDecoder {
+    _zst: (),
+}
+
+impl InitiatorBodyDecoder {
+    pub(crate) fn decode(&mut self, read_cursor: &mut impl ReadCursor) -> Option<IpPacketBuffer> {
+        (!read_cursor.empty()).then(|| {
+            // TODO split out IpPacketBuffer from read_cursor construction?
+            let mut buffer = IpPacketBuffer::new_empty(std::cmp::min(
+                read_cursor.num_read_bytes_left(),
+                MAX_IP_PACKET_LENGTH,
+            ));
+            read_cursor.read_as_much_as_possible(&mut buffer);
+            buffer
+        })
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::cursors::ReadCursorContiguous;
     use crate::socks5_serdes::{SocksAddress, SocksDestination};
     use std::net::{IpAddr, Ipv4Addr};
 
+    const SOCKS_DESTINATION: SocksDestination = SocksDestination {
+        address: SocksAddress::Ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+        port: 8080,
+    };
+
     #[test]
-    fn round_trip() {
-        // 1. Setup destination and some data
-        let destination = SocksDestination { address: SocksAddress::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))), port: 5678 };
-        let data1 = b"hello world";
-        let data2 = b"goodbye world";
+    fn simple_round_trip() {
+        const DESTINATION_LENGTH: usize = 7;
 
-        // 2. Encode destination
-        let mut encoder = Encoder::NeedsOutput(make_encoder(&destination));
-        let mut encoded_buffer = Vec::new();
-        let mut temp_buf = [0u8; 4]; // small buffer to test partial reads
-
-        while let Encoder::NeedsOutput(needs_output) = encoder {
-            let (bytes_written, new_encoder) = needs_output.read(&mut temp_buf);
-            encoded_buffer.extend_from_slice(&temp_buf[..bytes_written]);
-            encoder = new_encoder;
-        }
-
-        // 3. Decode destination
-        let mut decoder = Decoder::new();
-        let (bytes_read, event) = decoder.decode(&encoded_buffer).unwrap().unwrap();
-        assert_eq!(bytes_read, encoded_buffer.len());
-        if let T2IEvent::StreamOpened {
-            destination: decoded_dest,
-        } = event
-        {
-            assert_eq!(destination, decoded_dest);
-        } else {
-            panic!("Expected StreamOpened event");
-        }
-        // Manually transition state.
-        decoder = Decoder::Body;
-
-        // 4. Encode data1
-        let encoder_needs_input = match encoder {
-            Encoder::NeedsInput(e) => e,
-            _ => panic!("Expected NeedsInput state"),
+        let mut buffer = [0u8; 1024];
+        let encoder = make_encoder(&SOCKS_DESTINATION);
+        let (bytes_written, encoder) = encoder.encode(&mut buffer);
+        assert_eq!(bytes_written, DESTINATION_LENGTH);
+        // pretty impressive: copilot converted 8080 to 31, 144 correctly!
+        assert_eq!(&buffer[..DESTINATION_LENGTH], &[1, 192, 168, 1, 1, 31, 144]);
+        let InitiatorEncoder::NeedsInput(encoder) = encoder else {
+            panic!();
         };
-        encoder = Encoder::NeedsOutput(encoder_needs_input.write(data1));
-        let mut encoded_buffer = Vec::new();
-        while let Encoder::NeedsOutput(needs_output) = encoder {
-            let (bytes_written, new_encoder) = needs_output.read(&mut temp_buf);
-            encoded_buffer.extend_from_slice(&temp_buf[..bytes_written]);
-            encoder = new_encoder;
-        }
-
-        // 5. Decode data1
-        let (bytes_read, event) = decoder.decode(&encoded_buffer).unwrap().unwrap();
-        assert_eq!(bytes_read, data1.len());
-        assert_eq!(bytes_read, encoded_buffer.len());
-        if let T2IEvent::StreamData { data } = event {
-            assert_eq!(data.as_ref(), data1);
-        } else {
-            panic!("Expected StreamData event");
-        }
-
-        // 6. Encode data2
-        let encoder_needs_input = match encoder {
-            Encoder::NeedsInput(e) => e,
-            _ => panic!("Expected NeedsInput state"),
+        let encoder = encoder.encode(&[1, 2, 3, 4]);
+        let (bytes_written, InitiatorEncoder::NeedsOutput(encoder)) =
+            encoder.encode(&mut buffer[DESTINATION_LENGTH..DESTINATION_LENGTH + 2])
+        else {
+            panic!();
         };
-        encoder = Encoder::NeedsOutput(encoder_needs_input.write(data2));
-        let mut encoded_buffer = Vec::new();
-        while let Encoder::NeedsOutput(needs_output) = encoder {
-            let (bytes_written, new_encoder) = needs_output.read(&mut temp_buf);
-            encoded_buffer.extend_from_slice(&temp_buf[..bytes_written]);
-            encoder = new_encoder;
-        }
-
-        // 7. Decode data2
-        let (bytes_read, event) = decoder.decode(&encoded_buffer).unwrap().unwrap();
-        assert_eq!(bytes_read, data2.len());
-        assert_eq!(bytes_read, encoded_buffer.len());
-        if let T2IEvent::StreamData { data } = event {
-            assert_eq!(data.as_ref(), data2);
-        } else {
-            panic!("Expected StreamData event");
-        }
-    }
-
-    #[test]
-    fn decode_partial_destination() {
-        let destination = SocksDestination { address: SocksAddress::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))), port: 5678 };
-        let mut encoder = Encoder::NeedsOutput(make_encoder(&destination));
-        let mut encoded_buffer = Vec::new();
-        let mut temp_buf = [0u8; 256];
-
-        // Get the full encoded destination
-        if let Encoder::NeedsOutput(needs_output) = encoder {
-            let (bytes_written, new_encoder) = needs_output.read(&mut temp_buf);
-            encoded_buffer.extend_from_slice(&temp_buf[..bytes_written]);
-            encoder = new_encoder;
-        } else {
-            panic!("should be NeedsOutput");
-        }
-        // It should be fully read and now NeedsInput
-        assert!(matches!(encoder, Encoder::NeedsInput(_)));
-
-        let mut decoder = Decoder::new();
-        // Feed one byte less than required
-        let result = decoder
-            .decode(&encoded_buffer[..encoded_buffer.len() - 1])
-            .unwrap();
-        assert!(result.is_none());
-
-        // Feed full buffer
-        let (bytes_read, event) = decoder.decode(&encoded_buffer).unwrap().unwrap();
-        assert_eq!(bytes_read, encoded_buffer.len());
-        if let T2IEvent::StreamOpened {
-            destination: decoded_dest,
-        } = event
-        {
-            assert_eq!(destination, decoded_dest);
-        } else {
-            panic!("Expected StreamOpened event");
-        }
-    }
-
-    #[test]
-    fn decode_data_larger_than_max_packet() {
-        let mut decoder = Decoder::Body;
-        let large_data = vec![0u8; MAX_IP_PACKET_LENGTH + 100];
-        let (bytes_read, event) = decoder.decode(&large_data).unwrap().unwrap();
-        assert_eq!(bytes_read, MAX_IP_PACKET_LENGTH);
-        if let T2IEvent::StreamData { data } = event {
-            assert_eq!(data.len(), MAX_IP_PACKET_LENGTH);
-            assert_eq!(data.as_ref(), &large_data[..MAX_IP_PACKET_LENGTH]);
-        } else {
-            panic!("Expected StreamData");
-        }
-    }
-
-    #[test]
-    fn round_trip_empty_data() {
-        let mut encoder = Encoder::NeedsInput(EncoderNeedsInput {});
-        let data = b"";
-
-        // Encode
-        let encoder_needs_input = match encoder {
-            Encoder::NeedsInput(e) => e,
-            _ => panic!("Expected NeedsInput state"),
+        assert_eq!(bytes_written, 2);
+        assert_eq!(&buffer[DESTINATION_LENGTH..DESTINATION_LENGTH + 2], &[1, 2]);
+        let (bytes_written, InitiatorEncoder::NeedsInput(_)) =
+            encoder.encode(&mut buffer[DESTINATION_LENGTH + 2..DESTINATION_LENGTH + 4])
+        else {
+            panic!();
         };
-        encoder = Encoder::NeedsOutput(encoder_needs_input.write(data));
-        let mut encoded_buffer = Vec::new();
-        let mut temp_buf = [0u8; 4];
-        while let Encoder::NeedsOutput(needs_output) = encoder {
-            let (bytes_written, new_encoder) = needs_output.read(&mut temp_buf);
-            assert_eq!(bytes_written, 0);
-            encoded_buffer.extend_from_slice(&temp_buf[..bytes_written]);
-            encoder = new_encoder;
-        }
-        assert!(encoded_buffer.is_empty());
-        assert!(matches!(encoder, Encoder::NeedsInput(_)));
+        assert_eq!(bytes_written, 2);
+        assert_eq!(
+            &buffer[DESTINATION_LENGTH + 2..DESTINATION_LENGTH + 4],
+            &[3, 4]
+        );
 
-        // Decode
-        let mut decoder = Decoder::Body;
-        let (bytes_read, event) = decoder.decode(&encoded_buffer).unwrap().unwrap();
-        assert_eq!(bytes_read, 0);
-        if let T2IEvent::StreamData { data } = event {
-            assert!(data.is_empty());
-        } else {
-            panic!("Expected StreamData");
-        }
+        let decoder = InitiatorDestinationDecoder::new();
+        let mut short_read_cursor =
+            ReadCursorContiguous::new(IpPacketBuffer::new(&buffer[..DESTINATION_LENGTH - 1]));
+        let (decoder, destination) = decoder.decode(&mut short_read_cursor).unwrap();
+        assert!(destination.is_none());
+        let InitiatorDecoder::Destination(decoder) = decoder else {
+            panic!();
+        };
+
+        let mut full_read_cursor =
+            ReadCursorContiguous::new(IpPacketBuffer::new(&buffer[..DESTINATION_LENGTH + 4]));
+        let (decoder, destination) = decoder.decode(&mut full_read_cursor).unwrap();
+        assert_eq!(destination, Some(SOCKS_DESTINATION));
+        let InitiatorDecoder::Body(mut decoder) = decoder else {
+            panic!();
+        };
+        let body = decoder.decode(&mut full_read_cursor).unwrap();
+        assert_eq!(body.as_ref(), &[1, 2, 3, 4]);
     }
 }

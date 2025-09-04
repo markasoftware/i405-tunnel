@@ -85,6 +85,12 @@ impl<T, const COMPTIME_LENGTH: usize> AsRef<[T]> for ArrayArray<T, COMPTIME_LENG
     }
 }
 
+impl<T, const COMPTIME_LENGTH: usize> AsMut<[T]> for ArrayArray<T, COMPTIME_LENGTH> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self
+    }
+}
+
 pub(crate) type IpPacketBuffer = ArrayArray<u8, MAX_IP_PACKET_LENGTH>;
 
 #[cfg(test)]

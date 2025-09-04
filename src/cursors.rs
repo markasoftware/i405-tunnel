@@ -146,7 +146,7 @@ pub(crate) struct WriteCursorContiguous<T> {
     position: usize,
 }
 
-impl<T: AsRef<[u8]>> WriteCursorContiguous<T> {
+impl<T> WriteCursorContiguous<T> {
     pub(crate) fn new(underlying: T) -> Self {
         Self {
             underlying,
