@@ -15,12 +15,14 @@ mod deques;
 mod deviation_stats;
 mod dtls;
 mod hardware;
+mod intra_stream_encoding;
 mod jitter;
 mod messages;
 mod monitor_packets;
 mod queued_ip_packet;
 mod reliability;
 mod serdes;
+mod socks5_serdes;
 mod utils;
 mod wire_config;
 

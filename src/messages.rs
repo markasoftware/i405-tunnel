@@ -8,7 +8,7 @@ use declarative_enum_dispatch::enum_dispatch;
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
-use crate::cursors::{ReadCursor, WriteCursor, WriteCursorContiguous};
+use crate::cursors::{ReadCursor, WriteCursor as _, WriteCursorContiguous};
 use crate::reliability::{ReliabilityAction, ReliabilityActionBuilder, ReliableMessage};
 use crate::serdes::{
     Deserializable, DeserializeError, Serializable, SerializableLength as _, Serializer,
@@ -51,7 +51,7 @@ impl PacketBuilder {
     }
 
     pub(crate) fn can_add_message(&mut self, message: &Message) -> bool {
-        message.serialized_length() <= self.write_cursor.num_bytes_left()
+        message.serialized_length() <= self.write_cursor.num_write_bytes_left()
     }
 
     /// If there's space to add the given message to the packet, do so.

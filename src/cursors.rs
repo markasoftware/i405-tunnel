@@ -6,12 +6,24 @@ use crate::{
 };
 
 pub(crate) trait ReadCursor {
+    fn num_read_bytes_left(&self) -> usize;
     /// Return Something if we are able to read the full NUM bytes
     fn peek_exact_comptime<const NUM: usize>(&self) -> Option<[u8; NUM]>;
     fn read_exact_comptime<const NUM: usize>(&mut self) -> Option<[u8; NUM]>;
     /// Return whether destination could be filled
     #[must_use]
     fn read_exact_runtime(&mut self, destination: &mut [u8]) -> bool;
+
+    fn read_as_much_as_possible(&mut self, destination: &mut [u8]) -> usize {
+        let num_bytes_to_read = std::cmp::min(self.num_read_bytes_left(), destination.len());
+        let success = self.read_exact_runtime(&mut destination[..num_bytes_to_read]);
+        assert!(success);
+        num_bytes_to_read
+    }
+
+    fn empty(&self) -> bool {
+        self.num_read_bytes_left() == 0
+    }
 
     fn read<D: Deserializable>(&mut self) -> Result<D, DeserializeError>
     where
@@ -21,6 +33,7 @@ pub(crate) trait ReadCursor {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ReadCursorContiguous<T> {
     underlying: T,
     position: usize,
@@ -34,14 +47,18 @@ impl<T: AsRef<[u8]>> ReadCursorContiguous<T> {
         }
     }
 
-    fn num_bytes_left(&self) -> usize {
-        self.underlying.as_ref().len() - self.position
+    pub(crate) fn position(&self) -> usize {
+        self.position
     }
 }
 
 impl<T: AsRef<[u8]>> ReadCursor for ReadCursorContiguous<T> {
+    fn num_read_bytes_left(&self) -> usize {
+        self.underlying.as_ref().len() - self.position
+    }
+
     fn peek_exact_comptime<const NUM: usize>(&self) -> Option<[u8; NUM]> {
-        (self.num_bytes_left() >= NUM).then(|| {
+        (self.num_read_bytes_left() >= NUM).then(|| {
             self.underlying.as_ref()[self.position..self.position + NUM]
                 .try_into()
                 .unwrap()
@@ -60,7 +77,7 @@ impl<T: AsRef<[u8]>> ReadCursor for ReadCursorContiguous<T> {
     // reference into self, we can't then modify the position afterwards.
 
     fn read_exact_runtime(&mut self, destination: &mut [u8]) -> bool {
-        let have_enough_bytes = self.num_bytes_left() >= destination.len();
+        let have_enough_bytes = self.num_read_bytes_left() >= destination.len();
         if have_enough_bytes {
             let start_position = self.position;
             self.position = start_position + destination.len();
@@ -70,7 +87,12 @@ impl<T: AsRef<[u8]>> ReadCursor for ReadCursorContiguous<T> {
     }
 }
 
+/// Moves the start of the VecDeque forward as bytes are read.
 impl ReadCursor for VecDeque<u8> {
+    fn num_read_bytes_left(&self) -> usize {
+        self.len()
+    }
+
     fn peek_exact_comptime<const NUM: usize>(&self) -> Option<[u8; NUM]> {
         (self.len() >= NUM).then(|| {
             // TODO consider using as_slices here instead for performance.
@@ -107,7 +129,7 @@ impl ReadCursor for VecDeque<u8> {
 }
 
 pub(crate) trait WriteCursor {
-    fn num_bytes_left(&self) -> usize;
+    fn num_write_bytes_left(&self) -> usize;
     fn write_exact(&mut self, buf: &[u8]) -> bool;
 
     fn write(&mut self, thing: impl Serializable)
@@ -138,12 +160,12 @@ impl<T: AsRef<[u8]>> WriteCursorContiguous<T> {
 }
 
 impl<const C: usize> WriteCursor for WriteCursorContiguous<ArrayArray<u8, C>> {
-    fn num_bytes_left(&self) -> usize {
+    fn num_write_bytes_left(&self) -> usize {
         self.underlying.len() - self.position
     }
 
     fn write_exact(&mut self, buf: &[u8]) -> bool {
-        let have_enough_space = self.num_bytes_left() >= buf.len();
+        let have_enough_space = self.num_write_bytes_left() >= buf.len();
         if have_enough_space {
             self.position += buf.len();
             self.underlying[self.position - buf.len()..self.position].copy_from_slice(buf);
@@ -153,13 +175,13 @@ impl<const C: usize> WriteCursor for WriteCursorContiguous<ArrayArray<u8, C>> {
 }
 
 impl WriteCursor for VecDeque<u8> {
-    fn num_bytes_left(&self) -> usize {
+    fn num_write_bytes_left(&self) -> usize {
         // assume we don't want to resize the vecdeques, which is generally accurate for us.
         self.capacity() - self.len()
     }
 
     fn write_exact(&mut self, buf: &[u8]) -> bool {
-        let have_enough_space = self.num_bytes_left() >= buf.len();
+        let have_enough_space = self.num_write_bytes_left() >= buf.len();
         if have_enough_space {
             // TODO consider ringbuf package instead for performance.
             for byte in buf {

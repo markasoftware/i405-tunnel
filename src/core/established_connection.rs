@@ -82,7 +82,7 @@ impl OutgoingConnection {
     ) {
         let write_cursor = packet_builder.write_cursor();
         'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
-            let bytes_left = write_cursor.num_bytes_left();
+            let bytes_left = write_cursor.num_write_bytes_left();
             self.fragmentation_id = self.fragmentation_id.wrapping_add(1);
             let fragment = old_queued_packet.fragment(bytes_left, self.fragmentation_id);
             match fragment {

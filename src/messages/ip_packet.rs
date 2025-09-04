@@ -1,6 +1,6 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
-use crate::messages::ReadCursor;
+use crate::cursors::ReadCursor;
 use crate::reliability::ReliabilityAction;
 use crate::{array_array::IpPacketBuffer, serdes::DeserializeError};
 
