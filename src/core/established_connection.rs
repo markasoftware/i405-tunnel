@@ -2,16 +2,18 @@ use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 
 use crate::{
     array_array::IpPacketBuffer,
+    cursors::{ReadCursorContiguous, WriteCursor as _},
     defragger::Defragger,
     deques::{ArrDeque, GlobalBitArrDeque},
     dtls,
     hardware::Hardware,
     jitter::Jitterator,
-    messages::{self, Message, Serializable as _},
+    messages::{self, Message, PacketReader as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
     reliability::{
         LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, RemoteAckHandler,
     },
+    serdes::Serializable as _,
     utils::{RelativeDirection, ip_to_i405_length},
     wire_config::WireConfig,
 };
@@ -367,7 +369,7 @@ impl EstablishedConnection {
         hardware: &H,
         packet: &[u8],
     ) -> Result<()> {
-        let mut reader = messages::PacketReader::new(packet);
+        let mut reader = ReadCursorContiguous::new(packet);
         let mut incoming_seqno = None;
         let mut tx_epoch_time = None;
         let mut ack_elicited = false;

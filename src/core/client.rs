@@ -10,8 +10,10 @@ use crate::core::{
     C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
     established_connection,
 };
+use crate::cursors::ReadCursorContiguous;
 use crate::hardware::Hardware;
 use crate::hardware::real::QdiscSettings;
+use crate::messages::PacketReader as _;
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
@@ -365,7 +367,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         // It really should be an S2C handshake. The server shouldn't send us anything but an
         // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
         // so we can't get anything out-of-order here.
-        let mut reader = messages::PacketReader::new(&cleartext_packet);
+        let mut reader = ReadCursorContiguous::new(&cleartext_packet);
         match reader.try_read_message_no_ack()? {
             Some(messages::Message::ServerToClientHandshake(s2c_handshake)) => {
                 if let Some(extra_msg) = reader.try_read_message_no_ack()? {

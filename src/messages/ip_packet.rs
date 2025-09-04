@@ -1,11 +1,11 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
-use crate::array_array::IpPacketBuffer;
-use crate::messages::{ReadCursor, serdes};
+use crate::messages::ReadCursor;
 use crate::reliability::ReliabilityAction;
+use crate::{array_array::IpPacketBuffer, serdes::DeserializeError};
 
 use super::MessageTrait;
-use super::serdes::SerializableLength as _;
+use crate::serdes::{Deserializable, Serializable, SerializableLength as _, Serializer};
 use anyhow::{Result, anyhow};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -50,8 +50,8 @@ impl MessageTrait for IpPacket {
     }
 }
 
-impl serdes::Serializable for IpPacket {
-    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+impl Serializable for IpPacket {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) {
         let mut flags = IpPacketFlags::empty();
         if self.fragmentation_id.is_some() {
             flags |= IpPacketFlags::Fragmented;
@@ -67,8 +67,8 @@ impl serdes::Serializable for IpPacket {
     }
 }
 
-impl serdes::Deserializable for IpPacket {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+impl Deserializable for IpPacket {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         let type_byte: u8 = read_cursor.read()?;
         assert!(
             (Self::TYPE_BYTE_LOW..=Self::TYPE_BYTE_HIGH).contains(&type_byte),
@@ -128,8 +128,8 @@ impl MessageTrait for IpPacketFragment {
     }
 }
 
-impl serdes::Serializable for IpPacketFragment {
-    fn serialize<S: serdes::Serializer>(&self, serializer: &mut S) {
+impl Serializable for IpPacketFragment {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) {
         let type_byte = if self.is_last {
             Self::TYPE_BYTE_FINAL
         } else {
@@ -144,8 +144,8 @@ impl serdes::Serializable for IpPacketFragment {
     }
 }
 
-impl serdes::Deserializable for IpPacketFragment {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+impl Deserializable for IpPacketFragment {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         let type_byte: u8 = read_cursor.read()?;
         let is_last = match type_byte {
             Self::TYPE_BYTE_FINAL => true,

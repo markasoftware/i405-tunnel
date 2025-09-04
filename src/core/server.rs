@@ -6,9 +6,10 @@ use declarative_enum_dispatch::enum_dispatch;
 use crate::{
     constants::MAX_IP_PACKET_LENGTH,
     core::established_connection::{self, IsConnectionOpen},
+    cursors::ReadCursorContiguous,
     dtls,
     hardware::{Hardware, real::QdiscSettings},
-    messages,
+    messages::{self, PacketReader as _},
     utils::{ip_to_dtls_length, ip_to_i405_length},
     wire_config::WireConfig,
 };
@@ -451,7 +452,7 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
             dtls::DecryptResult::Err(err) => return Err(err),
         };
 
-        let mut reader = messages::PacketReader::new(&cleartext_packet);
+        let mut reader = ReadCursorContiguous::new(&cleartext_packet);
         match reader.try_read_message_no_ack()? {
             Some(messages::Message::ClientToServerHandshake(c2s_handshake)) => {
                 log::debug!("Got C2S handshake, as expected. Sending S2C handshake.");

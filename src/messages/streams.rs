@@ -1,9 +1,10 @@
-use super::MessageTrait;
+use super::{DeserializeError, MessageTrait};
 use crate::array_array::IpPacketBuffer;
+use crate::cursors::ReadCursor;
 use crate::messages;
-use crate::messages::serdes::{Deserializable, Serializable, Serializer};
-use crate::messages::{ReadCursor, deserialize_type_byte};
+use crate::messages::deserialize_type_byte;
 use crate::reliability::{ReliabilityAction, ReliableMessage};
+use crate::serdes::{Deserializable, Serializable, Serializer};
 
 use anyhow::Result;
 
@@ -28,6 +29,8 @@ impl StreamData {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct StreamFin {
     pub(crate) stream_id: StreamId,
+    /// One past the offset of the final data byte in the stream. Needs to be past-the-end in order
+    /// to be able to represent an empty stream.
     pub(crate) offset: u64,
 }
 
@@ -88,7 +91,7 @@ impl Serializable for StreamData {
 }
 
 impl Deserializable for StreamData {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamData {
             stream_id: read_cursor.read()?,
@@ -115,7 +118,7 @@ impl Serializable for StreamFin {
 }
 
 impl Deserializable for StreamFin {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamFin {
             stream_id: read_cursor.read()?,
@@ -140,7 +143,7 @@ impl Serializable for StreamRst {
 }
 
 impl Deserializable for StreamRst {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamRst {
             stream_id: read_cursor.read()?,
@@ -165,7 +168,7 @@ impl Serializable for StreamWindowUpdate {
 }
 
 impl Deserializable for StreamWindowUpdate {
-    fn deserialize<T: AsRef<[u8]>>(read_cursor: &mut ReadCursor<T>) -> Result<Self> {
+    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamWindowUpdate {
             stream_id: read_cursor.read()?,

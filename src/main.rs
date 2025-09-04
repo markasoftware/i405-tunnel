@@ -9,6 +9,7 @@ mod array_array;
 mod config_cli;
 mod constants;
 mod core;
+mod cursors;
 mod defragger;
 mod deques;
 mod deviation_stats;
@@ -19,6 +20,7 @@ mod messages;
 mod monitor_packets;
 mod queued_ip_packet;
 mod reliability;
+mod serdes;
 mod utils;
 mod wire_config;
 

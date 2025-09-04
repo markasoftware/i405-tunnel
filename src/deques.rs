@@ -148,6 +148,10 @@ impl GlobalBitArrDeque {
         self.bit_arr_deque.capacity()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.bit_arr_deque.len()
+    }
+
     /// If the deque filled up, report what got popped out
     pub(crate) fn push(&mut self, value: bool) -> Option<(u64, bool)> {
         self.bit_arr_deque.push(value).map(|popped| {
@@ -455,13 +459,16 @@ mod test {
         assert_eq!(gbad.head_index(), 0);
         assert_eq!(gbad.tail_index(), 0);
         assert_eq!(gbad.capacity(), 3);
+        assert_eq!(gbad.len(), 0);
         assert_eq!(gbad.push(true), None); // 0
+        assert_eq!(gbad.len(), 1);
         assert_eq!(gbad.push(false), None); // 1
         assert_eq!(gbad.push(true), None); // 2
         assert_eq!(gbad.head_index(), 0);
         assert_eq!(gbad.tail_index(), 3);
         assert_eq!(gbad.push(true), Some((0, true))); // 3
         assert_eq!(gbad.push(false), Some((1, false))); // 4
+        assert_eq!(gbad.len(), 3);
         assert_eq!(gbad.head_index(), 2);
         assert_eq!(gbad.tail_index(), 5);
         assert_eq!(gbad[3], true);
