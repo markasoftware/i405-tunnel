@@ -12,13 +12,12 @@ const SOCKS_VERSION: u8 = 5;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ClientMethodSelection {
-    pub(crate) version: u8,
     pub(crate) methods: Vec<u8>,
 }
 
 impl Serializable for ClientMethodSelection {
     fn serialize<S: Serializer>(&self, serializer: &mut S) {
-        self.version.serialize(serializer);
+        SOCKS_VERSION.serialize(serializer);
         let nmethods = self.methods.len() as u8;
         nmethods.serialize(serializer);
         serializer.serialize(&self.methods);
@@ -36,19 +35,18 @@ impl Deserializable for ClientMethodSelection {
         if !read_cursor.read_exact_runtime(&mut methods) {
             return Err(DeserializeError::Truncated);
         }
-        Ok(ClientMethodSelection { version, methods })
+        Ok(ClientMethodSelection { methods })
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ServerMethodSelection {
-    pub(crate) version: u8,
     pub(crate) method: u8,
 }
 
 impl Serializable for ServerMethodSelection {
     fn serialize<S: Serializer>(&self, serializer: &mut S) {
-        self.version.serialize(serializer);
+        SOCKS_VERSION.serialize(serializer);
         self.method.serialize(serializer);
     }
 }
@@ -60,10 +58,11 @@ impl Deserializable for ServerMethodSelection {
             return Err(anyhow!("Unsupported SOCKS version: {version}").into());
         }
         let method: u8 = read_cursor.read()?;
-        Ok(ServerMethodSelection { version, method })
+        Ok(ServerMethodSelection { method })
     }
 }
 
+pub(crate) const MAX_SOCKS_DESTINATION_LEN: usize = 1 + 1 + MAX_SOCKS_DOMAIN_LEN + 2;
 pub(crate) const MAX_SOCKS_DOMAIN_LEN: usize = 256;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -179,13 +178,12 @@ impl Deserializable for SocksDestination {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct SocksRequest {
-    pub(crate) version: u8,
     pub(crate) command: SocksCommand,
     pub(crate) destination: SocksDestination,
 }
 impl Serializable for SocksRequest {
     fn serialize<S: Serializer>(&self, serializer: &mut S) {
-        self.version.serialize(serializer);
+        SOCKS_VERSION.serialize(serializer);
         self.command.serialize(serializer);
         0u8.serialize(serializer); // RSV
         self.destination.serialize(serializer);
@@ -205,7 +203,6 @@ impl Deserializable for SocksRequest {
         }
         let destination: SocksDestination = read_cursor.read()?;
         Ok(SocksRequest {
-            version,
             command,
             destination,
         })
@@ -252,17 +249,16 @@ impl Deserializable for SocksReplyCode {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct SocksReply {
-    pub(crate) version: u8,
     pub(crate) reply_code: SocksReplyCode,
-    pub(crate) destination: SocksDestination,
+    pub(crate) bind: SocksDestination,
 }
 
 impl Serializable for SocksReply {
     fn serialize<S: Serializer>(&self, serializer: &mut S) {
-        self.version.serialize(serializer);
+        SOCKS_VERSION.serialize(serializer);
         self.reply_code.serialize(serializer);
         0u8.serialize(serializer); // RSV
-        self.destination.serialize(serializer);
+        self.bind.serialize(serializer);
     }
 }
 
@@ -279,9 +275,8 @@ impl Deserializable for SocksReply {
         }
         let destination: SocksDestination = read_cursor.read()?;
         Ok(SocksReply {
-            version,
             reply_code,
-            destination,
+            bind: destination,
         })
     }
 }
@@ -312,7 +307,6 @@ mod test {
     #[test]
     fn roundtrip_client_method_selection() {
         let msg = ClientMethodSelection {
-            version: SOCKS_VERSION,
             methods: vec![0, 1, 2],
         };
         assert_roundtrip(&msg);
@@ -320,17 +314,13 @@ mod test {
 
     #[test]
     fn roundtrip_server_method_selection() {
-        let msg = ServerMethodSelection {
-            version: SOCKS_VERSION,
-            method: 1,
-        };
+        let msg = ServerMethodSelection { method: 1 };
         assert_roundtrip(&msg);
     }
 
     #[test]
     fn roundtrip_socks_request_v4() {
         let msg = SocksRequest {
-            version: SOCKS_VERSION,
             command: SocksCommand::Connect,
             destination: SocksDestination {
                 address: SocksAddress::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
@@ -343,7 +333,6 @@ mod test {
     #[test]
     fn roundtrip_socks_request_domain() {
         let msg = SocksRequest {
-            version: SOCKS_VERSION,
             command: SocksCommand::Connect,
             destination: SocksDestination {
                 address: SocksAddress::Domain(ArrayArray::new(b"example.com")),
@@ -356,7 +345,6 @@ mod test {
     #[test]
     fn roundtrip_socks_request_v6() {
         let msg = SocksRequest {
-            version: SOCKS_VERSION,
             command: SocksCommand::Connect,
             destination: SocksDestination {
                 address: SocksAddress::Ip(IpAddr::V6(Ipv6Addr::new(
@@ -371,9 +359,8 @@ mod test {
     #[test]
     fn roundtrip_socks_reply_v4() {
         let msg = SocksReply {
-            version: SOCKS_VERSION,
             reply_code: SocksReplyCode::Succeeded,
-            destination: SocksDestination {
+            bind: SocksDestination {
                 address: SocksAddress::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
                 port: 8080,
             },
@@ -384,9 +371,8 @@ mod test {
     #[test]
     fn roundtrip_socks_reply_domain() {
         let msg = SocksReply {
-            version: SOCKS_VERSION,
             reply_code: SocksReplyCode::Succeeded,
-            destination: SocksDestination {
+            bind: SocksDestination {
                 address: SocksAddress::Domain(ArrayArray::new(b"example.com")),
                 port: 8080,
             },
@@ -397,9 +383,8 @@ mod test {
     #[test]
     fn roundtrip_socks_reply_v6() {
         let msg = SocksReply {
-            version: SOCKS_VERSION,
             reply_code: SocksReplyCode::Succeeded,
-            destination: SocksDestination {
+            bind: SocksDestination {
                 address: SocksAddress::Ip(IpAddr::V6(Ipv6Addr::new(
                     0x2001, 0x0db8, 0, 0, 0, 0, 0, 1,
                 ))),
