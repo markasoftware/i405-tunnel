@@ -4,9 +4,7 @@ use crate::{
     array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
     rw::{ReadCursor, Reader, WriteCursor, Writer},
-    serdes::{
-        Deserializable, DeserializeError, Serializable, SerializableLength, SerializingReader,
-    },
+    serdes::{Deserializable, DeserializeError, SerializingReader},
     socks5_serdes::SocksDestination,
 };
 
@@ -117,7 +115,7 @@ impl InitiatorBodyDecoder {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::rw::{LengthLimitedWriter, ReadCursor, VecDequeWriter};
+    use crate::rw::{ReadCursor, VecDequeWriter};
     use crate::socks5_serdes::{SocksAddress, SocksDestination};
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};

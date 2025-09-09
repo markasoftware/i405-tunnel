@@ -120,7 +120,7 @@ impl<'a> DestructiveVecDequeReader<'a> {
 }
 
 /// Moves the start of the VecDeque forward as bytes are read.
-impl<'a> Reader for DestructiveVecDequeReader<'a> {
+impl Reader for DestructiveVecDequeReader<'_> {
     fn num_read_bytes_left(&self) -> usize {
         self.underlying.len()
     }
@@ -184,7 +184,7 @@ impl<'a> NonDestructiveVecDequeReader<'a> {
     }
 }
 
-impl<'a> Reader for NonDestructiveVecDequeReader<'a> {
+impl Reader for NonDestructiveVecDequeReader<'_> {
     fn num_read_bytes_left(&self) -> usize {
         self.underlying.len() - self.position
     }
@@ -223,11 +223,7 @@ impl<'a> Reader for NonDestructiveVecDequeReader<'a> {
             if start_position <= cur_slice_position + slice.len()
                 && end_position > cur_slice_position
             {
-                let slice_start = if start_position > cur_slice_position {
-                    start_position - cur_slice_position
-                } else {
-                    0
-                };
+                let slice_start = start_position.saturating_sub(cur_slice_position);
                 let slice_end = std::cmp::min(slice.len(), end_position - cur_slice_position);
                 destination.write_unchecked(&slice[slice_start..slice_end]);
             }

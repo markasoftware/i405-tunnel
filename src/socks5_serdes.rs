@@ -61,6 +61,7 @@ impl Deserializable for ServerMethodSelection {
 
 pub(crate) const MAX_SOCKS_DOMAIN_LEN: usize = 256;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum SocksAddress {
     Ip(IpAddr),
