@@ -3,8 +3,8 @@ use anyhow::{Result, anyhow};
 use crate::{
     array_array::{ArrayArray, IpPacketBuffer},
     constants::MAX_IP_PACKET_LENGTH,
-    rw::{ReadCursor, Reader, WriteCursor},
-    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength, Writer},
+    rw::{ReadCursor, Reader, WriteCursor, Writer},
+    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength},
     socks5_serdes::SocksDestination,
 };
 

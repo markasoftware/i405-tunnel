@@ -3,8 +3,8 @@ use crate::array_array::IpPacketBuffer;
 use crate::messages;
 use crate::messages::deserialize_type_byte;
 use crate::reliability::{ReliabilityAction, ReliableMessage};
-use crate::rw::Reader;
-use crate::serdes::{Deserializable, Serializable, Writer};
+use crate::rw::{Reader, Writer};
+use crate::serdes::{Deserializable, Serializable};
 
 use anyhow::Result;
 

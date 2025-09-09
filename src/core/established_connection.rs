@@ -12,8 +12,8 @@ use crate::{
     reliability::{
         LocalAckGenerator, ReliabilityAction, ReliabilityActionBuilder, RemoteAckHandler,
     },
-    rw::ReadCursor,
-    serdes::{Serializable as _, Writer as _},
+    rw::{ReadCursor, Writer},
+    serdes::Serializable,
     utils::{RelativeDirection, ip_to_i405_length},
     wire_config::WireConfig,
 };

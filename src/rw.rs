@@ -2,9 +2,10 @@ use std::collections::VecDeque;
 
 use crate::{
     array_array::ArrayArray,
-    serdes::{Deserializable, DeserializeError, Writer},
+    serdes::{Deserializable, DeserializeError, Serializable},
 };
 
+/// Similar to std::io::Reader, but without the possibility af failure.
 pub(crate) trait Reader {
     fn num_read_bytes_left(&self) -> usize;
     /// Return Something if we are able to read the full NUM bytes
@@ -21,6 +22,28 @@ pub(crate) trait Reader {
         Self: Sized,
     {
         D::deserialize(self)
+    }
+}
+
+/// Similar to std::io::Writer, but without the possibility af failure.
+pub(crate) trait Writer {
+    fn write_unchecked(&mut self, data: &[u8]);
+    // can return usize::MAX to be effectively unlimited
+    fn num_write_bytes_left(&self) -> usize;
+
+    fn write(&mut self, data: &[u8]) -> bool {
+        let can_write = data.len() <= self.num_write_bytes_left();
+        if can_write {
+            self.write_unchecked(data);
+        }
+        can_write
+    }
+
+    fn serialize(&mut self, thing: impl Serializable)
+    where
+        Self: Sized,
+    {
+        thing.serialize(self)
     }
 }
 

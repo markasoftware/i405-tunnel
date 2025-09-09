@@ -9,10 +9,8 @@ use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
 use crate::reliability::{ReliabilityAction, ReliabilityActionBuilder, ReliableMessage};
-use crate::rw::{Reader, WriteCursor};
-use crate::serdes::{
-    Deserializable, DeserializeError, Serializable, SerializableLength as _, Writer,
-};
+use crate::rw::{Reader, WriteCursor, Writer};
+use crate::serdes::{Deserializable, DeserializeError, Serializable, SerializableLength};
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
 pub(crate) use streams::{StreamData, StreamFin, StreamRst, StreamWindowUpdate};
 

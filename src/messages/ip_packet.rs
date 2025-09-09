@@ -1,12 +1,11 @@
+use anyhow::{Result, anyhow};
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
-use crate::reliability::ReliabilityAction;
-use crate::rw::Reader;
-use crate::{array_array::IpPacketBuffer, serdes::DeserializeError};
-
 use super::MessageTrait;
-use crate::serdes::{Deserializable, Serializable, SerializableLength as _, Writer};
-use anyhow::{Result, anyhow};
+use crate::reliability::ReliabilityAction;
+use crate::rw::{Reader, Writer};
+use crate::serdes::{Deserializable, Serializable, SerializableLength};
+use crate::{array_array::IpPacketBuffer, serdes::DeserializeError};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct IpPacket {

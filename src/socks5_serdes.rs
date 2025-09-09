@@ -1,21 +1,18 @@
 // this file mostly written by AI
-// We use vecs and memory allocation in this file because all socks5 parsing happens in a
-// connection-specific thread where latency is not critically important.
-
 use crate::array_array::ArrayArray;
-use crate::rw::{Reader, WriteCursor};
+use crate::rw::{Reader, WriteCursor, Writer};
 use crate::serdes::{
-    Deserializable, DeserializeError, Serializable, Writer,
-    deserialize_arrayarray_len_prior_knowledge,
+    Deserializable, DeserializeError, Serializable, deserialize_arrayarray_len_prior_knowledge,
 };
 use anyhow::anyhow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const SOCKS_VERSION: u8 = 5;
+const MAX_NUM_CLIENT_METHODS: usize = 256;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ClientMethodSelection {
-    pub(crate) methods: ArrayArray<u8, 256>,
+    pub(crate) methods: ArrayArray<u8, MAX_NUM_CLIENT_METHODS>,
 }
 
 impl Serializable for ClientMethodSelection {
@@ -62,7 +59,6 @@ impl Deserializable for ServerMethodSelection {
     }
 }
 
-pub(crate) const MAX_SOCKS_DESTINATION_LEN: usize = 1 + 1 + MAX_SOCKS_DOMAIN_LEN + 2;
 pub(crate) const MAX_SOCKS_DOMAIN_LEN: usize = 256;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
