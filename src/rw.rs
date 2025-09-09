@@ -47,6 +47,16 @@ pub(crate) trait Writer {
     }
 }
 
+impl<W: Writer> Writer for &mut W {
+    fn num_write_bytes_left(&self) -> usize {
+        (**self).num_write_bytes_left()
+    }
+
+    fn write_unchecked(&mut self, buf: &[u8]) {
+        (**self).write_unchecked(buf)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ReadCursor<T> {
     underlying: T,
@@ -373,6 +383,73 @@ impl Writer for VecDequeWriter<'_> {
     }
 }
 
+/// Discard first `skip` bytes written
+pub(crate) struct SkipWriter<W: Writer> {
+    inner: W,
+    skip: usize,
+}
+
+impl<W: Writer> SkipWriter<W> {
+    pub(crate) fn new(inner: W, skip: usize) -> Self {
+        Self { inner, skip }
+    }
+}
+
+impl<W: Writer> Writer for SkipWriter<W> {
+    fn num_write_bytes_left(&self) -> usize {
+        self.skip + self.inner.num_write_bytes_left()
+    }
+
+    fn write_unchecked(&mut self, data: &[u8]) {
+        if self.skip < data.len() {
+            self.inner.write_unchecked(&data[self.skip..]);
+        }
+        self.skip = self.skip.saturating_sub(data.len());
+    }
+}
+
+/// If underlying writer runs out of space, allow unlimited extra writes and just discard them.
+pub(crate) struct DiscardExcessWriter<W> {
+    inner: W,
+    // once the inner is full, we never write anything more to it, even if it un-fills later
+    is_inner_exhausted: bool,
+    num_bytes_forwarded: usize,
+}
+
+impl<W: Writer> DiscardExcessWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            is_inner_exhausted: false,
+            num_bytes_forwarded: 0,
+        }
+    }
+
+    pub(crate) fn num_bytes_forwarded(&self) -> usize {
+        self.num_bytes_forwarded
+    }
+}
+
+impl<W: Writer> Writer for DiscardExcessWriter<W> {
+    fn num_write_bytes_left(&self) -> usize {
+        usize::MAX
+    }
+
+    fn write_unchecked(&mut self, data: &[u8]) {
+        if self.is_inner_exhausted {
+            return;
+        }
+
+        let num_inner_bytes_left = self.inner.num_write_bytes_left();
+        let num_bytes_to_forward = std::cmp::min(num_inner_bytes_left, data.len());
+        self.num_bytes_forwarded += num_bytes_to_forward;
+        self.inner.write(&data[..num_bytes_to_forward]);
+        if num_bytes_to_forward == num_inner_bytes_left {
+            self.is_inner_exhausted = true;
+        }
+    }
+}
+
 pub(crate) struct LengthLimitedWriter<W> {
     inner: W,
     limit: usize,
@@ -400,16 +477,6 @@ impl<W: Writer> Writer for LengthLimitedWriter<W> {
         );
         self.inner.write_unchecked(buf);
         self.limit -= buf.len();
-    }
-}
-
-impl<W: Writer> Writer for &mut W {
-    fn num_write_bytes_left(&self) -> usize {
-        (**self).num_write_bytes_left()
-    }
-
-    fn write_unchecked(&mut self, buf: &[u8]) {
-        (**self).write_unchecked(buf)
     }
 }
 
@@ -526,5 +593,29 @@ mod test {
         );
         assert_eq!(&buf[..], &[1, 2]);
         assert_eq!(cursor.num_read_bytes_left(), 0);
+    }
+
+    #[test]
+    fn skip_writer() {
+        let mut deque = VecDeque::<u8>::new();
+        let mut writer = SkipWriter::new(VecDequeWriter::new(&mut deque, 100), 4);
+        writer.write(&[1, 2, 3]);
+        writer.write(&[4, 5, 6, 7]);
+        assert_eq!(deque.make_contiguous(), &[5, 6, 7]);
+    }
+
+    #[test]
+    fn discard_excess_writer() {
+        let mut deque = VecDeque::<u8>::new();
+        let mut writer = DiscardExcessWriter::new(VecDequeWriter::new(&mut deque, 5));
+        writer.write(&[1, 2, 3]);
+        assert_eq!(writer.num_bytes_forwarded(), 3);
+        writer.write(&[4, 5, 6, 7]);
+        assert_eq!(writer.num_bytes_forwarded(), 5);
+        writer.write(&[8]);
+        assert_eq!(writer.num_bytes_forwarded(), 5);
+        assert_eq!(deque.make_contiguous(), &[1, 2, 3, 4, 5]);
+        // this doesn't exercise the `is_inner_exhausted` logic bc no existing writers can reset
+        // their state and accept more input after filling up.
     }
 }

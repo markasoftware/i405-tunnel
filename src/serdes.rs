@@ -1,5 +1,7 @@
 use crate::array_array::ArrayArray;
-use crate::rw::{LengthLimitedWriter, Reader, WriteCursor, Writer};
+use crate::rw::{
+    DiscardExcessWriter, LengthLimitedWriter, Reader, SkipWriter, WriteCursor, Writer,
+};
 
 use anyhow::anyhow;
 
@@ -163,3 +165,66 @@ serdes_integral!(i8);
 serdes_integral!(i16);
 serdes_integral!(i32);
 serdes_integral!(i64);
+
+/// Keep reading out data until the inner item is completely serializes. Make sure the serialization
+/// is cheap because it will re-serilize it every time `read` is called. Doesn't actually implement
+/// `Reader` trait, for extra type safety in the `read` signature.
+pub(crate) struct SerializingReader<T: Serializable> {
+    inner: T,
+    num_bytes_read: usize,
+    serialized_length: usize,
+}
+
+impl<T: Serializable> SerializingReader<T> {
+    pub(crate) fn new(inner: T) -> Self {
+        Self {
+            num_bytes_read: 0,
+            serialized_length: inner.serialized_length(),
+            inner,
+        }
+    }
+
+    /// Return self if there is remaining data to serialize out, or None if we're done.
+    pub(crate) fn read(mut self, writer: &mut impl Writer) -> Option<Self> {
+        let mut slice_writer =
+            DiscardExcessWriter::new(SkipWriter::new(writer, self.num_bytes_read));
+        self.inner.serialize(&mut slice_writer);
+        self.num_bytes_read += slice_writer.num_bytes_forwarded();
+        (self.num_bytes_read < self.serialized_length).then_some(self)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::VecDeque;
+
+    use super::*;
+    use crate::rw::{ReadCursor, VecDequeWriter};
+
+    #[test]
+    fn deserialize_arrayarray() {
+        let data = &[1, 2, 3, 4, 5, 6];
+        assert!(matches!(
+            deserialize_arrayarray_len_prior_knowledge::<10>(&mut ReadCursor::new(data), 7),
+            Err(DeserializeError::Truncated)
+        ));
+        let deserialized: ArrayArray<u8, 10> =
+            deserialize_arrayarray_len_prior_knowledge(&mut ReadCursor::new(data), 4).unwrap();
+        assert_eq!(&deserialized[..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn serializing_reader() {
+        let mut deque = VecDeque::<u8>::new();
+        let serializing_reader = SerializingReader::new(424u64);
+        let serializing_reader = serializing_reader
+            .read(&mut VecDequeWriter::new(&mut deque, 4))
+            .unwrap();
+        assert!(
+            serializing_reader
+                .read(&mut VecDequeWriter::new(&mut deque, 8))
+                .is_none()
+        );
+        assert_eq!(deque.make_contiguous(), &[0, 0, 0, 0, 0, 0, 0x01, 0xA8]);
+    }
+}
