@@ -223,6 +223,7 @@ impl Index<u64> for GlobalBitArrDeque {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ArrDeque<T> {
     arr_deque: VecDeque<T>,
+    capacity: usize,
 }
 
 impl<T> ArrDeque<T> {
@@ -230,6 +231,7 @@ impl<T> ArrDeque<T> {
         assert!(capacity > 0);
         ArrDeque {
             arr_deque: VecDeque::with_capacity(capacity),
+            capacity,
         }
     }
 
@@ -238,11 +240,11 @@ impl<T> ArrDeque<T> {
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        self.arr_deque.capacity()
+        self.capacity
     }
 
     pub(crate) fn push(&mut self, value: T) -> Option<T> {
-        let result = if self.len() == self.arr_deque.capacity() {
+        let result = if self.len() == self.capacity() {
             self.arr_deque.pop_front()
         } else {
             None
@@ -268,6 +270,7 @@ impl<T> Index<usize> for ArrDeque<T> {
 pub(crate) struct GlobalArrDeque<T> {
     arr_deque: VecDeque<T>,
     head_global_idx: u64,
+    capacity: usize,
 }
 
 impl<T> GlobalArrDeque<T> {
@@ -276,6 +279,7 @@ impl<T> GlobalArrDeque<T> {
         GlobalArrDeque {
             arr_deque: VecDeque::with_capacity(capacity),
             head_global_idx: 0,
+            capacity,
         }
     }
 
@@ -284,7 +288,7 @@ impl<T> GlobalArrDeque<T> {
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        self.arr_deque.capacity()
+        self.capacity
     }
 
     pub(crate) fn push(&mut self, value: T) -> Option<(u64, T)> {

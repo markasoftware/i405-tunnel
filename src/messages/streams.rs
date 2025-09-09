@@ -1,10 +1,10 @@
 use super::{DeserializeError, MessageTrait};
 use crate::array_array::IpPacketBuffer;
-use crate::cursors::ReadCursor;
 use crate::messages;
 use crate::messages::deserialize_type_byte;
 use crate::reliability::{ReliabilityAction, ReliableMessage};
-use crate::serdes::{Deserializable, Serializable, Serializer};
+use crate::rw::Reader;
+use crate::serdes::{Deserializable, Serializable, Writer};
 
 use anyhow::Result;
 
@@ -82,7 +82,7 @@ impl MessageTrait for StreamData {
 }
 
 impl Serializable for StreamData {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.stream_id.serialize(serializer);
         self.offset.serialize(serializer);
@@ -91,7 +91,7 @@ impl Serializable for StreamData {
 }
 
 impl Deserializable for StreamData {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamData {
             stream_id: read_cursor.read()?,
@@ -110,7 +110,7 @@ impl MessageTrait for StreamFin {
 }
 
 impl Serializable for StreamFin {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.stream_id.serialize(serializer);
         self.offset.serialize(serializer);
@@ -118,7 +118,7 @@ impl Serializable for StreamFin {
 }
 
 impl Deserializable for StreamFin {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamFin {
             stream_id: read_cursor.read()?,
@@ -136,14 +136,14 @@ impl MessageTrait for StreamRst {
 }
 
 impl Serializable for StreamRst {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.stream_id.serialize(serializer);
     }
 }
 
 impl Deserializable for StreamRst {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamRst {
             stream_id: read_cursor.read()?,
@@ -160,7 +160,7 @@ impl MessageTrait for StreamWindowUpdate {
 }
 
 impl Serializable for StreamWindowUpdate {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.stream_id.serialize(serializer);
         self.new_window_offset.serialize(serializer);
@@ -168,7 +168,7 @@ impl Serializable for StreamWindowUpdate {
 }
 
 impl Deserializable for StreamWindowUpdate {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(StreamWindowUpdate {
             stream_id: read_cursor.read()?,

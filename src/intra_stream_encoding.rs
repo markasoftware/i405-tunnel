@@ -3,17 +3,16 @@ use anyhow::{Result, anyhow};
 use crate::{
     array_array::{ArrayArray, IpPacketBuffer},
     constants::MAX_IP_PACKET_LENGTH,
-    cursors::{ReadCursor, ReadCursorContiguous, WriteCursorContiguous},
-    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength},
+    rw::{ReadCursor, Reader, WriteCursor},
+    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength, Writer},
     socks5_serdes::SocksDestination,
 };
 
 pub(crate) fn make_encoder(destination: &SocksDestination) -> InitiatorEncoderNeedsOutput {
-    let mut write_cursor =
-        WriteCursorContiguous::new(ArrayArray::new_empty(destination.serialized_length()));
+    let mut write_cursor = WriteCursor::new(ArrayArray::new_empty(destination.serialized_length()));
     destination.serialize(&mut write_cursor);
     InitiatorEncoderNeedsOutput {
-        cursor: ReadCursorContiguous::new(write_cursor.into_inner()),
+        cursor: ReadCursor::new(write_cursor.into_inner()),
     }
 }
 
@@ -31,28 +30,27 @@ pub(crate) struct InitiatorEncoderNeedsInput {
 
 #[derive(Debug)]
 pub(crate) struct InitiatorEncoderNeedsOutput {
-    cursor: ReadCursorContiguous<IpPacketBuffer>,
+    cursor: ReadCursor<IpPacketBuffer>,
 }
 
 impl InitiatorEncoderNeedsInput {
     pub(crate) fn encode(self, packet: &[u8]) -> InitiatorEncoderNeedsOutput {
         // at some point in the future we may add scheduling framing information here
         InitiatorEncoderNeedsOutput {
-            cursor: ReadCursorContiguous::new(IpPacketBuffer::new(packet)),
+            cursor: ReadCursor::new(IpPacketBuffer::new(packet)),
         }
     }
 }
 
 impl InitiatorEncoderNeedsOutput {
     /// Return how much of the output was filled, and a new Encoder
-    pub(crate) fn encode(mut self, output: &mut [u8]) -> (usize, InitiatorEncoder) {
-        let num_bytes_written = self.cursor.read_as_much_as_possible(output);
-        let new_encoder = if self.cursor.empty() {
+    pub(crate) fn encode(mut self, output: &mut impl Writer) -> InitiatorEncoder {
+        self.cursor.read_as_much_as_possible(output);
+        if self.cursor.empty() {
             InitiatorEncoder::NeedsInput(InitiatorEncoderNeedsInput { _zst: () })
         } else {
             InitiatorEncoder::NeedsOutput(self)
-        };
-        (num_bytes_written, new_encoder)
+        }
     }
 }
 
@@ -76,7 +74,7 @@ impl InitiatorDestinationDecoder {
 impl InitiatorDestinationDecoder {
     pub(crate) fn decode(
         self,
-        read_cursor: &mut impl ReadCursor,
+        read_cursor: &mut impl Reader,
     ) -> Result<(InitiatorDecoder, Option<SocksDestination>)> {
         match SocksDestination::deserialize(read_cursor) {
             Ok(destination) => Ok((
@@ -96,15 +94,15 @@ pub(crate) struct InitiatorBodyDecoder {
 }
 
 impl InitiatorBodyDecoder {
-    pub(crate) fn decode(&mut self, read_cursor: &mut impl ReadCursor) -> Option<IpPacketBuffer> {
+    pub(crate) fn decode(&mut self, read_cursor: &mut impl Reader) -> Option<IpPacketBuffer> {
         (!read_cursor.empty()).then(|| {
             // TODO split out IpPacketBuffer from read_cursor construction?
-            let mut buffer = IpPacketBuffer::new_empty(std::cmp::min(
+            let mut write_cursor = WriteCursor::new(IpPacketBuffer::new_empty(std::cmp::min(
                 read_cursor.num_read_bytes_left(),
                 MAX_IP_PACKET_LENGTH,
-            ));
-            read_cursor.read_as_much_as_possible(&mut buffer);
-            buffer
+            )));
+            read_cursor.read_as_much_as_possible(&mut write_cursor);
+            write_cursor.into_inner()
         })
     }
 }
@@ -112,8 +110,9 @@ impl InitiatorBodyDecoder {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::cursors::ReadCursorContiguous;
+    use crate::rw::{LengthLimitedWriter, ReadCursor, VecDequeWriter};
     use crate::socks5_serdes::{SocksAddress, SocksDestination};
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
 
     const SOCKS_DESTINATION: SocksDestination = SocksDestination {
@@ -125,45 +124,41 @@ mod test {
     fn simple_round_trip() {
         const DESTINATION_LENGTH: usize = 7;
 
-        let mut buffer = [0u8; 1024];
+        let mut buffer = VecDeque::new();
         let encoder = make_encoder(&SOCKS_DESTINATION);
-        let (bytes_written, encoder) = encoder.encode(&mut buffer);
-        assert_eq!(bytes_written, DESTINATION_LENGTH);
+        let encoder = encoder.encode(&mut VecDequeWriter::new(&mut buffer, 7));
         // pretty impressive: copilot converted 8080 to 31, 144 correctly!
-        assert_eq!(&buffer[..DESTINATION_LENGTH], &[1, 192, 168, 1, 1, 31, 144]);
+        assert_eq!(buffer.make_contiguous(), &[1, 192, 168, 1, 1, 31, 144]);
         let InitiatorEncoder::NeedsInput(encoder) = encoder else {
             panic!();
         };
         let encoder = encoder.encode(&[1, 2, 3, 4]);
-        let (bytes_written, InitiatorEncoder::NeedsOutput(encoder)) =
-            encoder.encode(&mut buffer[DESTINATION_LENGTH..DESTINATION_LENGTH + 2])
+        let InitiatorEncoder::NeedsOutput(encoder) =
+            encoder.encode(&mut VecDequeWriter::new(&mut buffer, 9))
         else {
             panic!();
         };
-        assert_eq!(bytes_written, 2);
-        assert_eq!(&buffer[DESTINATION_LENGTH..DESTINATION_LENGTH + 2], &[1, 2]);
-        let (bytes_written, InitiatorEncoder::NeedsInput(_)) =
-            encoder.encode(&mut buffer[DESTINATION_LENGTH + 2..DESTINATION_LENGTH + 4])
+        assert_eq!(&buffer.make_contiguous()[DESTINATION_LENGTH..], &[1, 2]);
+        let InitiatorEncoder::NeedsInput(_) =
+            encoder.encode(&mut VecDequeWriter::new(&mut buffer, 11))
         else {
             panic!();
         };
-        assert_eq!(bytes_written, 2);
-        assert_eq!(
-            &buffer[DESTINATION_LENGTH + 2..DESTINATION_LENGTH + 4],
-            &[3, 4]
-        );
+        assert_eq!(&buffer.make_contiguous()[DESTINATION_LENGTH + 2..], &[3, 4]);
 
         let decoder = InitiatorDestinationDecoder::new();
-        let mut short_read_cursor =
-            ReadCursorContiguous::new(IpPacketBuffer::new(&buffer[..DESTINATION_LENGTH - 1]));
+        let mut short_read_cursor = ReadCursor::new(IpPacketBuffer::new(
+            &buffer.make_contiguous()[..DESTINATION_LENGTH - 1],
+        ));
         let (decoder, destination) = decoder.decode(&mut short_read_cursor).unwrap();
         assert!(destination.is_none());
         let InitiatorDecoder::Destination(decoder) = decoder else {
             panic!();
         };
 
-        let mut full_read_cursor =
-            ReadCursorContiguous::new(IpPacketBuffer::new(&buffer[..DESTINATION_LENGTH + 4]));
+        let mut full_read_cursor = ReadCursor::new(IpPacketBuffer::new(
+            &buffer.make_contiguous()[..DESTINATION_LENGTH + 4],
+        ));
         let (decoder, destination) = decoder.decode(&mut full_read_cursor).unwrap();
         assert_eq!(destination, Some(SOCKS_DESTINATION));
         let InitiatorDecoder::Body(mut decoder) = decoder else {

@@ -1,38 +1,56 @@
 use crate::array_array::ArrayArray;
-use crate::cursors::{ReadCursor, WriteCursor};
+use crate::rw::{LengthLimitedWriter, Reader, WriteCursor};
 
 use anyhow::anyhow;
 
-pub(crate) trait Serializer {
-    fn serialize(&mut self, data: &[u8]);
+/// Like std::io::Writer, but without the possibility af failure.
+pub(crate) trait Writer {
+    fn write_unchecked(&mut self, data: &[u8]);
+    // can return usize::MAX to be effectively unlimited
+    fn num_write_bytes_left(&self) -> usize;
+
+    fn write(&mut self, data: &[u8]) -> bool {
+        let can_write = data.len() <= self.num_write_bytes_left();
+        if can_write {
+            self.write_unchecked(data);
+        }
+        can_write
+    }
+
+    fn serialize(&mut self, thing: impl Serializable)
+    where
+        Self: Sized,
+    {
+        thing.serialize(self)
+    }
 }
 
 pub(crate) trait Serializable {
-    fn serialize<S: Serializer>(&self, serializer: &mut S);
+    fn serialize<W: Writer>(&self, writer: &mut W);
 }
 
 impl Serializable for bool {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
-        (if *self { 1u8 } else { 0u8 }).serialize(serializer);
+    fn serialize<W: Writer>(&self, writer: &mut W) {
+        (if *self { 1u8 } else { 0u8 }).serialize(writer);
     }
 }
 
 type SerializedArrayArrayLength = u16;
 
 impl<const C: usize> Serializable for ArrayArray<u8, C> {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<W: Writer>(&self, writer: &mut W) {
         let len = SerializedArrayArrayLength::try_from(self.len()).unwrap();
-        len.serialize(serializer);
-        serializer.serialize(self); // I think deref coercion here?
+        len.serialize(writer);
+        writer.write_unchecked(self); // I think deref coercion here?
     }
 }
 
 /// doesn't actually serialize; just figures out how long a message will be once serialized
-pub(crate) struct LengthDeterminingSerializer {
+pub(crate) struct LengthDeterminingWriter {
     length: usize,
 }
 
-impl LengthDeterminingSerializer {
+impl LengthDeterminingWriter {
     pub(crate) fn new() -> Self {
         Self { length: 0 }
     }
@@ -42,9 +60,13 @@ impl LengthDeterminingSerializer {
     }
 }
 
-impl Serializer for LengthDeterminingSerializer {
-    fn serialize(&mut self, data: &[u8]) {
+impl Writer for LengthDeterminingWriter {
+    fn write_unchecked(&mut self, data: &[u8]) {
         self.length += data.len();
+    }
+
+    fn num_write_bytes_left(&self) -> usize {
+        usize::MAX
     }
 }
 
@@ -54,18 +76,9 @@ pub(crate) trait SerializableLength {
 
 impl<T: Serializable> SerializableLength for T {
     fn serialized_length(&self) -> usize {
-        let mut length_serializer = LengthDeterminingSerializer::new();
-        self.serialize(&mut length_serializer);
-        length_serializer.into_inner()
-    }
-}
-
-impl<T: WriteCursor> Serializer for T {
-    fn serialize(&mut self, data: &[u8]) {
-        // we could just write this as assert!, since assert! is never optimized out like in C
-        if !self.write_exact(data) {
-            panic!("Destination not long enough to serialize into");
-        }
+        let mut length_writer = LengthDeterminingWriter::new();
+        self.serialize(&mut length_writer);
+        length_writer.into_inner()
     }
 }
 
@@ -99,16 +112,31 @@ pub(crate) trait Deserializable
 where
     Self: Sized,
 {
-    // could theoretically make this more generic than just ReadCursor, just like how Serialize
-    // is generic over Serializers, but let's not do it until we need it.
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError>;
+    fn deserialize(reader: &mut impl Reader) -> Result<Self, DeserializeError>;
+}
+
+pub(crate) fn deserialize_arrayarray_len_prior_knowledge<const C: usize>(
+    reader: &mut impl Reader,
+    inner_len: usize,
+) -> Result<ArrayArray<u8, C>, DeserializeError> {
+    let mut result = ArrayArray::new_empty(inner_len);
+    let amount_read = reader.read_as_much_as_possible(&mut WriteCursor::new(&mut result));
+    if amount_read == inner_len {
+        Ok(result)
+    } else {
+        Err(DeserializeError::Truncated)
+    }
 }
 
 impl<const C: usize> Deserializable for ArrayArray<u8, C> {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
-        let len: SerializedArrayArrayLength = read_cursor.read()?;
+    fn deserialize(reader: &mut impl Reader) -> Result<Self, DeserializeError> {
+        let len: SerializedArrayArrayLength = reader.read()?;
         let mut result = ArrayArray::new_empty(len.into());
-        if !read_cursor.read_exact_runtime(&mut result) {
+        if reader.read_as_much_as_possible(&mut LengthLimitedWriter::new(
+            WriteCursor::new(&mut result),
+            len.into(),
+        )) != len.into()
+        {
             return Err(DeserializeError::Truncated);
         }
         Ok(result)
@@ -116,7 +144,7 @@ impl<const C: usize> Deserializable for ArrayArray<u8, C> {
 }
 
 impl Deserializable for bool {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let byte: u8 = read_cursor.read()?;
         match byte {
             0 => Ok(false),
@@ -129,14 +157,14 @@ impl Deserializable for bool {
 macro_rules! serdes_integral {
     ($integral_type:ident) => {
         impl Serializable for $integral_type {
-            fn serialize<S: Serializer>(&self, serializer: &mut S) {
-                serializer.serialize(&self.to_be_bytes());
+            fn serialize<W: Writer>(&self, writer: &mut W) {
+                writer.write(&self.to_be_bytes());
             }
         }
 
         impl Deserializable for $integral_type {
             fn deserialize(
-                read_cursor: &mut impl ReadCursor,
+                read_cursor: &mut impl Reader,
             ) -> Result<$integral_type, DeserializeError> {
                 // I keep getting syntax errors trying to inline this into the <...> below
                 const SIZE: usize = size_of::<$integral_type>();

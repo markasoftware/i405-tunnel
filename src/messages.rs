@@ -8,10 +8,10 @@ use declarative_enum_dispatch::enum_dispatch;
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
 use crate::array_array::IpPacketBuffer;
-use crate::cursors::{ReadCursor, WriteCursor as _, WriteCursorContiguous};
 use crate::reliability::{ReliabilityAction, ReliabilityActionBuilder, ReliableMessage};
+use crate::rw::{Reader, WriteCursor};
 use crate::serdes::{
-    Deserializable, DeserializeError, Serializable, SerializableLength as _, Serializer,
+    Deserializable, DeserializeError, Serializable, SerializableLength as _, Writer,
 };
 pub(crate) use ip_packet::{IpPacket, IpPacketFragment};
 pub(crate) use streams::{StreamData, StreamFin, StreamRst, StreamWindowUpdate};
@@ -34,14 +34,14 @@ const STREAM_RST_TYPE_BYTE: u8 = 0x32;
 const STREAM_WINDOW_UPDATE_TYPE_BYTE: u8 = 0x33;
 
 pub(crate) struct PacketBuilder {
-    write_cursor: WriteCursorContiguous<IpPacketBuffer>,
+    write_cursor: WriteCursor<IpPacketBuffer>,
 }
 
 impl PacketBuilder {
     /// Create a PacketBuilder that will eventually fill the passed-in buffer with messages
     pub(crate) fn new(packet_size: usize) -> PacketBuilder {
         PacketBuilder {
-            write_cursor: WriteCursorContiguous::new(IpPacketBuffer::new_empty(packet_size)),
+            write_cursor: WriteCursor::new(IpPacketBuffer::new_empty(packet_size)),
         }
     }
 
@@ -90,7 +90,7 @@ impl PacketBuilder {
         added
     }
 
-    pub(crate) fn write_cursor(&mut self) -> &mut WriteCursorContiguous<IpPacketBuffer> {
+    pub(crate) fn write_cursor(&mut self) -> &mut WriteCursor<IpPacketBuffer> {
         &mut self.write_cursor
     }
 }
@@ -100,7 +100,7 @@ pub(crate) trait PacketReader {
     fn try_read_message_no_ack(&mut self) -> Result<Option<Message>>;
 }
 
-impl<T: ReadCursor> PacketReader for T {
+impl<T: Reader> PacketReader for T {
     fn try_read_message(&mut self, ack_elicited: &mut bool) -> Result<Option<Message>> {
         if has_message(self) {
             let msg: Message = self.read()?;
@@ -154,7 +154,7 @@ enum_dispatch! {
 impl Serializable for Message {
     /// Try to serialize into the given buffer (if we fit), returning how many bytes were written if
     /// we did fit. We avoid std::Write because it returns a whole-ass Result we don't need.
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         macro_rules! serialize_variants {
             ($($enum_item:ident);+) => {
                 match self {
@@ -235,7 +235,7 @@ impl MessageTrait for ClientToServerHandshake {
 }
 
 impl Serializable for ClientToServerHandshake {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         let mut flags = C2SHandshakeFlags::empty();
         if self.monitor_packets {
             flags |= C2SHandshakeFlags::MonitorPackets;
@@ -258,7 +258,7 @@ impl Serializable for ClientToServerHandshake {
 }
 
 impl Deserializable for ClientToServerHandshake {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
 
         let magic_value: u32 = read_cursor.read()?;
@@ -318,7 +318,7 @@ impl MessageTrait for ServerToClientHandshake {
 }
 
 impl Serializable for ServerToClientHandshake {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         MAGIC_VALUE.serialize(serializer);
         self.protocol_version.serialize(serializer);
@@ -327,7 +327,7 @@ impl Serializable for ServerToClientHandshake {
 }
 
 impl Deserializable for ServerToClientHandshake {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
 
         let magic_value: u32 = read_cursor.read()?;
@@ -363,7 +363,7 @@ impl MessageTrait for Ack {
 }
 
 impl Serializable for Ack {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.first_acked_seqno.serialize(serializer);
         self.last_acked_seqno.serialize(serializer);
@@ -371,7 +371,7 @@ impl Serializable for Ack {
 }
 
 impl Deserializable for Ack {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
 
         Ok(Ack {
@@ -401,14 +401,14 @@ impl MessageTrait for SequenceNumber {
 }
 
 impl Serializable for SequenceNumber {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.seqno.serialize(serializer);
     }
 }
 
 impl Deserializable for SequenceNumber {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(SequenceNumber {
             seqno: read_cursor.read()?,
@@ -436,14 +436,14 @@ impl MessageTrait for TxEpochTime {
 }
 
 impl Serializable for TxEpochTime {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.timestamp.serialize(serializer);
     }
 }
 
 impl Deserializable for TxEpochTime {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
         Ok(TxEpochTime {
             timestamp: read_cursor.read()?,
@@ -479,7 +479,7 @@ impl MessageTrait for PacketStatus {
 }
 
 impl Serializable for PacketStatus {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         Self::TYPE_BYTE.serialize(serializer);
         self.seqno.serialize(serializer);
         let (tx_time, rx_time) = self.tx_rx_epoch_times.unwrap_or((0, 0));
@@ -489,7 +489,7 @@ impl Serializable for PacketStatus {
 }
 
 impl Deserializable for PacketStatus {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         deserialize_type_byte!(read_cursor);
 
         let seqno = read_cursor.read()?;
@@ -506,7 +506,7 @@ impl Deserializable for PacketStatus {
 }
 
 impl Deserializable for Message {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let message_type = match read_cursor.peek_exact_comptime::<1>() {
             Some(message_type_bytes) => message_type_bytes[0],
             None => return Err(DeserializeError::Truncated),
@@ -531,7 +531,7 @@ impl Deserializable for Message {
 }
 
 /// Return whether there's another message to be read from this cursor. Does not move the cursor.
-fn has_message<T: ReadCursor>(read_cursor: &T) -> bool {
+fn has_message<T: Reader>(read_cursor: &T) -> bool {
     read_cursor
         .peek_exact_comptime::<1>()
         .is_some_and(|x| x != [0])
@@ -540,9 +540,7 @@ fn has_message<T: ReadCursor>(read_cursor: &T) -> bool {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        array_array::ArrayArray, constants::MAX_IP_PACKET_LENGTH, cursors::ReadCursorContiguous,
-    };
+    use crate::{array_array::ArrayArray, constants::MAX_IP_PACKET_LENGTH, rw::ReadCursor};
     use anyhow::anyhow;
     use test_case::test_case;
 
@@ -554,7 +552,7 @@ mod test {
             msg
         );
         let buf = builder.into_inner();
-        let mut cursor = ReadCursorContiguous::new(buf);
+        let mut cursor = ReadCursor::new(buf);
         assert!(
             has_message(&cursor),
             "Message should be available in cursor"
@@ -601,14 +599,14 @@ mod test {
     #[test_case(ServerToClientHandshake::TYPE_BYTE)]
     fn magic_value_error(type_byte: u8) {
         let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
-        let mut write_cursor = WriteCursorContiguous::new(arr_arr);
+        let mut write_cursor = WriteCursor::new(arr_arr);
         // TODO Test both handshakes
-        write_cursor.write(type_byte);
+        write_cursor.serialize(type_byte);
         #[allow(clippy::unnecessary_cast)]
-        write_cursor.write(MAGIC_VALUE + 1 as u32);
+        write_cursor.serialize(MAGIC_VALUE + 1 as u32);
         let buf = write_cursor.into_inner();
 
-        let mut read_cursor = ReadCursorContiguous::new(buf);
+        let mut read_cursor = ReadCursor::new(buf);
         assert!(
             has_message(&read_cursor),
             "Should be a message to deserialize"
@@ -629,15 +627,15 @@ mod test {
     #[test]
     fn serdes_version_error() {
         let arr_arr = ArrayArray::<u8, 100>::new_empty(100);
-        let mut write_cursor = WriteCursorContiguous::new(arr_arr);
-        write_cursor.write(ClientToServerHandshake::TYPE_BYTE);
+        let mut write_cursor = WriteCursor::new(arr_arr);
+        write_cursor.serialize(ClientToServerHandshake::TYPE_BYTE);
         #[allow(clippy::unnecessary_cast)]
-        write_cursor.write(MAGIC_VALUE as u32);
+        write_cursor.serialize(MAGIC_VALUE as u32);
         #[allow(clippy::unnecessary_cast)]
-        write_cursor.write(SERDES_VERSION + 1 as u32);
+        write_cursor.serialize(SERDES_VERSION + 1 as u32);
         let buf = write_cursor.into_inner();
 
-        let mut read_cursor = ReadCursorContiguous::new(buf);
+        let mut read_cursor = ReadCursor::new(buf);
         assert!(
             has_message(&read_cursor),
             "Should be a message to deserialize"

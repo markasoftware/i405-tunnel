@@ -3,8 +3,11 @@
 // connection-specific thread where latency is not critically important.
 
 use crate::array_array::ArrayArray;
-use crate::cursors::ReadCursor;
-use crate::serdes::{Deserializable, DeserializeError, Serializable, Serializer};
+use crate::rw::{Reader, WriteCursor};
+use crate::serdes::{
+    Deserializable, DeserializeError, Serializable, Writer,
+    deserialize_arrayarray_len_prior_knowledge,
+};
 use anyhow::anyhow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -12,29 +15,26 @@ const SOCKS_VERSION: u8 = 5;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct ClientMethodSelection {
-    pub(crate) methods: Vec<u8>,
+    pub(crate) methods: ArrayArray<u8, 256>,
 }
 
 impl Serializable for ClientMethodSelection {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         SOCKS_VERSION.serialize(serializer);
         let nmethods = self.methods.len() as u8;
         nmethods.serialize(serializer);
-        serializer.serialize(&self.methods);
+        serializer.write_unchecked(&self.methods);
     }
 }
 
 impl Deserializable for ClientMethodSelection {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let version: u8 = read_cursor.read()?;
         if version != SOCKS_VERSION {
             return Err(anyhow!("Unsupported SOCKS version: {version}").into());
         }
-        let nmethods: u8 = read_cursor.read()?;
-        let mut methods = vec![0; nmethods.into()];
-        if !read_cursor.read_exact_runtime(&mut methods) {
-            return Err(DeserializeError::Truncated);
-        }
+        let nmethods: u8 = read_cursor.read::<u8>()?;
+        let methods = deserialize_arrayarray_len_prior_knowledge(read_cursor, nmethods.into())?;
         Ok(ClientMethodSelection { methods })
     }
 }
@@ -45,14 +45,14 @@ pub(crate) struct ServerMethodSelection {
 }
 
 impl Serializable for ServerMethodSelection {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         SOCKS_VERSION.serialize(serializer);
         self.method.serialize(serializer);
     }
 }
 
 impl Deserializable for ServerMethodSelection {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let version: u8 = read_cursor.read()?;
         if version != SOCKS_VERSION {
             return Err(anyhow!("Unsupported SOCKS version: {version}").into());
@@ -72,39 +72,39 @@ pub(crate) enum SocksAddress {
 }
 
 impl Serializable for SocksAddress {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         match self {
             SocksAddress::Ip(IpAddr::V4(addr)) => {
                 1u8.serialize(serializer);
-                serializer.serialize(&addr.octets());
+                serializer.write_unchecked(&addr.octets());
             }
             SocksAddress::Domain(domain) => {
                 3u8.serialize(serializer);
                 let len = domain.len() as u8;
                 len.serialize(serializer);
-                serializer.serialize(domain);
+                serializer.write_unchecked(domain);
             }
             SocksAddress::Ip(IpAddr::V6(addr)) => {
                 4u8.serialize(serializer);
-                serializer.serialize(&addr.octets());
+                serializer.write_unchecked(&addr.octets());
             }
         }
     }
 }
 
 impl Deserializable for SocksAddress {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
-        let atyp: u8 = read_cursor.read()?;
+    fn deserialize(reader: &mut impl Reader) -> Result<Self, DeserializeError> {
+        let atyp: u8 = reader.read()?;
         match atyp {
             1 => {
-                let addr = read_cursor
+                let addr = reader
                     .read_exact_comptime::<4>()
                     .ok_or(DeserializeError::Truncated)?;
                 Ok(SocksAddress::Ip(IpAddr::V4(Ipv4Addr::from(addr))))
             }
             3 => {
-                let len: u8 = read_cursor.read()?;
-                if usize::from(len) > MAX_SOCKS_DOMAIN_LEN {
+                let len = usize::from(reader.read::<u8>()?);
+                if len > MAX_SOCKS_DOMAIN_LEN {
                     return Err(anyhow!(
                         "SOCKS domain length {} exceeds max allowed {}",
                         len,
@@ -112,14 +112,16 @@ impl Deserializable for SocksAddress {
                     )
                     .into());
                 }
-                let mut domain = ArrayArray::new_empty(len.into());
-                if !read_cursor.read_exact_runtime(&mut domain) {
+                if reader.num_read_bytes_left() < len {
                     return Err(DeserializeError::Truncated);
                 }
-                Ok(SocksAddress::Domain(domain))
+                let mut domain_writer = WriteCursor::new(ArrayArray::new_empty(len));
+                reader.read_as_much_as_possible(&mut domain_writer);
+                assert!(domain_writer.num_write_bytes_left() == 0);
+                Ok(SocksAddress::Domain(domain_writer.into_inner()))
             }
             4 => {
-                let addr = read_cursor
+                let addr = reader
                     .read_exact_comptime::<16>()
                     .ok_or(DeserializeError::Truncated)?;
                 Ok(SocksAddress::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
@@ -138,13 +140,13 @@ pub(crate) enum SocksCommand {
 }
 
 impl Serializable for SocksCommand {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         (*self as u8).serialize(serializer);
     }
 }
 
 impl Deserializable for SocksCommand {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let cmd_byte: u8 = read_cursor.read()?;
         match cmd_byte {
             0x01 => Ok(SocksCommand::Connect),
@@ -162,14 +164,14 @@ pub(crate) struct SocksDestination {
 }
 
 impl Serializable for SocksDestination {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         self.address.serialize(serializer);
         self.port.serialize(serializer);
     }
 }
 
 impl Deserializable for SocksDestination {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let address: SocksAddress = read_cursor.read()?;
         let port: u16 = read_cursor.read()?;
         Ok(SocksDestination { address, port })
@@ -182,7 +184,7 @@ pub(crate) struct SocksRequest {
     pub(crate) destination: SocksDestination,
 }
 impl Serializable for SocksRequest {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         SOCKS_VERSION.serialize(serializer);
         self.command.serialize(serializer);
         0u8.serialize(serializer); // RSV
@@ -191,7 +193,7 @@ impl Serializable for SocksRequest {
 }
 
 impl Deserializable for SocksRequest {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let version: u8 = read_cursor.read()?;
         if version != SOCKS_VERSION {
             return Err(anyhow!("Unsupported SOCKS version: {version}").into());
@@ -224,13 +226,13 @@ pub(crate) enum SocksReplyCode {
 }
 
 impl Serializable for SocksReplyCode {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         (*self as u8).serialize(serializer);
     }
 }
 
 impl Deserializable for SocksReplyCode {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let code_byte: u8 = read_cursor.read()?;
         match code_byte {
             0x00 => Ok(SocksReplyCode::Succeeded),
@@ -254,7 +256,7 @@ pub(crate) struct SocksReply {
 }
 
 impl Serializable for SocksReply {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         SOCKS_VERSION.serialize(serializer);
         self.reply_code.serialize(serializer);
         0u8.serialize(serializer); // RSV
@@ -263,7 +265,7 @@ impl Serializable for SocksReply {
 }
 
 impl Deserializable for SocksReply {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let version: u8 = read_cursor.read()?;
         if version != SOCKS_VERSION {
             return Err(anyhow!("Unsupported SOCKS version: {version}").into());
@@ -285,7 +287,7 @@ impl Deserializable for SocksReply {
 mod test {
     use super::*;
     use crate::array_array::ArrayArray;
-    use crate::cursors::{ReadCursorContiguous, WriteCursorContiguous};
+    use crate::rw::{ReadCursor, WriteCursor};
 
     const ROUNDTRIP_BUFFER_LEN: usize = 1024;
 
@@ -294,11 +296,11 @@ mod test {
         T: Serializable + Deserializable + PartialEq + std::fmt::Debug,
     {
         let buf = ArrayArray::<u8, ROUNDTRIP_BUFFER_LEN>::new_empty(ROUNDTRIP_BUFFER_LEN);
-        let mut write_cursor = WriteCursorContiguous::new(buf);
+        let mut write_cursor = WriteCursor::new(buf);
         msg.serialize(&mut write_cursor);
         let written_buf = write_cursor.into_inner();
 
-        let mut read_cursor = ReadCursorContiguous::new(written_buf);
+        let mut read_cursor = ReadCursor::new(written_buf);
         let roundtripped_msg = T::deserialize(&mut read_cursor).unwrap();
 
         assert_eq!(msg, &roundtripped_msg);
@@ -307,7 +309,7 @@ mod test {
     #[test]
     fn roundtrip_client_method_selection() {
         let msg = ClientMethodSelection {
-            methods: vec![0, 1, 2],
+            methods: ArrayArray::new(&[0, 1, 2, 3]),
         };
         assert_roundtrip(&msg);
     }

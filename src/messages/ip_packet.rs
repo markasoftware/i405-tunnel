@@ -1,11 +1,11 @@
 use enumflags2::{BitFlag, BitFlags, bitflags};
 
-use crate::cursors::ReadCursor;
 use crate::reliability::ReliabilityAction;
+use crate::rw::Reader;
 use crate::{array_array::IpPacketBuffer, serdes::DeserializeError};
 
 use super::MessageTrait;
-use crate::serdes::{Deserializable, Serializable, SerializableLength as _, Serializer};
+use crate::serdes::{Deserializable, Serializable, SerializableLength as _, Writer};
 use anyhow::{Result, anyhow};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -51,7 +51,7 @@ impl MessageTrait for IpPacket {
 }
 
 impl Serializable for IpPacket {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         let mut flags = IpPacketFlags::empty();
         if self.fragmentation_id.is_some() {
             flags |= IpPacketFlags::Fragmented;
@@ -68,7 +68,7 @@ impl Serializable for IpPacket {
 }
 
 impl Deserializable for IpPacket {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let type_byte: u8 = read_cursor.read()?;
         assert!(
             (Self::TYPE_BYTE_LOW..=Self::TYPE_BYTE_HIGH).contains(&type_byte),
@@ -129,7 +129,7 @@ impl MessageTrait for IpPacketFragment {
 }
 
 impl Serializable for IpPacketFragment {
-    fn serialize<S: Serializer>(&self, serializer: &mut S) {
+    fn serialize<S: Writer>(&self, serializer: &mut S) {
         let type_byte = if self.is_last {
             Self::TYPE_BYTE_FINAL
         } else {
@@ -145,7 +145,7 @@ impl Serializable for IpPacketFragment {
 }
 
 impl Deserializable for IpPacketFragment {
-    fn deserialize(read_cursor: &mut impl ReadCursor) -> Result<Self, DeserializeError> {
+    fn deserialize(read_cursor: &mut impl Reader) -> Result<Self, DeserializeError> {
         let type_byte: u8 = read_cursor.read()?;
         let is_last = match type_byte {
             Self::TYPE_BYTE_FINAL => true,
