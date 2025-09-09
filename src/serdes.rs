@@ -169,6 +169,7 @@ serdes_integral!(i64);
 /// Keep reading out data until the inner item is completely serializes. Make sure the serialization
 /// is cheap because it will re-serilize it every time `read` is called. Doesn't actually implement
 /// `Reader` trait, for extra type safety in the `read` signature.
+#[derive(Debug)]
 pub(crate) struct SerializingReader<T: Serializable> {
     inner: T,
     num_bytes_read: usize,

@@ -1,19 +1,17 @@
 use anyhow::{Result, anyhow};
 
 use crate::{
-    array_array::{ArrayArray, IpPacketBuffer},
+    array_array::IpPacketBuffer,
     constants::MAX_IP_PACKET_LENGTH,
     rw::{ReadCursor, Reader, WriteCursor, Writer},
-    serdes::{Deserializable, DeserializeError, Serializable, SerializableLength},
+    serdes::{
+        Deserializable, DeserializeError, Serializable, SerializableLength, SerializingReader,
+    },
     socks5_serdes::SocksDestination,
 };
 
-pub(crate) fn make_encoder(destination: &SocksDestination) -> InitiatorEncoderNeedsOutput {
-    let mut write_cursor = WriteCursor::new(ArrayArray::new_empty(destination.serialized_length()));
-    destination.serialize(&mut write_cursor);
-    InitiatorEncoderNeedsOutput {
-        cursor: ReadCursor::new(write_cursor.into_inner()),
-    }
+pub(crate) fn make_encoder(destination: SocksDestination) -> InitiatorEncoderNeedsOutput {
+    InitiatorEncoderNeedsOutput::Destination(SerializingReader::new(destination))
 }
 
 /// Encoder for the "initiator" side of the connection, that sends destination address.
@@ -29,27 +27,36 @@ pub(crate) struct InitiatorEncoderNeedsInput {
 }
 
 #[derive(Debug)]
-pub(crate) struct InitiatorEncoderNeedsOutput {
-    cursor: ReadCursor<IpPacketBuffer>,
+pub(crate) enum InitiatorEncoderNeedsOutput {
+    Destination(SerializingReader<SocksDestination>),
+    Body(ReadCursor<IpPacketBuffer>),
 }
 
 impl InitiatorEncoderNeedsInput {
     pub(crate) fn encode(self, packet: &[u8]) -> InitiatorEncoderNeedsOutput {
         // at some point in the future we may add scheduling framing information here
-        InitiatorEncoderNeedsOutput {
-            cursor: ReadCursor::new(IpPacketBuffer::new(packet)),
-        }
+        InitiatorEncoderNeedsOutput::Body(ReadCursor::new(IpPacketBuffer::new(packet)))
     }
 }
 
 impl InitiatorEncoderNeedsOutput {
     /// Return how much of the output was filled, and a new Encoder
-    pub(crate) fn encode(mut self, output: &mut impl Writer) -> InitiatorEncoder {
-        self.cursor.read_as_much_as_possible(output);
-        if self.cursor.empty() {
-            InitiatorEncoder::NeedsInput(InitiatorEncoderNeedsInput { _zst: () })
-        } else {
-            InitiatorEncoder::NeedsOutput(self)
+    pub(crate) fn encode(self, output: &mut impl Writer) -> InitiatorEncoder {
+        match self {
+            Self::Destination(serializing_reader) => match serializing_reader.read(output) {
+                Some(serializing_reader) => InitiatorEncoder::NeedsOutput(
+                    InitiatorEncoderNeedsOutput::Destination(serializing_reader),
+                ),
+                None => InitiatorEncoder::NeedsInput(InitiatorEncoderNeedsInput { _zst: () }),
+            },
+            Self::Body(mut cursor) => {
+                cursor.read_as_much_as_possible(output);
+                if cursor.empty() {
+                    InitiatorEncoder::NeedsInput(InitiatorEncoderNeedsInput { _zst: () })
+                } else {
+                    InitiatorEncoder::NeedsOutput(InitiatorEncoderNeedsOutput::Body(cursor))
+                }
+            }
         }
     }
 }
@@ -125,7 +132,7 @@ mod test {
         const DESTINATION_LENGTH: usize = 7;
 
         let mut buffer = VecDeque::new();
-        let encoder = make_encoder(&SOCKS_DESTINATION);
+        let encoder = make_encoder(SOCKS_DESTINATION);
         let encoder = encoder.encode(&mut VecDequeWriter::new(&mut buffer, 7));
         // pretty impressive: copilot converted 8080 to 31, 144 correctly!
         assert_eq!(buffer.make_contiguous(), &[1, 192, 168, 1, 1, 31, 144]);
