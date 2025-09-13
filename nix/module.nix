@@ -157,7 +157,7 @@ in
     (let cfg = config.services.i405-tunnel-client; in
      lib.mkIf cfg.enable {
        assertions = lib.mkMerge [
-         commonAssertions cfg
+         (commonAssertions cfg)
          [
            {
              assertion = cfg.peer != null;
