@@ -52,7 +52,6 @@ let inherit (lib) types;
     ];
 
     commonSystemdService = {
-      after = [ "network.target" ];
       # TODO should this actually be put earlier, since I405-tunnel is kinda part of the network?
       wantedBy = [ "multi-user.target" ];
       path = [ pkgs.iproute2 ];
@@ -145,6 +144,7 @@ in
          commonSystemdService
          {
            description = "I405-Tunnel Server";
+           after = [ "network.target" ];  # generally will be good enough for our bind IP to be assigned
            # it's simple enough to use ExecStart, but I know there are some weird escaping rules
            # applied to ExecStart that I'd rather avoid.
            script = let allArgs = ["server"] ++ commonCliArgs cfg;
@@ -178,6 +178,8 @@ in
         commonSystemdService
         {
           description = "I405-Tunnel Client";
+          # unlike the server, we want to wait until we can actually connect to the server before attempting to do so
+          after = [ "network-online.target" ];
           script = let allArgs = (
             ["client"]
             ++ ["--peer" cfg.peer]
