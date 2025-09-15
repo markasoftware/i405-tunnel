@@ -180,6 +180,7 @@ in
           description = "I405-Tunnel Client";
           # unlike the server, we want to wait until we can actually connect to the server before attempting to do so
           after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
           script = let allArgs = (
             ["client"]
             ++ ["--peer" cfg.peer]
