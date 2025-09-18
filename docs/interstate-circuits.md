@@ -210,7 +210,7 @@ Here are some application-specific layer-7 proxy examples:
 
 For simple websites, run Lynx, a text-based browser without javascript or anything. For more complex websites, try [Browsh](https://brow.sh) or [Carbonyl](https://github.com/fathyb/carbonyl), which render Firefox and Chromium (respectively) in the terminal. Why is Firefox in the terminal any better than a low-resolution remote desktop? Because the websites text is preserved as text in the terminal; only images, layout elements, etc get severely downscaled into blocky unicode characters. This keeps the website super usable at low bandwidth. Also, if you're asking that question, you've clearly never tried to set up a low-bandwidth remote desktop on Linux. It's a HUGE pain in the ass.
 
-Another kinda-layer-7 solution is to use [mitmproxy](https://www.mitmproxy.org/) on the guard to proxy all requests made by a browser running on the home node. Mitmproxy fully buffers responses, and so prevents any true layer-3 or layer-4 proxying between hop 1 and hop 3.
+Another kinda-layer-7 solution is to use [mitmproxy](https://www.mitmproxy.org/) on the guard to proxy all requests made by a browser running on the home node. Because mitmproxy decrypts https and fully buffers responses before sending them back to the client, it is effectively a proxy at the level of HTTPS requests. This isn't truly "layer 7", because HTTPS requests do not correspond to application-level actions, but it's still a lot higher level than IP or TCP and largely prevents the attacks described here.
 
 <!-- old description:
 
