@@ -94,8 +94,8 @@ same Interstate Circuit.
 
 <img src="./drop-correlation.svg" height=400>
 
-**Possible Solution (not implemented): Forward Error Correction (FEC)**: The packet drop problem can
-be mitigated by using error correction so that even if a packet is dropped on hop 1, I405 is able to
+**Possible Solutions (not implemented)**:
++ **Forward error correction**: Use error correction on hop 1 so that even if a packet is dropped on hop 1, I405 is able to
 fully reconstruct the tunneled traffic and avoid dropping packets on hop 3. But this isn't perfect:
 Any error correction algorithm will only be able to handle a finite amount of consecutive dropped
 packets. And on the internet, packet drops tend to be correlated: You might not drop any packets for
@@ -103,25 +103,30 @@ minutes or hours, and then suddenly drop dozens of packets in a row, if a buffer
 network gets full, or a router goes down and routes aren't updated immediately. The amount of error
 correction needed to reliably correct most packet drop events would be quite high, increasing
 latency and bandwidth overhead.
++ **Eager retransmissions**: Use any spare space in each I405 packet to retransmit un-acked messages, even though they're probably not dropped. This is especially useful in the outbound (home->internet) direction because outbound traffic usually consists of small, isolated HTTP requests, leaving lots of room for retransmits.
++ **Multi-path** (suggested by Tobias Pulls): Instead of sending packets directly from home to guard over the internet for hop 1, set up multiple paths. There's lots of ways to do this:
+  - Use different residential connections: Many packet drops are due to just the local residential network. You could bypass this by renting multiple internet connections (eg, one using fiber, and another with 5g home internet) and using both for redundancy.
+  - Use different routes over the internet: You can't control how your packet will be routed over the internet, so you'd just have to split up hop 1 into shorter hops between servers you control, chosen such that the routes home->proxy 1->guard and home->proxy 2->guard overlap as little as possible to add redundancy.
++ **Faster retransmits by splitting up hop 1**: The reason we can't mitigate packet drops naively with TCP-like retransmissions is because of the scheduling feature (used to mitigate packet timing analysis, as described above): we need to set the schedule delay long enough so that it includes any retransmissions. TCP doesn't retransmit until substantially more than a full round-trip time has elapsed, which means tha the packet will not reach the server until 1.5RTT after the original send time, rather than the typical 0.5RTT. This means the scheduling delay has to be set to at least 1.5 RTT, and this scheduling delay is applied to *all* packets, not just those that are dropped.
 
-### Why don't we implement dispatch scheduling or FEC?
+  Retransmission can be salvaged if we split up hop 1 into many shorter, lower-latency hops: home->proxy 1->proxy 2->proxy 3->guard. If the latency on each "mini-hop" between proxies low enough, then we can retransmit between them while keeping scheduling delay reasonable.
 
-Error correction really does not fully solve the (IMO more serious) problem of dropped packets.
-Further, probably just a few dozen packet drop events may be enough to uniquely correlate hops 1 and
-3 against all other traffic on the internet, since packet drops are fairly rare.
+  There's lots of variations on this theme. For example, it's common for most of the packet drops to be due to the residential network of the user. A single retransmitting proxy between home and guard, geographically near the user's residential network, is good in this case. The latency added in case of a packet drop is just the RTT between the residential network and proxy, which can be made small.
 
-Dispatch scheduling fully prevents analysis of inter-packet intervals, but introduces a new problem:
-If there's an unexpected delay in the network, an I405 packet may reach the other side later than
-the scheduled dispatch time of an IP packet contained within. There's nothing you can do in this
-case that doesn't compromise privacy (dropping the IP packet or dispatching it immediately are the
-two obvious strategies, and are both problematic. I've thought of other ideas too, and nothing's
-perfect).
+### Scheduling & FEC discussion
 
-That being said, I'm still open to implementing scheduling and FEC in the future. I think it would
-useful in combination with tooling that helps users empirically determine whether their choice of
-settings (scheduling delay and error correction level) are sufficient, eg by dry-running for a few
-days and seeing how many "privacy compromising" events occur (network delay greater than the
-scheduling delay, or dropped packets beyond what error correction can recover).
+Dispatch scheduling fully prevents analysis based on inter-packet intervals. Error correction, retransmission, etc does *not* fully solve the (IMO more serious) problem of dropped packets, because there can always be some unrecoverable string of dropped packets.
+
+I405 has a "packet monitor" mode which reports on packet delays and drops in either direction; see the help text for `--monitor-packets` to learn how to use it. Initial measurements indicate that packet drop rates are low enough that error correction will do a good job.
+
+I envision someone setting up an Interstate Circuit like so:
+1. Run in `--monitor-packets` mode between the home and guard nodes for a few days.
+2. Analyze the packet timing and drop rates to determine a reasonable error correction level and dispatch scheduling delay (using an analysis/simulator tool inside I405)
+3. Run I405, with continuous built-in monitoring for when a packet was dropped in a way that wasn't recovered by the error correction, so the user knows when their privacy is potentially compromised.
+
+(none of this is implemented yet)
+
+But until we have some fancy error correction and scheduling mechanisms, you're stuck with Layer 7 proxies, described below!
 
 ## Systematically defending against hop 1 - hop 3 correlation attacks: Layer-7 proxies
 
@@ -203,18 +208,11 @@ Here are some application-specific layer-7 proxy examples:
 
 #### What about web browsing? Are there are any good layer-7 proxies for web browsing other than a remote desktop?
 
-Short answer: For modern interactive websites, not yet, but it's possible and I want to build it!
-For simple websites, run Lynx.
+For simple websites, run Lynx, a text-based browser without javascript or anything. For more complex websites, try [Browsh](https://brow.sh) or [Carbonyl](https://github.com/fathyb/carbonyl), which render Firefox and Chromium (respectively) in the terminal. Why is Firefox in the terminal any better than a low-resolution remote desktop? Because the websites text is preserved as text in the terminal; only images, layout elements, etc get severely downscaled into blocky unicode characters. This keeps the website super usable at low bandwidth. Also, if you're asking that question, you've clearly never tried to set up a low-bandwidth remote desktop on Linux. It's a HUGE pain in the ass.
 
-If you can give up JavaScript, one option is to run a command-line, text-only web browser like Lynx
-on the guard node, and control it over SSH on hop 1. Surprisingly many websites' essential
-functionality works with Lynx, even though it doesn't support JavaScript! Further, many
-privacy-oriented websites are specifically designed to be usable without JavaScript. But if you're
-looking for a general-purpose web browser, Lynx will fall short.
+Another kinda-layer-7 solution is to use [mitmproxy](https://www.mitmproxy.org/) on the guard to proxy all requests made by a browser running on the home node. Mitmproxy fully buffers responses, and so prevents any true layer-3 or layer-4 proxying between hop 1 and hop 3.
 
-Running Chromium or Firefox on a remote machine with a local interface (like Lynx over SSH) isn't
-currently possible. (You can use X forwarding or the Wayland equivalent, but in my experience it's
-even slower than a usual remote desktop because these browsers basically push raw pixels to X)
+<!-- old description:
 
 As described earlier, forwarding raw network traffic (either at layer-3 or layer-4) over an
 Interstate Circuit isn't safe. But what if we forward at the level of HTTP requests instead? That's
@@ -252,6 +250,8 @@ inter-packet intervals, etc, even with the buffering described in point (2) abov
 potential heavier-weight solutions to this (like also buffering the responses on the home computer,
 and only delivering them to the browser when complete). But in the shorter term, I'll just consider
 malicious JavaScript outside the threat model.
+
+-->
 
 ## Threat model of a layer-7 Interstate Circuit
 A layer-7 interstate circuit constructed as recommended in this document is designed so that an
