@@ -9,6 +9,8 @@ mod established_connection;
 #[cfg(test)]
 pub(crate) mod noop;
 pub(crate) mod server;
+mod stream;
+mod streams;
 #[cfg(test)]
 mod test;
 
@@ -26,13 +28,12 @@ const C2S_MAX_TIMEOUT: u64 = 60_000_000_000;
 enum_dispatch! {
     pub(crate) trait Core {
         fn on_timer(&mut self, hardware: &impl Hardware, timer_timestamp: u64);
-        fn on_read_outgoing_packet(
-            &mut self,
-            hardware: &impl Hardware,
-            packet: &[u8],
-            recv_timestamp: u64,
-        );
         fn on_read_incoming_packet(&mut self, hardware: &impl Hardware, packet: &[u8], peer: SocketAddr);
+        // TODO consider changing these (and possibly all the other events too) into being polled by
+        // the Core, async-style, instead.
+        fn on_stream_i2t_open(&mut self, hardware: &impl Hardware, stream_id: u16);
+        fn on_stream_i2t_fin(&mut self, hardware: &impl Hardware, stream_id: u16);
+        fn on_stream_i2t_rst(&mut self, hardware: &impl Hardware, stream_id: u16);
         fn on_terminate(self, hardware: &impl Hardware);
     }
 

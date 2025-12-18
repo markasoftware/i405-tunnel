@@ -22,6 +22,7 @@ mod queued_ip_packet;
 mod reliability;
 mod rw;
 mod serdes;
+mod socks5_async;
 mod socks5_serdes;
 mod utils;
 mod wire_config;

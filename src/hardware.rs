@@ -3,6 +3,7 @@ pub(crate) mod real;
 pub(crate) mod simulated;
 pub(crate) mod sleepy;
 pub(crate) mod spinny;
+mod streams;
 
 use std::net::SocketAddr;
 
@@ -22,10 +23,7 @@ pub(crate) trait Hardware {
     /// Return nanos since unix epoch. May go backwards and all that fun.
     fn epoch_timestamp(&self) -> u64;
 
-    /// Request to read an IP packet that the local system is trying to send through the tunnel. If
-    /// Request a call to Core::on_read_outgoing_packet with a packet received no earlier than the
-    /// requested timestamp.
-    fn read_outgoing_packet(&self);
+    fn read_outgoing_packet(&self) -> Option<&[u8]>;
     /// Write an IP packet to the physical network interface at the given time. Should be called only shortly before the given time.
     fn send_outgoing_packet(
         &self,
@@ -35,6 +33,15 @@ pub(crate) trait Hardware {
     ) -> Result<()>;
 
     fn send_incoming_packet(&self, packet: &[u8]) -> Result<()>;
+
+    // "t2i" = tunnel-to-internet, "i2t" = internet-to-tunnel
+    fn stream_t2i_open(&self, stream_id: u16, destination: StreamDestination);
+    fn stream_t2i_fin(&self, stream_id: u16);
+    // rst kills the stream bidirectionally; "t2i" here just refers to the direction in which the
+    // rst is /initiated/, not the effect the rst has.
+    fn stream_t2i_rst(&self, stream_id: u16);
+    fn stream_t2i_write(&self, stream_id: u16, bytes: &[u8]);
+    fn stream_i2t_read(&self, stream_id: u16);
 
     /// Filter out future traffic from addrs other than the one specified.
     fn socket_connect(&self, socket_addr: &std::net::SocketAddr) -> Result<()>;

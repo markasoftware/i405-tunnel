@@ -24,15 +24,6 @@ impl super::Core for Core {
         panic!("noop core shouldn't have timer triggered");
     }
 
-    fn on_read_outgoing_packet(
-        &mut self,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) {
-        panic!("noop core shouldn't receive outgoing packets");
-    }
-
     fn on_read_incoming_packet(
         &mut self,
         _hardware: &impl Hardware,

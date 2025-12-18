@@ -65,17 +65,6 @@ impl super::Core for Core {
         });
     }
 
-    fn on_read_outgoing_packet(
-        &mut self,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_read_outgoing_packet(&self.config, hardware, packet, recv_timestamp)
-        });
-    }
-
     fn on_read_incoming_packet(
         &mut self,
         hardware: &impl Hardware,
@@ -101,13 +90,6 @@ enum_dispatch! {
             config: &Config,
             hardware: &impl Hardware,
             timer_timestamp: u64,
-        ) -> Result<ConnectionState>;
-        fn on_read_outgoing_packet(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            packet: &[u8],
-        recv_timestamp: u64,
         ) -> Result<ConnectionState>;
         fn on_read_incoming_packet(
             self,
@@ -199,18 +181,6 @@ impl ConnectionStateTrait for NoConnection {
             next_timeout,
         )
         .map(ConnectionState::NoConnection)
-    }
-
-    fn on_read_outgoing_packet(
-        self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        panic!(
-            "on_read_outgoing_packet shouldn't happen during NoConnection -- we never ask for outgoing packets"
-        );
     }
 
     fn on_read_incoming_packet(
