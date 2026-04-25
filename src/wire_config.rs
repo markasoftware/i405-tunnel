@@ -1,3 +1,5 @@
+use anyhow::Result;
+
 use std::{net::SocketAddr, time::Duration};
 
 use crate::config_cli::{AverageWireIntervalCli, WireConfigCli, WireIntervalCli};
@@ -46,7 +48,7 @@ pub(crate) struct WireConfigs {
 
 impl WireConfig {
     /// Always constructs a new jitterator, no singleton logic
-    pub(crate) fn jitterator(&self) -> Jitterator {
+    pub(crate) fn jitterator(&self) -> Result<Jitterator> {
         Jitterator::new(self.packet_interval_min, self.packet_interval_max)
     }
 }

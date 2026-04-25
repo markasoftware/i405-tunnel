@@ -13,7 +13,8 @@
 // solution, so instead we do a really silly distribution where the central part is just sampled way
 // more than the outer parts. Other options include beta and triangular distributions, but why?
 
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use anyhow::Result;
+use rand_chacha::rand_core::{Rng, SeedableRng};
 
 const EXTRA_INNER_INTERVAL_LIKELIHOOD: u64 = 3;
 
@@ -31,7 +32,7 @@ pub(crate) struct Jitterator {
 }
 
 impl Jitterator {
-    pub(crate) fn new(min: u64, max: u64) -> Jitterator {
+    pub(crate) fn new(min: u64, max: u64) -> Result<Jitterator> {
         assert!(min <= max);
 
         let interval_width = max - min;
@@ -42,15 +43,15 @@ impl Jitterator {
 
         let rng_modulus = inner_interval_width * EXTRA_INNER_INTERVAL_LIKELIHOOD + interval_width;
 
-        Jitterator {
+        Ok(Jitterator {
             min,
             interval_width,
             min_inner,
             inner_interval_width,
             rng_modulus,
 
-            rng: rand_chacha::ChaCha12Rng::from_os_rng(),
-        }
+            rng: rand_chacha::ChaCha12Rng::try_from_rng(&mut rand::rngs::SysRng)?,
+        })
     }
 
     pub(crate) fn next_interval(&mut self) -> u64 {
@@ -73,7 +74,7 @@ mod test {
 
     #[test]
     fn jitterator_in_range() {
-        let mut jitterator = Jitterator::new(2424, 4242);
+        let mut jitterator = Jitterator::new(2424, 4242).unwrap();
         let outer = 2424..=4242;
         let inner = 2651..=4014;
         let num_iters: u64 = 100_000;
@@ -100,7 +101,7 @@ mod test {
 
     #[test]
     fn jitterator_trivial_interval() {
-        let mut jitterator = Jitterator::new(4455, 4455);
+        let mut jitterator = Jitterator::new(4455, 4455).unwrap();
         for _ in 0..10 {
             assert_eq!(jitterator.next_interval(), 4455);
         }

@@ -14,6 +14,13 @@ rustPlatform.buildRustPackage {
   pname = "i405-tunnel";
   version = "0.1.1";
 
+  meta = {
+    description = "An encrypted constant-traffic padded network tunnel";
+    homepage = "https://github.com/markasoftware/i405-tunnel";
+    license = lib.licenses.mit;
+    mainProgram = "i405-tunnel";
+  };
+
   src = fs.toSource {
     root = ./..;
     fileset = fs.unions [

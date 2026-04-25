@@ -129,7 +129,7 @@ impl EstablishedConnection {
         session: dtls::EstablishedSession,
         config: Config,
     ) -> Result<Self> {
-        let mut jitterator = config.wire.jitterator();
+        let mut jitterator = config.wire.jitterator()?;
         hardware.clear_event_listeners()?;
         hardware.socket_connect(&config.peer)?;
         hardware.set_timer(

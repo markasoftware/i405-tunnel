@@ -16,15 +16,16 @@ humantime = "2"
 ipnet = "2"
 libc = "0.2.174"
 log = "0.4"
-mtu = "0.2.9"
-rand_chacha = { version = "0.9.0", features = ["os_rng"] }
-tun-rs = { version = "2", features = ["experimental"] }
+mtu = "0.3.0"
+rand_chacha = "0.10.0"
+rand = { version = "0.10.0", features = ["sys_rng"] }
+tun-rs = { version = "2.8.1", features = ["experimental"] }
 wolfssl.branch = "markasoftware/psk-and-rw-signatures"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 
 [dev-dependencies]
 libtest-mimic = "0.8"
-nix = { version = "0.30", features = ["user", "signal"] }
+nix = { version = "0.31.2", features = ["user", "signal"] }
 regex = "1"
 serde_json = "1"
 tempfile = "3"
