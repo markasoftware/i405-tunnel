@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool, mpsc},
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -37,7 +37,7 @@ pub(crate) struct SleepyHardware {
     timer: Cell<Option<u64>>,
     socket: Arc<UdpSocket>,
     tun: Arc<tun_rs::SyncDevice>,
-    tun_is_shutdown: Arc<AtomicBool>,
+    tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
 
     outgoing_read_thread: ChannelThread<()>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
@@ -63,9 +63,6 @@ impl SleepyHardware {
         let (incoming_reads_tx, incoming_reads_rx) = mpsc::channel();
 
         let (events_tx, events_rx) = mpsc::channel();
-        let tx_for_outgoing_read_thread = events_tx.clone();
-        let tx_for_incoming_read_thread = events_tx.clone();
-        let tx_for_signal_handler = events_tx;
 
         let socket = Arc::new(UdpSocket::bind(listen_addr)?);
         // we set a read timeout so that the read thread can't block indefinitely, which would
@@ -82,15 +79,16 @@ impl SleepyHardware {
         let incoming_read_socket = socket.clone();
 
         let tun = Arc::new(tun);
-        let tun_for_outgoing_read_thread = tun.clone();
-        let tun_is_shutdown = Arc::new(AtomicBool::new(false));
-        let tun_is_shutdown_for_outgoing_read_thread = tun_is_shutdown.clone();
+        let tun_interrupt_event = Arc::new(tun_rs::InterruptEvent::new()?);
 
         let epoch = Instant::now();
 
-        ctrlc::set_handler(move || {
-            log::info!("Shutting down I405 due to received signal");
-            tx_for_signal_handler.send(Event::Terminate).unwrap();
+        ctrlc::set_handler({
+            let events_tx = events_tx.clone();
+            move || {
+                log::info!("Shutting down I405 due to received signal");
+                events_tx.send(Event::Terminate).unwrap();
+            }
         })
         .expect("Error installing signal handlers");
 
@@ -102,26 +100,26 @@ impl SleepyHardware {
 
             timer: Cell::new(None),
             socket,
-            tun,
-            tun_is_shutdown,
+            tun: tun.clone(),
+            tun_interrupt_event: tun_interrupt_event.clone(),
 
             events_rx,
 
-            outgoing_read_thread: ChannelThread::spawn(outgoing_read_requests_tx, move || {
-                outgoing_read_thread(
-                    outgoing_read_requests_rx,
-                    tx_for_outgoing_read_thread,
-                    tun_for_outgoing_read_thread,
-                    tun_is_shutdown_for_outgoing_read_thread,
-                    epoch,
-                )
+            outgoing_read_thread: ChannelThread::spawn(outgoing_read_requests_tx, {
+                let events_tx = events_tx.clone();
+                move || {
+                    outgoing_read_thread(
+                        outgoing_read_requests_rx,
+                        events_tx,
+                        tun,
+                        tun_interrupt_event,
+                        epoch,
+                    )
+                }
             }),
-            _incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, move || {
-                incoming_read_thread(
-                    incoming_reads_rx,
-                    tx_for_incoming_read_thread,
-                    incoming_read_socket,
-                )
+            _incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, {
+                let events_tx = events_tx.clone();
+                move || incoming_read_thread(incoming_reads_rx, events_tx, incoming_read_socket)
             }),
             deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
             monitor_packets_thread: monitor_packets_dir
@@ -197,15 +195,12 @@ impl SleepyHardware {
     }
 }
 
-// HACK: The outgoing read thread does a blocking `recv` on the tun, and there's no way to add a
-// timeout. We could get the fd out of the tun, and then poll it using the `nix` package. However,
-// we avoid an extra dependency by just shutting down the TUN, which at least on my system does
-// cause the recv to be interrupted.
 impl Drop for SleepyHardware {
     fn drop(&mut self) {
-        self.tun_is_shutdown
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.tun.shutdown().expect("Error closing TUN");
+        // shuts down the in-progress tun.recv. I believe it's `poll`-ing on a pipe
+        self.tun_interrupt_event
+            .trigger()
+            .expect("Failed to trigger tun_rs InterruptEvent during sleepy shutdown");
     }
 }
 
@@ -225,12 +220,12 @@ fn outgoing_read_thread(
     read_request_rx: mpsc::Receiver<()>,
     tx: mpsc::Sender<Event>,
     tun: Arc<tun_rs::SyncDevice>,
-    tun_is_shutdown: Arc<AtomicBool>,
+    tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
     epoch: Instant,
 ) {
     while let Ok(()) = read_request_rx.recv() {
         let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
-        match tun.recv(&mut buf) {
+        match tun.recv_intr(&mut buf, &tun_interrupt_event) {
             Ok(len) => {
                 buf.shrink(len);
                 if tx
@@ -246,9 +241,7 @@ fn outgoing_read_thread(
             }
             Err(err) => {
                 // if we are shutting down, ignore ConnectionAborted error -- that's normal.
-                if !(err.kind() == std::io::ErrorKind::ConnectionAborted
-                    && tun_is_shutdown.load(std::sync::atomic::Ordering::SeqCst))
-                {
+                if err.kind() != std::io::ErrorKind::Interrupted {
                     log::error!("Outgoing read error (from tun): {err:?}");
                 }
             }

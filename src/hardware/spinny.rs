@@ -105,6 +105,7 @@ impl SpinnyHardware {
                 // ideally we'd put this recv outside the loop, but given how small it is I
                 // don't think it matters.
                 let mut tun_recv_buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
+                // tun is in nonblocking mode
                 match self.tun.recv(&mut tun_recv_buf) {
                     Ok(len) => {
                         self.read_outgoing.replace(false);
