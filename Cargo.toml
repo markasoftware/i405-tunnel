@@ -20,7 +20,7 @@ mtu = "0.3.0"
 rand_chacha = "0.10.0"
 rand = { version = "0.10.0", features = ["sys_rng"] }
 tun-rs = { version = "2.8.1", features = ["interruptible"] }
-wolfssl.branch = "markasoftware/psk-and-rw-signatures"
+wolfssl.branch = "markasoftware/i405"
 wolfssl.git = "https://github.com/markasoftware/wolfssl-rs"
 
 [dev-dependencies]

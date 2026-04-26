@@ -264,7 +264,7 @@ fn wan_packet_length() {
     let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
 
     let dtls_packet_length: usize =
-        usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH - 12);
+        usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH);
 
     simulated_hardware.run_until(&mut cores, 1);
     let handshake = simulated_hardware.all_wan_packets();

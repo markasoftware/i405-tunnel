@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::constants::{
-    DTLS_MAX_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH,
+    DTLS_HEADER_LENGTH, IPV4_HEADER_LENGTH, IPV6_HEADER_LENGTH, UDP_HEADER_LENGTH,
 };
 
 pub(crate) fn ns_to_str(ns: u64) -> String {
@@ -24,7 +24,7 @@ pub(crate) fn ip_to_dtls_length(ip_mtu: u16, peer: SocketAddr) -> u16 {
 }
 
 pub(crate) fn ip_to_i405_length(ip_mtu: u16, peer: SocketAddr) -> u16 {
-    ip_to_dtls_length(ip_mtu, peer) - DTLS_MAX_HEADER_LENGTH
+    ip_to_dtls_length(ip_mtu, peer) - DTLS_HEADER_LENGTH
 }
 
 pub(crate) fn timestamp_to_instant(epoch: Instant, timestamp: u64) -> Instant {
@@ -147,11 +147,11 @@ mod test {
     #[test]
     fn basic_ip_to_i405_length() {
         assert_eq!(
-            ip_to_i405_length(1000 + 12 + 22 + 8 + 20, "127.0.0.1:1405".parse().unwrap()),
+            ip_to_i405_length(1000 + 22 + 8 + 20, "127.0.0.1:1405".parse().unwrap()),
             1000
         );
         assert_eq!(
-            ip_to_i405_length(1000 + 12 + 22 + 8 + 20, "[fe80::]:1405".parse().unwrap()),
+            ip_to_i405_length(1000 + 22 + 8 + 20, "[fe80::]:1405".parse().unwrap()),
             980
         );
     }

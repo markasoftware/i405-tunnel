@@ -20,7 +20,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::{
     array_array::IpPacketBuffer,
-    constants::{DTLS_TYPICAL_HEADER_LENGTH, MAX_IP_PACKET_LENGTH},
+    constants::{DTLS_HEADER_LENGTH, MAX_IP_PACKET_LENGTH},
 };
 
 pub(crate) struct NegotiatingSession {
@@ -248,11 +248,11 @@ impl EstablishedSession {
                 // checks all around that only packets of the correct size can get passed through to
                 // here.
                 assert!(
-                    result.len() == len + usize::from(DTLS_TYPICAL_HEADER_LENGTH),
+                    result.len() == len + usize::from(DTLS_HEADER_LENGTH),
                     "Ciphertext length {} is not {}+(dtls header length: {})",
                     result.len(),
                     len,
-                    DTLS_TYPICAL_HEADER_LENGTH,
+                    DTLS_HEADER_LENGTH,
                 );
                 Ok(result)
             }
