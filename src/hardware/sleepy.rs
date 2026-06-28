@@ -18,7 +18,7 @@ use crate::{
     utils::{ChannelThread, RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
-use super::real::{QdiscSettings, configure_qdisc, epoch_timestamp};
+use super::{real::{configure_qdisc, epoch_timestamp, QdiscSettings}, ReadIncomingPacket, ReadOutgoingPacket, ShutdownRequested};
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
@@ -50,6 +50,8 @@ pub(crate) struct SleepyHardware {
     // dropped, then the threads may try to send to their events_txs after the receiver has been
     // dropped, and get errors.
     events_rx: mpsc::Receiver<Event>,
+
+    shutdown_requested: ShutdownRequested,
 }
 
 impl SleepyHardware {
@@ -83,11 +85,12 @@ impl SleepyHardware {
 
         let epoch = Instant::now();
 
+        let shutdown_requested = ShutdownRequested::new();
         ctrlc::set_handler({
-            let events_tx = events_tx.clone();
+            let shutdown_requested = shutdown_requested.clone();
             move || {
                 log::info!("Shutting down I405 due to received signal");
-                events_tx.send(Event::Terminate).unwrap();
+                shutdown_requested.user_request_shutdown();
             }
         })
         .expect("Error installing signal handlers");
@@ -104,6 +107,7 @@ impl SleepyHardware {
             tun_interrupt_event: tun_interrupt_event.clone(),
 
             events_rx,
+            shutdown_requested,
 
             outgoing_read_thread: ChannelThread::spawn(outgoing_read_requests_tx, {
                 let events_tx = events_tx.clone();
@@ -131,7 +135,7 @@ impl SleepyHardware {
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
     pub(crate) fn run(&self, mut core: impl core::Core) {
-        loop {
+        while !self.shutdown_requested.has_core_requested_shutdown() {
             // we don't do precise sleep for timers, because everything time-sensitive that the Core
             // does is done via timestamps on other core methods. It's never important that the core
             // itself do something at a precise timestamp.
@@ -172,7 +176,8 @@ impl SleepyHardware {
                         // important to set to false /before/ calling the event handler, because the
                         // event handler may set it back to true:
                         self.currently_reading_outgoing.replace(false);
-                        core.on_read_outgoing_packet(self, &packet, timestamp);
+                        // core.on_read_outgoing_packet(self, &packet, timestamp);
+                        todo!();
                     } else {
                         log::warn!(
                             "Dropping packet because currently_reading_outgoing=false (this is normal after reconnection)"
@@ -180,12 +185,13 @@ impl SleepyHardware {
                     }
                 }
                 Ok(Event::IncomingRead { addr, packet }) => {
-                    core.on_read_incoming_packet(self, &packet, addr);
+                    //core.on_read_incoming_packet(self, &packet, addr);
+                    todo!();
                 }
-                Ok(Event::Terminate) => return core.on_terminate(self),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let activated_timer = self.timer.take();
-                    core.on_timer(self, activated_timer.unwrap());
+                    //core.on_timer(self, activated_timer.unwrap());
+                    todo!();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     panic!("events_rx shouldn't disconnect as long as the hardware lives.")
@@ -204,6 +210,8 @@ impl Drop for SleepyHardware {
     }
 }
 
+// the plan is to remove these Events entirely. Instead, we'll make everything polling-based, and
+// then simply use a condition variable triggered by each sending thread to 
 enum Event {
     OutgoingRead {
         timestamp: u64,
@@ -213,7 +221,6 @@ enum Event {
         addr: SocketAddr,
         packet: IpPacketBuffer,
     },
-    Terminate,
 }
 
 fn outgoing_read_thread(
@@ -316,21 +323,26 @@ impl Hardware for SleepyHardware {
         self.timer.replace(Some(timestamp))
     }
 
+    fn get_timer(&self) -> Option<u64> {
+        self.timer.get()
+    }
+
     fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
         // TODO disconnection doesn't work right now so we don't connect at all:
         // self.socket.connect(socket_addr)?;
         Ok(())
     }
 
-    fn read_outgoing_packet(&self) {
+    fn read_outgoing_packet(&self) -> Option<ReadOutgoingPacket> {
         // there was a serious bug here previously, where we'd send an outgoing read request to the
         // outgoing read thread even if we already had an outstanding request. The problem is, we
         // set currently_reading_outgoing to false when we receive an incoming packet, so if
         // multiple requests were sent to the thread, we'd drop the second one upon receipt. I'm not
         // sure how to test this super effectively other than the TCP throughput end-to-end test.
-        if !self.currently_reading_outgoing.replace(true) {
-            self.outgoing_read_thread.tx().send(()).unwrap();
-        }
+        // if !self.currently_reading_outgoing.replace(true) {
+        //     self.outgoing_read_thread.tx().send(()).unwrap();
+        // }
+        todo!();
     }
 
     // TODO consider remove Result from signature since it always succeeds (or, at least, we don't
@@ -425,5 +437,17 @@ impl Hardware for SleepyHardware {
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
         configure_qdisc(&self.tun.name()?, &self.tun, settings)
+    }
+
+    fn has_user_requested_shutdown(&self) -> bool {
+        self.shutdown_requested.has_user_requested_shutdown()
+    }
+
+    fn shutdown(&self) {
+        self.shutdown_requested.core_request_shutdown();
+    }
+
+    fn read_incoming_packet(&self) -> Option<ReadIncomingPacket> {
+        todo!();
     }
 }

@@ -20,26 +20,9 @@ impl Core {
 }
 
 impl super::Core for Core {
-    fn on_timer(&mut self, _hardware: &impl Hardware, _timer_timestamp: u64) {
-        panic!("noop core shouldn't have timer triggered");
+    fn on_event(&mut self,hardware: &impl Hardware) {
+        if hardware.has_user_requested_shutdown() {
+            hardware.shutdown();
+        }
     }
-
-    fn on_read_outgoing_packet(
-        &mut self,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) {
-        panic!("noop core shouldn't receive outgoing packets");
-    }
-
-    fn on_read_incoming_packet(
-        &mut self,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _peer: SocketAddr,
-    ) {
-    }
-
-    fn on_terminate(self, _hardware: &impl Hardware) {}
 }

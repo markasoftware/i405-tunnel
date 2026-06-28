@@ -10,13 +10,13 @@ use crate::core::{
     C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
     established_connection,
 };
-use crate::hardware::Hardware;
 use crate::hardware::real::QdiscSettings;
+use crate::hardware::{Hardware, ReadIncomingPacket};
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
 
-use super::established_connection::IsConnectionOpen;
+use super::established_connection::OnEventResult;
 use super::{C2S_MAX_RETRANSMITS, C2S_MAX_TIMEOUT, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
@@ -57,63 +57,33 @@ fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionStat
 }
 
 impl super::Core for Core {
-    fn on_timer(&mut self, hardware: &impl Hardware, timer_timestamp: u64) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_timer(&self.config, hardware, timer_timestamp)
-        });
-    }
-
-    fn on_read_outgoing_packet(
-        &mut self,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_read_outgoing_packet(&self.config, hardware, packet, recv_timestamp)
-        });
-    }
-
-    fn on_read_incoming_packet(
-        &mut self,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        _peer: SocketAddr,
-    ) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_read_incoming_packet(&self.config, hardware, packet)
-        });
-    }
-
-    fn on_terminate(self, hardware: &impl Hardware) {
-        if let Err(err) = self.state.unwrap().on_terminate(&self.config, hardware) {
-            log::error!("Error while terminating connection: {:?}", err);
+    fn on_event(&mut self, hardware: &impl Hardware) {
+        // keep calling the state's on_event until it makes no progress.
+        loop {
+            match std::mem::take(&mut self.state)
+                .unwrap()
+                .on_event_client(&self.config, hardware)
+            {
+                // made progress, keep looping
+                Ok((true, new_state)) => self.state = Some(new_state),
+                // made no progress, terminate
+                Ok((false, new_state)) => {
+                    self.state = Some(new_state);
+                    return;
+                }
+                // TODO don't panic, instead use the config to decide to quit or retry
+                Err(err) => panic!("Connection state error! {}", err),
+            }
         }
     }
 }
 
 enum_dispatch! {
     trait ConnectionStateTrait {
-        fn on_timer(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            timer_timestamp: u64,
-        ) -> Result<ConnectionState>;
-        fn on_read_outgoing_packet(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            packet: &[u8],
-        recv_timestamp: u64,
-        ) -> Result<ConnectionState>;
-        fn on_read_incoming_packet(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            packet: &[u8],
-        ) -> Result<ConnectionState>;
-        fn on_terminate(self, config: &Config, hardware: &impl Hardware) -> Result<()>;
+        // only has to do one itsy bit of work; outer loop will keep calling it as long as the first
+        // component of the retval stays true.
+        // _client in name to avoid name conflicts that enum_dispatch hates
+        fn on_event_client(self, config: &Config, hardware: &impl Hardware) -> Result<(bool, ConnectionState)>;
     }
 
     #[derive(Debug)]
@@ -121,6 +91,21 @@ enum_dispatch! {
         NoConnection(NoConnection),
         C2SHandshakeSent(C2SHandshakeSent),
         EstablishedConnection(EstablishedConnection),
+        Shutdown(Shutdown),
+    }
+}
+
+#[derive(Debug)]
+struct Shutdown {}
+
+impl ConnectionStateTrait for Shutdown {
+    fn on_event_client(
+        self,
+        _config: &Config,
+        hardware: &impl Hardware,
+    ) -> Result<(bool, ConnectionState)> {
+        hardware.shutdown();
+        Ok((false, ConnectionState::Shutdown(self)))
     }
 }
 
@@ -174,72 +159,70 @@ impl NoConnection {
 }
 
 impl ConnectionStateTrait for NoConnection {
-    fn on_timer(
+    fn on_event_client(
         self,
         config: &Config,
         hardware: &impl Hardware,
-        _timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        let (new_negotiation, packets_to_send, next_timeout) =
-            self.negotiation.has_timed_out(hardware.timestamp())?;
-        log::warn!(
-            "DTLS handshake timeout, retrying now. Next timeout in {}. Is the server running?",
-            // unfortunate hackery to get integer seconds
-            ns_to_str(
-                (next_timeout - hardware.timestamp() + 1_000_000) / 1_000_000_000 * 1_000_000_000
-            )
-        );
-        Self::from_triple(
-            config,
-            hardware,
-            new_negotiation,
-            &packets_to_send,
-            next_timeout,
-        )
-        .map(ConnectionState::NoConnection)
-    }
-
-    fn on_read_outgoing_packet(
-        self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        panic!(
-            "on_read_outgoing_packet shouldn't happen during NoConnection -- we never ask for outgoing packets"
-        );
-    }
-
-    fn on_read_incoming_packet(
-        self,
-        config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-    ) -> Result<ConnectionState> {
-        match self.negotiation.make_progress(packet, hardware.timestamp()) {
-            dtls::NegotiateResult::Ready(session, to_send) => {
-                log::info!("DTLS handshake complete, proceeding to in-protocol handshake");
-                send_packets(config, hardware, &to_send)?;
-                C2SHandshakeSent::new(config, hardware, session)
-                    .map(ConnectionState::C2SHandshakeSent)
+    ) -> Result<(bool, ConnectionState)> {
+        //// TERMINATING
+        if hardware.has_user_requested_shutdown() {
+            for packet in self.negotiation.terminate()? {
+                hardware.send_outgoing_packet(&packet[..], config.peer_address, None)?;
             }
-            dtls::NegotiateResult::NeedRead(session, to_send, timeout) => {
-                Self::from_triple(config, hardware, session, &to_send, timeout)
-                    .map(ConnectionState::NoConnection)
-            }
-            dtls::NegotiateResult::Terminated => Ok(ConnectionState::NoConnection(
-                NoConnection::new(config, hardware)?,
-            )),
-            dtls::NegotiateResult::Err(err) => Err(err),
+            return Ok((true, ConnectionState::Shutdown(Shutdown {})));
         }
-    }
 
-    fn on_terminate(self, config: &Config, hardware: &impl Hardware) -> Result<()> {
-        for packet in self.negotiation.terminate()? {
-            hardware.send_outgoing_packet(&packet[..], config.peer_address, None)?;
+        //// TIMER
+        if hardware.has_timer_fired() {
+            let (new_negotiation, packets_to_send, next_timeout) =
+                self.negotiation.has_timed_out(hardware.timestamp())?;
+            log::warn!(
+                "DTLS handshake timeout, retrying now. Next timeout in {}. Is the server running?",
+                // unfortunate hackery to get integer seconds
+                ns_to_str(
+                    (next_timeout - hardware.timestamp() + 1_000_000) / 1_000_000_000
+                        * 1_000_000_000
+                )
+            );
+            return Ok((
+                true,
+                ConnectionState::NoConnection(Self::from_triple(
+                    config,
+                    hardware,
+                    new_negotiation,
+                    &packets_to_send,
+                    next_timeout,
+                )?),
+            ));
         }
-        Ok(())
+
+        //// READ INCOMING PACKET
+        if let Some(ReadIncomingPacket { packet, peer: _ }) = hardware.read_incoming_packet() {
+            return Ok((
+                true,
+                match self
+                    .negotiation
+                    .make_progress(&packet, hardware.timestamp())
+                {
+                    dtls::NegotiateResult::Ready(session, to_send) => {
+                        log::info!("DTLS handshake complete, proceeding to in-protocol handshake");
+                        send_packets(config, hardware, &to_send)?;
+                        C2SHandshakeSent::new(config, hardware, session)
+                            .map(ConnectionState::C2SHandshakeSent)?
+                    }
+                    dtls::NegotiateResult::NeedRead(session, to_send, timeout) => {
+                        Self::from_triple(config, hardware, session, &to_send, timeout)
+                            .map(ConnectionState::NoConnection)?
+                    }
+                    dtls::NegotiateResult::Terminated => {
+                        ConnectionState::NoConnection(NoConnection::new(config, hardware)?)
+                    }
+                    dtls::NegotiateResult::Err(err) => return Err(err),
+                },
+            ));
+        }
+
+        Ok((false, ConnectionState::NoConnection(self)))
     }
 }
 
@@ -301,200 +284,160 @@ impl C2SHandshakeSent {
 }
 
 impl ConnectionStateTrait for C2SHandshakeSent {
-    fn on_timer(
+    fn on_event_client(
         mut self,
         config: &Config,
         hardware: &impl Hardware,
-        _timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        log::warn!(
-            "In-protocol handshake timeout; we sent C2S handshake {} ago and received no response, trying again.",
-            ns_to_str(self.current_timeout_interval),
-        );
-        self.send_one_handshake(config, hardware)?;
-        if self.num_timeouts_happened >= C2S_MAX_RETRANSMITS {
-            // time to go back to the stone age
+    ) -> Result<(bool, ConnectionState)> {
+        //// TERMINATING
+        if hardware.has_user_requested_shutdown() {
+            for packet in self.session.terminate()? {
+                hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
+            }
+            return Ok((true, ConnectionState::Shutdown(Shutdown {})));
+        }
+
+        //// TIMER
+        if hardware.has_timer_fired() {
             log::warn!(
-                "Ran out of all {} C2S handshake retries -- going back to DTLS negotiation",
-                C2S_MAX_RETRANSMITS
+                "In-protocol handshake timeout; we sent C2S handshake {} ago and received no response, trying again.",
+                ns_to_str(self.current_timeout_interval),
             );
-            return Ok(ConnectionState::NoConnection(NoConnection::new(
-                config, hardware,
-            )?));
-        }
-
-        self.num_timeouts_happened += 1;
-        self.current_timeout_interval =
-            (self.current_timeout_interval * 2).clamp(0, C2S_MAX_TIMEOUT);
-        let next_timeout_instant = hardware.timestamp() + self.current_timeout_interval;
-        hardware.set_timer(next_timeout_instant);
-        Ok(ConnectionState::C2SHandshakeSent(self))
-    }
-
-    fn on_read_outgoing_packet(
-        self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        panic!("During C2S handshake we don't read outgoing packets -- something's wrong");
-    }
-
-    fn on_read_incoming_packet(
-        mut self,
-        config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-    ) -> Result<ConnectionState> {
-        let cleartext_packet = match self.session.decrypt_datagram(packet) {
-            dtls::DecryptResult::Decrypted(cleartext_packet) => cleartext_packet,
-            dtls::DecryptResult::SendThese(send_these) => {
-                for packet in send_these {
-                    hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
-                }
-                return Ok(ConnectionState::C2SHandshakeSent(self));
-            }
-            dtls::DecryptResult::Terminated => {
-                return Ok(ConnectionState::NoConnection(NoConnection::new(
-                    config, hardware,
-                )?));
-            }
-            dtls::DecryptResult::Err(err) => return Err(err),
-        };
-        // It really should be an S2C handshake. The server shouldn't send us anything but an
-        // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
-        // so we can't get anything out-of-order here.
-        let mut reader = messages::PacketReader::new(&cleartext_packet);
-        match reader.try_read_message_no_ack()? {
-            Some(messages::Message::ServerToClientHandshake(s2c_handshake)) => {
-                if let Some(extra_msg) = reader.try_read_message_no_ack()? {
-                    bail!(
-                        "There were other messages in the packet with the S2C handshake: {extra_msg:?}"
-                    );
-                }
-
-                if !s2c_handshake.success {
-                    bail!(
-                        "S2C handshake indicated failure on the server-side. Remote protocol version: {} (vs ours {})",
-                        s2c_handshake.protocol_version,
-                        PROTOCOL_VERSION
-                    );
-                }
-
-                if s2c_handshake.protocol_version != PROTOCOL_VERSION {
-                    bail!(
-                        "The server sent an incompatible protocol version, {} (vs ours {})",
-                        s2c_handshake.protocol_version,
-                        PROTOCOL_VERSION
-                    );
-                }
-
-                log::info!(
-                    "In-protocol handshake complete, remote protocol version {}, proceeding to established connection",
-                    s2c_handshake.protocol_version
-                );
-
-                // maybe one day will pass in the server's protocol version here?
-                let config = established_connection::Config {
-                    wire: config.client_wire_config.clone(),
-                    reverse_packet_interval_min: config.server_wire_config.packet_interval_max,
-                    peer: config.peer_address,
-                    monitor_packets: if config.monitor_packets {
-                        established_connection::MonitorPackets::Local
-                    } else {
-                        established_connection::MonitorPackets::No
-                    },
-                };
-                Ok(ConnectionState::EstablishedConnection(
-                    EstablishedConnection::new(hardware, self.session, config)?,
-                ))
-            }
-            Some(other_msg) => bail!(
-                "The server sent a different message instead of S2C handshake: {:?}",
-                other_msg
-            ),
-            None => bail!("Server sent an empty packet when it should have sent an S2C handshake"),
-        }
-    }
-
-    fn on_terminate(self, config: &Config, hardware: &impl Hardware) -> Result<()> {
-        for packet in self.session.terminate()? {
-            hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
-        }
-        Ok(())
-    }
-}
-
-impl EstablishedConnection {
-    // stupid naming _s because enum_dispatch won't let us use the same name here and in server
-    fn handle_is_connection_open_c(
-        self,
-        config: &Config,
-        hardware: &impl Hardware,
-        is_connection_open: IsConnectionOpen,
-    ) -> Result<ConnectionState> {
-        match is_connection_open {
-            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
-            IsConnectionOpen::TimedOut => {
+            self.send_one_handshake(config, hardware)?;
+            if self.num_timeouts_happened >= C2S_MAX_RETRANSMITS {
+                // time to go back to the stone age
                 log::warn!(
-                    "Received no packets from server in a while -- returning to NoConnection state"
+                    "Ran out of all {} C2S handshake retries -- going back to DTLS negotiation",
+                    C2S_MAX_RETRANSMITS
                 );
-                Ok(ConnectionState::NoConnection(NoConnection::new(
-                    config, hardware,
-                )?))
+                return Ok((
+                    true,
+                    ConnectionState::NoConnection(NoConnection::new(config, hardware)?),
+                ));
             }
-            IsConnectionOpen::TerminatedNormally => {
-                log::info!(
-                    "Client terminated connection normally -- returning to NoConnection state"
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new(
-                    config, hardware,
-                )?))
+
+            self.num_timeouts_happened += 1;
+            self.current_timeout_interval =
+                (self.current_timeout_interval * 2).clamp(0, C2S_MAX_TIMEOUT);
+            let next_timeout = hardware.timestamp() + self.current_timeout_interval;
+            hardware.set_timer(next_timeout);
+            return Ok((true, ConnectionState::C2SHandshakeSent(self)));
+        }
+
+        //// READ INCOMING PACKET
+        if let Some(ReadIncomingPacket { packet, peer: _ }) = hardware.read_incoming_packet() {
+            let cleartext_packet = match self.session.decrypt_datagram(&packet) {
+                dtls::DecryptResult::Decrypted(cleartext_packet) => cleartext_packet,
+                dtls::DecryptResult::SendThese(send_these) => {
+                    for packet in send_these {
+                        hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
+                    }
+                    return Ok((true, ConnectionState::C2SHandshakeSent(self)));
+                }
+                dtls::DecryptResult::Terminated => {
+                    return Ok((
+                        true,
+                        ConnectionState::NoConnection(NoConnection::new(config, hardware)?),
+                    ));
+                }
+                dtls::DecryptResult::Err(err) => return Err(err),
+            };
+            // It really should be an S2C handshake. The server shouldn't send us anything but an
+            // S2C handshake until we send it /another/ packet after receiving their S2C handshake,
+            // so we can't get anything out-of-order here.
+            let mut reader = messages::PacketReader::new(&cleartext_packet);
+            match reader.try_read_message_no_ack()? {
+                Some(messages::Message::ServerToClientHandshake(s2c_handshake)) => {
+                    if let Some(extra_msg) = reader.try_read_message_no_ack()? {
+                        bail!(
+                            "There were other messages in the packet with the S2C handshake: {extra_msg:?}"
+                        );
+                    }
+
+                    if !s2c_handshake.success {
+                        bail!(
+                            "S2C handshake indicated failure on the server-side. Remote protocol version: {} (vs ours {})",
+                            s2c_handshake.protocol_version,
+                            PROTOCOL_VERSION
+                        );
+                    }
+
+                    if s2c_handshake.protocol_version != PROTOCOL_VERSION {
+                        bail!(
+                            "The server sent an incompatible protocol version, {} (vs ours {})",
+                            s2c_handshake.protocol_version,
+                            PROTOCOL_VERSION
+                        );
+                    }
+
+                    log::info!(
+                        "In-protocol handshake complete, remote protocol version {}, proceeding to established connection",
+                        s2c_handshake.protocol_version
+                    );
+
+                    // maybe one day will pass in the server's protocol version here?
+                    let config = established_connection::Config {
+                        wire: config.client_wire_config.clone(),
+                        reverse_packet_interval_min: config.server_wire_config.packet_interval_max,
+                        peer: config.peer_address,
+                        monitor_packets: if config.monitor_packets {
+                            established_connection::MonitorPackets::Local
+                        } else {
+                            established_connection::MonitorPackets::No
+                        },
+                    };
+                    return Ok((
+                        true,
+                        ConnectionState::EstablishedConnection(EstablishedConnection::new(
+                            hardware,
+                            self.session,
+                            config,
+                        )?),
+                    ));
+                }
+                Some(other_msg) => bail!(
+                    "The server sent a different message instead of S2C handshake: {:?}",
+                    other_msg
+                ),
+                None => {
+                    bail!("Server sent an empty packet when it should have sent an S2C handshake")
+                }
             }
         }
+
+        Ok((false, ConnectionState::C2SHandshakeSent(self)))
     }
 }
 
 impl ConnectionStateTrait for EstablishedConnection {
-    fn on_timer(
-        mut self,
+    fn on_event_client(
+        self,
         config: &Config,
         hardware: &impl Hardware,
-        timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        let is_connection_open =
-            EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
-        self.handle_is_connection_open_c(config, hardware, is_connection_open)
-    }
-
-    fn on_read_outgoing_packet(
-        mut self,
-        _config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        EstablishedConnection::on_read_outgoing_packet(&mut self, hardware, packet, recv_timestamp);
-        Ok(ConnectionState::EstablishedConnection(self))
-    }
-
-    fn on_read_incoming_packet(
-        mut self,
-        config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-    ) -> Result<ConnectionState> {
-        let is_connection_open =
-            EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
-        self.handle_is_connection_open_c(config, hardware, is_connection_open)
-    }
-
-    fn on_terminate(self, config: &Config, hardware: &impl Hardware) -> Result<()> {
-        for packet in EstablishedConnection::on_terminate_inner(self)? {
-            hardware.send_outgoing_packet(&packet, config.peer_address, None)?;
-        }
-        Ok(())
+    ) -> Result<(bool, ConnectionState)> {
+        let (made_progress, on_event_result) = EstablishedConnection::on_event(self, hardware)?;
+        let new_connection_state = match on_event_result {
+            OnEventResult::StillConnected(established_connection) => {
+                ConnectionState::EstablishedConnection(established_connection)
+            }
+            OnEventResult::TimedOut => {
+                log::warn!(
+                    "Received no packets from server in a while -- returning to NoConnection state"
+                );
+                ConnectionState::NoConnection(NoConnection::new(config, hardware)?)
+            }
+            OnEventResult::RemoteTerminatedNormally => {
+                log::info!(
+                    "Server terminated connection normally -- returning to NoConnection state"
+                );
+                ConnectionState::NoConnection(NoConnection::new(config, hardware)?)
+            }
+            OnEventResult::LocalTerminatedNormally => {
+                log::info!("Local shutdown -- entering Shutdown state");
+                ConnectionState::Shutdown(Shutdown {})
+            }
+        };
+        Ok((made_progress, new_connection_state))
     }
 }
 

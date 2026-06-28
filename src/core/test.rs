@@ -687,23 +687,18 @@ fn client_termination_and_reconnect() {
         1
     );
 
-    let original_client_core = cores.insert(
-        client_addr(),
-        core::noop::Core::new(&simulated_hardware.hardware(client_addr()))
-            .unwrap()
-            .into(),
-    );
-    original_client_core
-        .unwrap()
-        .on_terminate(&simulated_hardware.hardware(client_addr()));
+    // shut down and replace the core
+    simulated_hardware.request_shutdown(&client_addr());
+    simulated_hardware.run_until(&mut cores, ms(2.001));
     let new_client_core = core::client::Core::new(
         default_client_config(),
         &simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
     cores.insert(client_addr(), new_client_core.into());
+    simulated_hardware.clear_requested_shutdown(&client_addr());
 
-    simulated_hardware.run_until(&mut cores, ms(2.001));
+    simulated_hardware.run_until(&mut cores, ms(2.002));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
     simulated_hardware.run_until(&mut cores, ms(4.0));
     assert_eq!(
@@ -729,27 +724,21 @@ fn server_termination_and_reconnect() {
         1
     );
 
-    let original_server_core = cores.insert(
-        server_addr(),
-        core::noop::Core::new(&simulated_hardware.hardware(server_addr()))
-            .unwrap()
-            .into(),
-    );
-    original_server_core
-        .unwrap()
-        .on_terminate(&simulated_hardware.hardware(server_addr()));
+    simulated_hardware.request_shutdown(&server_addr());
+    simulated_hardware.run_until(&mut cores, ms(2.001));
     let new_server_core = core::server::Core::new(
         default_server_config(),
         &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     cores.insert(server_addr(), new_server_core.into());
+    simulated_hardware.clear_requested_shutdown(&server_addr());
 
     // whether the simulated core will process incoming or outgoing packets first is indeterminate,
     // and if it processes this outgoing packet first, then it will start preparing a packet to fire
     // off, then immediately discard it. So we want to wait to enqueue any packets until the new
     // connection is made.
-    simulated_hardware.run_until(&mut cores, ms(2.001));
+    simulated_hardware.run_until(&mut cores, ms(2.002));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
     simulated_hardware.run_until(&mut cores, ms(4.0));
     assert_eq!(

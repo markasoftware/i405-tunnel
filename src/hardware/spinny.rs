@@ -2,14 +2,13 @@ use std::{
     cell::Cell,
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
 
 use super::{
-    Hardware,
+    Hardware, ReadIncomingPacket, ReadOutgoingPacket, ShutdownRequested,
     real::{QdiscSettings, configure_qdisc, epoch_timestamp},
 };
 use crate::{
@@ -30,8 +29,7 @@ pub(crate) struct SpinnyHardware {
     timer: Cell<Option<u64>>,
     // whether we are actively polling for an outgoing read
     read_outgoing: Cell<bool>,
-    // set to true if we should shut down when able
-    shutting_down: Arc<AtomicBool>,
+    shutdown_requested: ShutdownRequested,
 
     next_outgoing_packet_id: Cell<u64>,
     deviation_stats_thread: Option<DeviationStatsThread>,
@@ -58,12 +56,14 @@ impl SpinnyHardware {
 
         let epoch = Instant::now();
 
-        let shutting_down = Arc::new(AtomicBool::new(false));
-        let shutting_down_for_ctrlc_thread = shutting_down.clone();
+        let shutdown_requested = ShutdownRequested::new();
 
-        ctrlc::set_handler(move || {
-            log::info!("Shutting down I405 due to received signal");
-            shutting_down_for_ctrlc_thread.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctrlc::set_handler({
+            let shutdown_requested = shutdown_requested.clone();
+            move || {
+                log::info!("Shutting down I405 due to received signal");
+                shutdown_requested.user_request_shutdown();
+            }
         })
         .map_err(|err| anyhow!(err).context("Failed to set ctrl-c handler"))?;
 
@@ -73,7 +73,7 @@ impl SpinnyHardware {
 
             timer: Cell::new(None),
             read_outgoing: Cell::new(false),
-            shutting_down,
+            shutdown_requested,
 
             next_outgoing_packet_id: Cell::new(0),
             deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
@@ -89,14 +89,13 @@ impl SpinnyHardware {
 
     pub(crate) fn run(&self, mut core: impl core::Core) {
         // 1. Check if we should shut down
-        while !self
-            .shutting_down
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        while !self.shutdown_requested.has_core_requested_shutdown() {
             // 1. Timer
             if let Some(timer) = self.timer.get() {
                 if Instant::now() >= timestamp_to_instant(self.epoch, timer) {
-                    core.on_timer(self, timer);
+                    self.timer.set(None);
+                    // core.on_timer(self, timer);
+                    todo!();
                 }
             }
 
@@ -110,11 +109,12 @@ impl SpinnyHardware {
                     Ok(len) => {
                         self.read_outgoing.replace(false);
                         tun_recv_buf.shrink(len);
-                        core.on_read_outgoing_packet(
-                            self,
-                            &tun_recv_buf,
-                            instant_to_timestamp(self.epoch, Instant::now()),
-                        );
+                        // core.on_read_outgoing_packet(
+                        //     self,
+                        //     &tun_recv_buf,
+                        //     instant_to_timestamp(self.epoch, Instant::now()),
+                        // );
+                        todo!();
                     }
                     Err(err) => {
                         if err.kind() != std::io::ErrorKind::WouldBlock {
@@ -129,7 +129,8 @@ impl SpinnyHardware {
             match self.socket.recv_from(&mut socket_recv_buf) {
                 Ok((len, peer)) => {
                     socket_recv_buf.shrink(len);
-                    core.on_read_incoming_packet(self, &socket_recv_buf, peer);
+                    //core.on_read_incoming_packet(self, &socket_recv_buf, peer);
+                    todo!();
                 }
                 Err(err) => {
                     if err.kind() != std::io::ErrorKind::WouldBlock {
@@ -142,9 +143,7 @@ impl SpinnyHardware {
             // I suspect an std::hint::spin_loop() would be kinda useless here because the syscalls
             // above already make this into not quite a busy loop.
         }
-
-        // we got shutting down signal, finish up here.
-        core.on_terminate(self);
+        // once we reach here, terminate was requested. Just leave.
     }
 }
 
@@ -166,6 +165,10 @@ impl Hardware for SpinnyHardware {
         self.timer.replace(Some(timestamp))
     }
 
+    fn get_timer(&self) -> Option<u64> {
+        self.timer.get()
+    }
+
     fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
         // Socket disconnection doesn't work right now so we don't connect at all:
         // self.socket.connect(socket_addr)?;
@@ -173,8 +176,8 @@ impl Hardware for SpinnyHardware {
     }
 
     // remaining are different than in SleepyHardware
-    fn read_outgoing_packet(&self) {
-        self.read_outgoing.replace(true);
+    fn read_outgoing_packet(&self) -> Option<ReadOutgoingPacket> {
+        todo!();
     }
 
     fn send_outgoing_packet(
@@ -248,6 +251,18 @@ impl Hardware for SpinnyHardware {
 
     fn configure_qdisc(&self, settings: &QdiscSettings) -> Result<()> {
         configure_qdisc(&self.tun.name()?, &self.tun, settings)
+    }
+
+    fn has_user_requested_shutdown(&self) -> bool {
+        self.shutdown_requested.has_user_requested_shutdown()
+    }
+
+    fn shutdown(&self) {
+        self.shutdown_requested.core_request_shutdown();
+    }
+
+    fn read_incoming_packet(&self) -> Option<ReadIncomingPacket> {
+        todo!();
     }
 }
 

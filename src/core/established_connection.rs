@@ -1,11 +1,10 @@
 use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 
 use crate::{
-    array_array::IpPacketBuffer,
     defragger::Defragger,
     deques::{ArrDeque, GlobalBitArrDeque},
     dtls,
-    hardware::Hardware,
+    hardware::{Hardware, ReadIncomingPacket, ReadOutgoingPacket},
     jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
@@ -104,14 +103,14 @@ impl OutgoingConnection {
     fn on_read_outgoing_packet<H: Hardware>(
         &mut self,
         hardware: &H,
-        packet: &[u8],
-        _recv_timestamp: u64,
+        outgoing_packet: ReadOutgoingPacket,
     ) {
         assert!(
             self.queued_packets.len() < MAX_QUEUED_IP_PACKETS,
             "We never request to read outgoing packets when the queue of IP packets is already full"
         );
-        self.queued_packets.push_back(QueuedIpPacket::new(packet));
+        self.queued_packets
+            .push_back(QueuedIpPacket::new(&outgoing_packet.packet));
         self.maybe_request_outgoing_read(hardware);
     }
 
@@ -191,169 +190,181 @@ impl EstablishedConnection {
         self.config.peer
     }
 
-    pub(crate) fn on_timer(
-        &mut self,
-        hardware: &impl Hardware,
-        timer_timestamp: u64,
-    ) -> Result<IsConnectionOpen> {
-        // timer means that it's about time to send a packet -- let's finalize the packet and send
-        // it to the hardware!
-        let send_timestamp = timer_timestamp + self.config.wire.packet_finalize_delta;
-        let seqno = self.next_outgoing_seqno;
-        self.next_outgoing_seqno += 1;
-
-        let mut packet_builder = messages::PacketBuilder::new(self.i405_packet_length as usize);
-        let mut reliability_builder = self.remote_ack_handler.outgoing_packet_builder();
-
-        let could_add_seqno = packet_builder.try_add_message(
-            &Message::SequenceNumber(messages::SequenceNumber { seqno }),
-            &mut reliability_builder,
-        )?;
-        assert!(
-            could_add_seqno,
-            "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
-        );
-
-        self.packet_monitor.top_of_outgoing_packet(
-            hardware,
-            &mut packet_builder,
-            &mut reliability_builder,
-            send_timestamp,
-        )?;
-
-        // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
-        // computing the local acks is a substantial portion of the overall cost of building a new
-        // packet; it causes the jitter test to go measurably faster when this is commented out
-        // (even in release mode, though you have to increase the timespan of the jitter test to
-        // slow it down more)
-
-        // HACK: Every time the local_acks() iterator returns a new ack, it removes that ack from
-        // the generator. So we don't want to step through it until we're sure we have space to
-        // serialize the ack. So we have a dummy ack and make sure there's space for that each time.
-        // This would break for example if the acks became variable size (let's hope not!)
-        let dummy_ack = Message::Ack(messages::Ack {
-            first_acked_seqno: 0,
-            last_acked_seqno: 0,
-        });
-        let mut local_ack_iter = self.local_ack_generator.local_acks();
-        'local_ack_loop: while packet_builder.can_add_message(&dummy_ack) {
-            // it would be natural to have `... && let Some(local_ack) = ...` in the while
-            // condition, but that's not stable Rust yet.
-            if let Some(local_ack) = local_ack_iter.next() {
-                packet_builder
-                    .try_add_message(&Message::Ack(local_ack), &mut reliability_builder)?;
-            } else {
-                break 'local_ack_loop;
+    /// Returns whether any progress was made, and the state of the connection afterwards
+    pub(crate) fn on_event(mut self, hardware: &impl Hardware) -> Result<(bool, OnEventResult)> {
+        //// TERMINATED
+        if hardware.has_user_requested_shutdown() {
+            let peer = self.peer();
+            for packet in self.session.terminate()? {
+                hardware.send_outgoing_packet(&packet, peer, None)?;
             }
+            // don't /really/ need this, I think the client and server cores both arrange for it to
+            // be called anyway, but it can't hurt
+            hardware.shutdown();
+            return Ok((true, OnEventResult::LocalTerminatedNormally));
         }
 
-        // add PacketStatus messages
-        self.packet_monitor
-            .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder)?;
+        //// TIMER
+        // TODO should probably put timer before terminated?
+        if let Some(timer_timestamp) = hardware.get_fired_timer() {
+            // timer means that it's about time to send a packet -- let's finalize the packet and send
+            // it to the hardware!
+            let send_timestamp = timer_timestamp + self.config.wire.packet_finalize_delta;
+            let seqno = self.next_outgoing_seqno;
+            self.next_outgoing_seqno += 1;
 
-        // Retransmit reliable messages from rtx queue (after acks, before general IP packets)
-        while let Some(reliable_message) = self.reliable_message_rtx_queue.pop_front() {
-            let message = Message::from(reliable_message.clone());
-            let could_add = packet_builder.try_add_message(&message, &mut reliability_builder)?;
-            if could_add {
-                log::debug!("Retransmitting message {message:?}");
-            } else {
-                // No space left in packet, put the message back at the front of the queue
-                self.reliable_message_rtx_queue.push_front(reliable_message);
-                break;
+            let mut packet_builder = messages::PacketBuilder::new(self.i405_packet_length as usize);
+            let mut reliability_builder = self.remote_ack_handler.outgoing_packet_builder();
+
+            let could_add_seqno = packet_builder.try_add_message(
+                &Message::SequenceNumber(messages::SequenceNumber { seqno }),
+                &mut reliability_builder,
+            )?;
+            assert!(
+                could_add_seqno,
+                "Wasn't able to add seqno to packet (it's smaller than handshake, so this shouldn't be possible)"
+            );
+
+            self.packet_monitor.top_of_outgoing_packet(
+                hardware,
+                &mut packet_builder,
+                &mut reliability_builder,
+                send_timestamp,
+            )?;
+
+            // TODO I'm still a little worried that even when only 1 or 2 acks needs to be sent that
+            // computing the local acks is a substantial portion of the overall cost of building a new
+            // packet; it causes the jitter test to go measurably faster when this is commented out
+            // (even in release mode, though you have to increase the timespan of the jitter test to
+            // slow it down more)
+
+            // HACK: Every time the local_acks() iterator returns a new ack, it removes that ack from
+            // the generator. So we don't want to step through it until we're sure we have space to
+            // serialize the ack. So we have a dummy ack and make sure there's space for that each time.
+            // This would break for example if the acks became variable size (let's hope not!)
+            let dummy_ack = Message::Ack(messages::Ack {
+                first_acked_seqno: 0,
+                last_acked_seqno: 0,
+            });
+            let mut local_ack_iter = self.local_ack_generator.local_acks();
+            'local_ack_loop: while packet_builder.can_add_message(&dummy_ack) {
+                // it would be natural to have `... && let Some(local_ack) = ...` in the while
+                // condition, but that's not stable Rust yet.
+                if let Some(local_ack) = local_ack_iter.next() {
+                    packet_builder
+                        .try_add_message(&Message::Ack(local_ack), &mut reliability_builder)?;
+                } else {
+                    break 'local_ack_loop;
+                }
             }
-        }
 
-        self.outgoing_connection.try_to_dequeue(
-            hardware,
-            &mut packet_builder,
-            &mut reliability_builder,
-        );
+            // add PacketStatus messages
+            self.packet_monitor
+                .body_of_outgoing_packet(&mut packet_builder, &mut reliability_builder)?;
 
-        let outgoing_cleartext_packet = packet_builder.into_inner();
-        let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
-        hardware.send_outgoing_packet(
-            outgoing_packet.as_ref(),
-            self.config.peer,
-            Some(send_timestamp),
-        )?;
+            // Retransmit reliable messages from rtx queue (after acks, before general IP packets)
+            while let Some(reliable_message) = self.reliable_message_rtx_queue.pop_front() {
+                let message = Message::from(reliable_message.clone());
+                let could_add =
+                    packet_builder.try_add_message(&message, &mut reliability_builder)?;
+                if could_add {
+                    log::debug!("Retransmitting message {message:?}");
+                } else {
+                    // No space left in packet, put the message back at the front of the queue
+                    self.reliable_message_rtx_queue.push_front(reliable_message);
+                    break;
+                }
+            }
 
-        // Handle nacked reliability actions by adding them back to the rtx queue
-        for nack_action in reliability_builder.finalize() {
-            // just like in the ack case, I'd love to split this logic out into another function on
-            // `self`, but then `self` would be mutably borrowed multiple times. Let's just nest it
-            // for now. (Aside: I think the cool solution here would be )
-            match nack_action {
-                ReliabilityAction::ReliableMessage(reliable_message) => {
-                    // add it back on to the reliable messages queue, respecting capacity limit
-                    if self.reliable_message_rtx_queue.len() < RELIABLE_MESSAGE_RTX_QUEUE_LENGTH {
-                        log::debug!("NACK, pushing {reliable_message:?} onto rtx queue");
-                        self.reliable_message_rtx_queue.push_back(reliable_message);
-                    } else {
-                        // Queue is full, return an error
-                        bail!(
-                            "Reliable message RTX queue is full (capacity: {}), cannot add nacked message",
-                            RELIABLE_MESSAGE_RTX_QUEUE_LENGTH
-                        );
+            self.outgoing_connection.try_to_dequeue(
+                hardware,
+                &mut packet_builder,
+                &mut reliability_builder,
+            );
+
+            let outgoing_cleartext_packet = packet_builder.into_inner();
+            let outgoing_packet = self.session.encrypt_datagram(&outgoing_cleartext_packet)?;
+            hardware.send_outgoing_packet(
+                outgoing_packet.as_ref(),
+                self.config.peer,
+                Some(send_timestamp),
+            )?;
+
+            // Handle nacked reliability actions by adding them back to the rtx queue
+            for nack_action in reliability_builder.finalize() {
+                // just like in the ack case, I'd love to split this logic out into another function on
+                // `self`, but then `self` would be mutably borrowed multiple times. Let's just nest it
+                // for now. (Aside: I think the cool solution here would be )
+                match nack_action {
+                    ReliabilityAction::ReliableMessage(reliable_message) => {
+                        // add it back on to the reliable messages queue, respecting capacity limit
+                        if self.reliable_message_rtx_queue.len() < RELIABLE_MESSAGE_RTX_QUEUE_LENGTH
+                        {
+                            log::debug!("NACK, pushing {reliable_message:?} onto rtx queue");
+                            self.reliable_message_rtx_queue.push_back(reliable_message);
+                        } else {
+                            // Queue is full, return an error
+                            bail!(
+                                "Reliable message RTX queue is full (capacity: {}), cannot add nacked message",
+                                RELIABLE_MESSAGE_RTX_QUEUE_LENGTH
+                            );
+                        }
                     }
                 }
             }
-        }
 
-        // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
-        // we don't forget to update here:
-        // TODO enable this assertion, or ensure our code does not rely on send_outgoing_packet blocking until the designated send time
-        // assert!(
-        //     hardware.timestamp() >= send_timestamp,
-        //     "hardware.send_outgoing_packet returned too early"
-        // );
-        let next_interval = self.jitterator.next_interval();
-        hardware.register_interval(next_interval);
-        hardware.set_timer(send_timestamp + next_interval - self.config.wire.packet_finalize_delta);
+            // this is mainly to make sure that if we ever change the semantics of send_outgoing_packet,
+            // we don't forget to update here:
+            // TODO enable this assertion, or ensure our code does not rely on send_outgoing_packet blocking until the designated send time
+            // assert!(
+            //     hardware.timestamp() >= send_timestamp,
+            //     "hardware.send_outgoing_packet returned too early"
+            // );
+            let next_interval = self.jitterator.next_interval();
+            hardware.register_interval(next_interval);
+            hardware
+                .set_timer(send_timestamp + next_interval - self.config.wire.packet_finalize_delta);
 
-        // check if the incoming connection timed out
-        if hardware.timestamp() > self.last_incoming_packet_timestamp + self.config.wire.timeout {
-            return Ok(IsConnectionOpen::TimedOut);
-        }
-
-        Ok(IsConnectionOpen::Yes)
-    }
-
-    pub(crate) fn on_read_outgoing_packet<H: Hardware>(
-        &mut self,
-        hardware: &H,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) {
-        self.outgoing_connection
-            .on_read_outgoing_packet(hardware, packet, recv_timestamp);
-    }
-
-    /// Returns an error if something unexpected happened, vs Ok(IsConnectionOpen::No) means the
-    /// other side terminated the connection normally in this packet.
-    pub(crate) fn on_read_incoming_packet<H: Hardware>(
-        &mut self,
-        hardware: &H,
-        packet: &[u8],
-    ) -> Result<IsConnectionOpen> {
-        match self.session.decrypt_datagram(packet) {
-            dtls::DecryptResult::Decrypted(cleartext_packet) => {
-                // notice how we only update the last_incoming_packet_timestamp on a successful
-                // decryption. Otherwise, eg if the client restarts unexpectedly, it might keep
-                // attempting a handshake so we won't time out.
-                self.last_incoming_packet_timestamp = hardware.timestamp();
-                self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
-                Ok(IsConnectionOpen::Yes)
+            // check if the incoming connection timed out
+            if hardware.timestamp() > self.last_incoming_packet_timestamp + self.config.wire.timeout
+            {
+                return Ok((true, OnEventResult::TimedOut));
             }
-            dtls::DecryptResult::SendThese(send_these) => {
-                for packet in send_these {
-                    hardware.send_outgoing_packet(&packet, self.config.peer, None)?;
+            return Ok((true, OnEventResult::StillConnected(self)));
+        }
+
+        //// READ INCOMING
+        if let Some(ReadIncomingPacket { packet, peer: _ }) = hardware.read_incoming_packet() {
+            return match self.session.decrypt_datagram(&packet) {
+                dtls::DecryptResult::Decrypted(cleartext_packet) => {
+                    // notice how we only update the last_incoming_packet_timestamp on a successful
+                    // decryption. Otherwise, eg if the client restarts unexpectedly, it might keep
+                    // attempting a handshake so we won't time out.
+                    self.last_incoming_packet_timestamp = hardware.timestamp();
+                    self.on_read_incoming_cleartext_packet(hardware, &cleartext_packet)?;
+                    Ok((true, OnEventResult::StillConnected(self)))
                 }
-                Ok(IsConnectionOpen::Yes)
-            }
-            dtls::DecryptResult::Terminated => Ok(IsConnectionOpen::TerminatedNormally),
-            dtls::DecryptResult::Err(err) => Err(err),
+                dtls::DecryptResult::SendThese(send_these) => {
+                    for packet in send_these {
+                        hardware.send_outgoing_packet(&packet, self.config.peer, None)?;
+                    }
+                    Ok((true, OnEventResult::StillConnected(self)))
+                }
+                dtls::DecryptResult::Terminated => {
+                    Ok((true, OnEventResult::RemoteTerminatedNormally))
+                }
+                dtls::DecryptResult::Err(err) => Err(err),
+            };
         }
+
+        //// READ OUTGOING
+        if let Some(read_outgoing_packet) = hardware.read_outgoing_packet() {
+            self.outgoing_connection
+                .on_read_outgoing_packet(hardware, read_outgoing_packet);
+            return Ok((true, OnEventResult::StillConnected(self)));
+        }
+
+        Ok((false, OnEventResult::StillConnected(self)))
     }
 
     pub(crate) fn on_read_incoming_cleartext_packet<H: Hardware>(
@@ -450,20 +461,15 @@ impl EstablishedConnection {
 
         Ok(())
     }
-
-    // When I name this just `on_terminate`, there's a conflict with the name of the same method
-    // defined on EstablishedConnection as part of the connection state traits. This is likely a bug
-    // with the declarative_enum_dispatch crate. Not sure why it doesn't affect the other methods.
-    pub(crate) fn on_terminate_inner(self) -> Result<Vec<IpPacketBuffer>> {
-        self.session.terminate()
-    }
 }
 
 #[must_use]
-pub(crate) enum IsConnectionOpen {
-    Yes,
+pub(crate) enum OnEventResult {
+    StillConnected(EstablishedConnection),
+    /// timed out to the point where we need to kill the connection.
     TimedOut,
-    TerminatedNormally,
+    RemoteTerminatedNormally,
+    LocalTerminatedNormally,
 }
 
 #[derive(Debug)]

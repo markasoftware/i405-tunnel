@@ -5,9 +5,9 @@ use declarative_enum_dispatch::enum_dispatch;
 
 use crate::{
     constants::MAX_IP_PACKET_LENGTH,
-    core::established_connection::{self, IsConnectionOpen},
+    core::established_connection::{self, OnEventResult},
     dtls,
-    hardware::{Hardware, real::QdiscSettings},
+    hardware::{Hardware, ReadIncomingPacket, real::QdiscSettings},
     messages,
     utils::{ip_to_dtls_length, ip_to_i405_length},
     wire_config::WireConfig,
@@ -44,37 +44,21 @@ fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionStat
 }
 
 impl super::Core for Core {
-    fn on_timer(&mut self, hardware: &impl Hardware, timer_timestamp: u64) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_timer(&self.config, hardware, timer_timestamp)
-        });
-    }
-
-    fn on_read_outgoing_packet(
-        &mut self,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_read_outgoing_packet(&self.config, hardware, packet, recv_timestamp)
-        });
-    }
-
-    fn on_read_incoming_packet(
-        &mut self,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        peer: SocketAddr,
-    ) {
-        replace_state_with_result(&mut self.state, |state| {
-            state.on_read_incoming_packet(&self.config, hardware, packet, peer)
-        });
-    }
-
-    fn on_terminate(self, hardware: &impl Hardware) {
-        if let Err(err) = self.state.unwrap().on_terminate(hardware) {
-            log::error!("Error while terminating: {err:?}")
+    fn on_event(&mut self, hardware: &impl Hardware) {
+        loop {
+            match std::mem::take(&mut self.state)
+                .unwrap()
+                .on_event_server(&self.config, hardware)
+            {
+                // made progress, keep looping
+                Ok((true, new_state)) => self.state = Some(new_state),
+                // made no progress, terminate
+                Ok((false, new_state)) => {
+                    self.state = Some(new_state);
+                    return;
+                }
+                Err(err) => panic!("Connection state error! {}", err),
+            }
         }
     }
 }
@@ -85,27 +69,9 @@ impl super::Core for Core {
 
 enum_dispatch! {
     trait ServerConnectionStateTrait {
-        fn on_timer(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            timer_timestamp: u64,
-        ) -> Result<ConnectionState>;
-        fn on_read_outgoing_packet(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            packet: &[u8],
-            recv_timestamp: u64,
-        ) -> Result<ConnectionState>;
-        fn on_read_incoming_packet(
-            self,
-            config: &Config,
-            hardware: &impl Hardware,
-            packet: &[u8],
-            peer: SocketAddr,
-        ) -> Result<ConnectionState>;
-        fn on_terminate(self, hardware: &impl Hardware) -> Result<()>;
+        // only has to do one itsy bit of work; outer loop will keep calling it as long as the first
+        // component of the retval stays true.
+        fn on_event_server(self, config: &Config, hardware: &impl Hardware) -> Result<(bool, ConnectionState)>;
     }
 
     #[derive(Debug)]
@@ -115,6 +81,23 @@ enum_dispatch! {
         /// until we get the first message after a C2S handshake, which indicates ready.
         InProtocolHandshake(InProtocolHandshake),
         EstablishedConnection(EstablishedConnection),
+        Shutdown(Shutdown),
+    }
+}
+
+#[derive(Debug)]
+struct Shutdown {}
+
+impl ServerConnectionStateTrait for Shutdown {
+    fn on_event_server(
+        self,
+        _config: &Config,
+        hardware: &impl Hardware,
+    ) -> Result<(bool, ConnectionState)> {
+        hardware.shutdown();
+        // in some sense we are making progress since we did the shutdown, but what the boolean
+        // really means is "do we want to be called again"
+        Ok((false, ConnectionState::Shutdown(self)))
     }
 }
 
@@ -146,12 +129,33 @@ impl NoConnection {
 }
 
 impl ServerConnectionStateTrait for NoConnection {
-    fn on_timer(
-        mut self,
-        _config: &Config,
+    fn on_event_server(
+        self,
+        config: &Config,
         hardware: &impl Hardware,
-        _timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
+    ) -> Result<(bool, ConnectionState)> {
+        if hardware.has_user_requested_shutdown() {
+            self.on_terminate(hardware)?;
+            return Ok((true, ConnectionState::Shutdown(Shutdown {})));
+        }
+
+        if hardware.has_timer_fired() {
+            return Ok((true, self.on_timer(hardware)?));
+        }
+
+        if let Some(incoming_packet) = hardware.read_incoming_packet() {
+            return Ok((
+                true,
+                self.on_read_incoming_packet(config, hardware, &incoming_packet)?,
+            ));
+        }
+
+        Ok((false, ConnectionState::NoConnection(self)))
+    }
+}
+
+impl NoConnection {
+    fn on_timer(mut self, hardware: &impl Hardware) -> Result<ConnectionState> {
         // to simplify the Hardware struct, it only supports one timer. However, we may have
         // multiple ongoing negotiations, each with different timestamps. What we do is simply
         // ask the hardware to ping us every second, and then check explicitly which
@@ -199,24 +203,15 @@ impl ServerConnectionStateTrait for NoConnection {
         Ok(ConnectionState::NoConnection(self))
     }
 
-    fn on_read_outgoing_packet(
-        self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        // shouldn't be any outgoing packets here
-        panic!("Outgoing packets in NoConnection state!");
-    }
-
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
         hardware: &impl Hardware,
-        packet: &[u8],
-        peer: SocketAddr,
+        incoming_packet: &ReadIncomingPacket,
     ) -> Result<ConnectionState> {
+        let packet = &incoming_packet.packet;
+        let peer = incoming_packet.peer;
+
         if !self
             .negotiations
             .iter()
@@ -409,32 +404,37 @@ impl InProtocolHandshake {
 }
 
 impl ServerConnectionStateTrait for InProtocolHandshake {
-    fn on_timer(
+    fn on_event_server(
         self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        panic!("No timers set but we got on_timer'd!");
-    }
+        config: &Config,
+        hardware: &impl Hardware,
+    ) -> Result<(bool, ConnectionState)> {
+        if hardware.has_user_requested_shutdown() {
+            self.on_terminate(hardware)?;
+            return Ok((true, ConnectionState::Shutdown(Shutdown {})));
+        }
 
-    fn on_read_outgoing_packet(
-        self,
-        _config: &Config,
-        _hardware: &impl Hardware,
-        _packet: &[u8],
-        _recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        panic!("No outgoing packets are read while awaiting C2S handshake");
-    }
+        if let Some(incoming_packet) = hardware.read_incoming_packet() {
+            return Ok((
+                true,
+                self.on_read_incoming_packet(config, hardware, &incoming_packet)?,
+            ));
+        }
 
+        Ok((false, ConnectionState::InProtocolHandshake(self)))
+    }
+}
+
+impl InProtocolHandshake {
     fn on_read_incoming_packet(
         mut self,
         config: &Config,
         hardware: &impl Hardware,
-        packet: &[u8],
-        peer: SocketAddr,
+        incoming_packet: &ReadIncomingPacket,
     ) -> Result<ConnectionState> {
+        let packet = &incoming_packet.packet;
+        let peer = incoming_packet.peer;
+
         assert!(peer == self.peer, "handshake peer was not as expected");
 
         let cleartext_packet = match self.session.decrypt_datagram(packet) {
@@ -518,82 +518,35 @@ impl ServerConnectionStateTrait for InProtocolHandshake {
     }
 }
 
-impl EstablishedConnection {
-    // stupid naming _s because enum_dispatch won't let us use the same name here and in client
-    fn handle_is_connection_open_s(
+impl ServerConnectionStateTrait for EstablishedConnection {
+    fn on_event_server(
         self,
+        _config: &Config,
         hardware: &impl Hardware,
-        is_connection_open: IsConnectionOpen,
-    ) -> Result<ConnectionState> {
-        match is_connection_open {
-            IsConnectionOpen::Yes => Ok(ConnectionState::EstablishedConnection(self)),
-            IsConnectionOpen::TimedOut => {
-                log::warn!(
-                    "Received no packets from client in a while -- returning to NoConnection state"
-                );
-                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
+    ) -> Result<(bool, ConnectionState)> {
+        let (made_progress, on_event_result) = EstablishedConnection::on_event(self, hardware)?;
+        let new_connection_state = match on_event_result {
+            OnEventResult::StillConnected(established_connection) => {
+                ConnectionState::EstablishedConnection(established_connection)
             }
-            IsConnectionOpen::TerminatedNormally => {
+            OnEventResult::TimedOut => {
+                log::warn!(
+                    "Received no packets from server in a while -- returning to NoConnection state"
+                );
+                ConnectionState::NoConnection(NoConnection::new(hardware)?)
+            }
+            OnEventResult::RemoteTerminatedNormally => {
                 log::info!(
                     "Client terminated connection normally -- returning to NoConnection state"
                 );
-                Ok(ConnectionState::NoConnection(NoConnection::new(hardware)?))
+                ConnectionState::NoConnection(NoConnection::new(hardware)?)
             }
-        }
-    }
-}
-
-impl ServerConnectionStateTrait for EstablishedConnection {
-    fn on_timer(
-        mut self,
-        _config: &Config,
-        hardware: &impl Hardware,
-        timer_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        let is_connection_open =
-            EstablishedConnection::on_timer(&mut self, hardware, timer_timestamp)?;
-        self.handle_is_connection_open_s(hardware, is_connection_open)
-    }
-
-    fn on_read_outgoing_packet(
-        mut self,
-        _config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        recv_timestamp: u64,
-    ) -> Result<ConnectionState> {
-        EstablishedConnection::on_read_outgoing_packet(&mut self, hardware, packet, recv_timestamp);
-        Ok(ConnectionState::EstablishedConnection(self))
-    }
-
-    fn on_read_incoming_packet(
-        mut self,
-        _config: &Config,
-        hardware: &impl Hardware,
-        packet: &[u8],
-        peer: SocketAddr,
-    ) -> Result<ConnectionState> {
-        // TODO actually call .connect on the hardware. And perhaps we can uncomment this at said time:
-        // assert_eq!(
-        //     peer,
-        //     self.peer(),
-        //     "should only be receiving from the correct peer once established"
-        // );
-        if peer != self.peer() {
-            return Ok(ConnectionState::EstablishedConnection(self));
-        }
-
-        let is_connection_open =
-            EstablishedConnection::on_read_incoming_packet(&mut self, hardware, packet)?;
-        self.handle_is_connection_open_s(hardware, is_connection_open)
-    }
-
-    fn on_terminate(self, hardware: &impl Hardware) -> Result<()> {
-        let peer = self.peer();
-        for packet in EstablishedConnection::on_terminate_inner(self)? {
-            hardware.send_outgoing_packet(&packet, peer, None)?;
-        }
-        Ok(())
+            OnEventResult::LocalTerminatedNormally => {
+                log::info!("Local shutdown -- entering Shutdown state");
+                ConnectionState::Shutdown(Shutdown {})
+            }
+        };
+        Ok((made_progress, new_connection_state))
     }
 }
 
