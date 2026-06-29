@@ -26,6 +26,7 @@ const MAX_QUEUED_IP_PACKETS: usize = 3;
 const MAX_AVERAGE_MESSAGES_PER_PACKET: usize = 8;
 // This is pretty arbitrary, just the max number of reliable messages I think are likely to be lost
 // in a reasonable connection. If this is exceeded, the connection is killed.
+// TODO we probably shouldn't "kill the connection" with these sorts of errors, as that causes an observable effect on the i405 traffic. Could we instead reset all state or sth? Or maybe prohibit the transmission of additional reliable messages when the queue reaches full size?
 const RELIABLE_MESSAGE_RTX_QUEUE_LENGTH: usize = 1024;
 
 #[derive(Debug)]
@@ -55,19 +56,23 @@ pub(crate) struct EstablishedConnection {
 /// The OutgoingConnection is responsible for reading outgoing packets.
 #[derive(Debug)]
 struct OutgoingConnection {
-    queued_packets: VecDeque<QueuedIpPacket>,
+    queued_packet: Option<QueuedIpPacket>,
     fragmentation_id: u16,
 }
 
 impl OutgoingConnection {
-    fn new(hardware: &impl Hardware) -> Self {
-        // unless we have a queued packet (which we don't yet), we want the hardware to always know
-        // we are ready to read an outgoing packet.
-        hardware.read_outgoing_packet();
+    fn new() -> Self {
         Self {
-            queued_packets: VecDeque::with_capacity(MAX_QUEUED_IP_PACKETS),
+            queued_packet: None,
             fragmentation_id: 0,
         }
+    }
+
+    /// self.queued_packet == None after this call.
+    fn next_queued_packet(&mut self, hardware: &impl Hardware) -> Option<QueuedIpPacket> {
+        self.queued_packet.take().or_else(|| {
+            hardware.read_outgoing_packet().map(|rop| QueuedIpPacket::new(&rop.packet))
+        })
     }
 
     /// When a new send outgoing packet is created, call this so that any internal queued packets
@@ -79,7 +84,7 @@ impl OutgoingConnection {
         _reliability_builder: &mut ReliabilityActionBuilder<'_>, // no IP messages are ack-eliciting
     ) {
         let write_cursor = packet_builder.write_cursor();
-        'dequeue_loop: while let Some(old_queued_packet) = self.queued_packets.pop_front() {
+        'dequeue_loop: while let Some(old_queued_packet) = self.next_queued_packet(hardware) {
             let bytes_left = write_cursor.num_bytes_left();
             self.fragmentation_id = self.fragmentation_id.wrapping_add(1);
             let fragment = old_queued_packet.fragment(bytes_left, self.fragmentation_id);
@@ -88,36 +93,14 @@ impl OutgoingConnection {
                 FragmentResult::Partial(msg, new_queued_packet) => {
                     msg.serialize(write_cursor);
                     // we just popped off the queued packets, so won't go over capacity
-                    self.queued_packets.push_front(new_queued_packet);
+                    self.queued_packet = Some(new_queued_packet);
                     break 'dequeue_loop;
                 }
                 FragmentResult::MaxLengthTooShort(new_queued_packet) => {
-                    self.queued_packets.push_front(new_queued_packet);
+                    self.queued_packet = Some(new_queued_packet);
                     break 'dequeue_loop;
                 }
             }
-        }
-        self.maybe_request_outgoing_read(hardware);
-    }
-
-    fn on_read_outgoing_packet<H: Hardware>(
-        &mut self,
-        hardware: &H,
-        outgoing_packet: ReadOutgoingPacket,
-    ) {
-        assert!(
-            self.queued_packets.len() < MAX_QUEUED_IP_PACKETS,
-            "We never request to read outgoing packets when the queue of IP packets is already full"
-        );
-        self.queued_packets
-            .push_back(QueuedIpPacket::new(&outgoing_packet.packet));
-        self.maybe_request_outgoing_read(hardware);
-    }
-
-    /// If there is room left for another queued packet, queue one!
-    fn maybe_request_outgoing_read<H: Hardware>(&mut self, hardware: &H) {
-        if self.queued_packets.len() < MAX_QUEUED_IP_PACKETS {
-            hardware.read_outgoing_packet();
         }
     }
 }
@@ -159,7 +142,7 @@ impl EstablishedConnection {
         );
         Ok(Self {
             session,
-            outgoing_connection: OutgoingConnection::new(hardware),
+            outgoing_connection: OutgoingConnection::new(),
             i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer),
             defragger: Defragger::new(),
             // this is a tiny bit jank in the client case, because the server won't start sending us
@@ -357,13 +340,6 @@ impl EstablishedConnection {
             };
         }
 
-        //// READ OUTGOING
-        if let Some(read_outgoing_packet) = hardware.read_outgoing_packet() {
-            self.outgoing_connection
-                .on_read_outgoing_packet(hardware, read_outgoing_packet);
-            return Ok((true, OnEventResult::StillConnected(self)));
-        }
-
         Ok((false, OnEventResult::StillConnected(self)))
     }
 
@@ -372,11 +348,13 @@ impl EstablishedConnection {
         hardware: &H,
         packet: &[u8],
     ) -> Result<()> {
+        log::debug!("read an incoming cleartext packet!");
         let mut reader = messages::PacketReader::new(packet);
         let mut incoming_seqno = None;
         let mut tx_epoch_time = None;
         let mut ack_elicited = false;
         while let Some(msg) = reader.try_read_message(&mut ack_elicited)? {
+            log::trace!("Read msg: {:?}", msg);
             match msg {
                 Message::ClientToServerHandshake(_) => {
                     log::warn!(
@@ -446,6 +424,7 @@ impl EstablishedConnection {
                 }
             }
         }
+        log::trace!("Done reading packet messages");
         // I at one point considered having a "packet header" that would contain the sequence number
         // in a fixed location to make inclusion of seqno more "safe". Chose not to implement until
         // we do FEC because those both require changes to the packet format.

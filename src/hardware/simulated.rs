@@ -163,7 +163,11 @@ impl SimulatedHardware {
     }
 
     pub(crate) fn shutdown_requested<'a>(&'a self, addr: &SocketAddr) -> &'a ShutdownRequested {
-        &self.peers.get(addr).expect("Non-existent `addr` to shutdown_requested").shutdown_requested
+        &self
+            .peers
+            .get(addr)
+            .expect("Non-existent `addr` to shutdown_requested")
+            .shutdown_requested
     }
 
     // make an outgoing on the side with the given addr. Ie,
@@ -242,6 +246,10 @@ impl SimulatedHardware {
         while self.timestamp < stop_timestamp {
             let timestamp = self.timestamp;
             let mut next_event_timestamp = stop_timestamp;
+            // track if ANY peer made progress at this timestamp, in which case we will need to
+            // re-evaluate the next timestamp and perhaps call on_event again before advancing
+            // timestamps.
+            let mut has_event_at_present_timestamp_in_any_peer = false;
 
             // have to collect so we don't borrow self.peers
             for addr in self.peers.keys().cloned().collect::<Vec<SocketAddr>>() {
@@ -255,12 +263,10 @@ impl SimulatedHardware {
                 if let Some(timer) = peer.timer.get() {
                     assert!(
                         timer >= timestamp,
-                        "We slept past .take()a timer, or timer was set in the past, or Core didn't install a new timer after timer fired? Timer {} vs timestamp {}",
-                        timer,
-                        timestamp
+                        "We slept past a timer, or timer was set in the past, or Core didn't install a new timer after timer fired? Timer {timer} vs timestamp {timestamp}"
                     );
                     if timer == timestamp {
-                        self.debug(format!("Timer triggered for {} at {}ns", addr, timestamp));
+                        self.debug(format!("Timer triggered for {addr}"));
                         has_event_at_present_timestamp = true;
                     } else {
                         next_event_timestamp = min(next_event_timestamp, timer);
@@ -269,8 +275,9 @@ impl SimulatedHardware {
 
                 // read outgoing
                 if peer.has_unnotified_unread_outgoing_packets.get() {
-                    has_event_at_present_timestamp = true;
+                    self.debug(format!("Unnotified unread outgoing packets for {addr}"));
                     peer.has_unnotified_unread_outgoing_packets.set(false);
+                    has_event_at_present_timestamp = true;
                 }
 
                 // read incoming
@@ -289,15 +296,18 @@ impl SimulatedHardware {
                 }
 
                 if has_event_at_present_timestamp {
+                    has_event_at_present_timestamp_in_any_peer = true;
                     core.on_event(&self.hardware(addr));
                 }
             }
 
-            self.debug(format!(
-                "Done with {}ns; advancing to {}ns",
-                timestamp, next_event_timestamp
-            ));
-            self.timestamp = next_event_timestamp;
+            if !has_event_at_present_timestamp_in_any_peer {
+                self.debug(format!(
+                    "Done with present timestamp; advancing to {}ns",
+                    next_event_timestamp
+                ));
+                self.timestamp = next_event_timestamp;
+            }
         }
     }
 
@@ -343,7 +353,8 @@ impl Hardware for OneSideHardware<'_> {
 
     // could one day be good to be able to simulate shutdowns separately in each direction?
     fn has_user_requested_shutdown(&self) -> bool {
-        self.our_side().shutdown_requested
+        self.our_side()
+            .shutdown_requested
             .has_user_requested_shutdown()
     }
 
@@ -352,6 +363,7 @@ impl Hardware for OneSideHardware<'_> {
     }
 
     fn read_outgoing_packet(&self) -> Option<ReadOutgoingPacket> {
+        log::debug!("Read outgoing packet on {}", self.our_addr);
         self.our_side()
             .unread_outgoing_packets
             .borrow_mut()
@@ -428,11 +440,10 @@ impl Hardware for OneSideHardware<'_> {
                 .unwrap_or(&0);
         let receipt_timestamp = sent_timestamp + delay;
         self.simulated.debug(format!(
-            "Sending packet from {} to {} of size {} at {}ns (delay {}ns, to be received at {}ns)",
+            "Sending packet from {} to {} of size {} (delay {}ns, to be received at {}ns)",
             self.our_addr,
             destination,
             packet.len(),
-            sent_timestamp,
             delay,
             receipt_timestamp,
         ));
@@ -463,6 +474,11 @@ impl Hardware for OneSideHardware<'_> {
     }
 
     fn send_incoming_packet(&self, packet: &[u8]) -> Result<()> {
+        self.simulated.debug(format!(
+            "Sending incoming packet on {} of size {}",
+            self.our_addr,
+            packet.len()
+        ));
         let timestamp = self.timestamp();
         self.our_side()
             .sent_incoming_packets
