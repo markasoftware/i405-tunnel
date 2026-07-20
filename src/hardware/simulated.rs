@@ -33,8 +33,14 @@ struct OneSideInfo {
     /// to false).
     has_unnotified_unread_outgoing_packets: Cell<bool>,
 
+    /// second element of tuple is whether or not the core has been notified of this yet (ie, has it
+    /// been woken up while this packet was in the heap)
     unread_incoming_packets: RefCell<BinaryHeap<WanPacket>>,
     sent_incoming_packets: RefCell<Vec<LocalPacket>>,
+    // Need to set this true when either (a) a new incoming packet with timestamp == lowest
+    // timestamp among all unread incoming packets is added or (b) the last unread incoming packet
+    // <= timestamp is read.
+    is_next_unread_incoming_packet_possibly_unnotified: Cell<bool>,
 
     /// For each outgoing packet that's been read by the core, what timestamp was it read at?
     outgoing_read_times: RefCell<Vec<u64>>,
@@ -42,10 +48,11 @@ struct OneSideInfo {
     /// Packet statuses registered by this peer
     packet_statuses: RefCell<Vec<PacketStatus>>,
 
-    // The next time we should wake up this thread.
+    /// The next time we should wake up this thread.
     timer: Cell<Option<u64>>,
 
     shutdown_requested: ShutdownRequested,
+    has_unnotified_shutdown_requested: Cell<bool>,
 }
 
 impl OneSideInfo {
@@ -59,10 +66,12 @@ impl OneSideInfo {
             has_unnotified_unread_outgoing_packets: Cell::new(false),
             unread_incoming_packets: RefCell::new(BinaryHeap::new()),
             sent_incoming_packets: RefCell::new(Vec::new()),
+            is_next_unread_incoming_packet_possibly_unnotified: Cell::new(true),
             outgoing_read_times: RefCell::new(Vec::new()),
             packet_statuses: RefCell::new(Vec::new()),
             timer: Cell::new(None),
             shutdown_requested: ShutdownRequested::new(),
+            has_unnotified_shutdown_requested: Cell::new(false),
         }
     }
 }
@@ -146,28 +155,21 @@ impl SimulatedHardware {
 
     /// as if the user pressed C-c
     pub(crate) fn request_shutdown(&self, addr: &SocketAddr) {
-        self.peers
-            .get(addr)
-            .expect("non-existent `addr` to request_shutdown")
-            .shutdown_requested
-            .user_request_shutdown();
-    }
-
-    /// Un-request a shutdown. You should only call this when replacing a Core, else the Core might
-    /// "remember" that shutdown was requested in the past and keep trying to shut down.
-    pub(crate) fn clear_requested_shutdown(&mut self, addr: &SocketAddr) {
-        self.peers
-            .get_mut(addr)
-            .expect("non-existent `addr` to clear_requested_shutdown")
-            .shutdown_requested = ShutdownRequested::new();
-    }
-
-    pub(crate) fn shutdown_requested<'a>(&'a self, addr: &SocketAddr) -> &'a ShutdownRequested {
-        &self
+        let peer = self
             .peers
             .get(addr)
-            .expect("Non-existent `addr` to shutdown_requested")
-            .shutdown_requested
+            .expect("non-existent `addr` to request_shutdown");
+        peer.shutdown_requested.user_request_shutdown();
+        peer.has_unnotified_shutdown_requested.set(true);
+    }
+
+    /// Reset all state related to a certain peer, including received packets etc. Call this if and
+    /// only if you are changing out the Core associated with addr
+    // TODO have the SimulatedHardware own the core, I think there's no reason not to now that we have on_event
+    pub(crate) fn reset_peer_state(&mut self, addr: SocketAddr) {
+        self.peers
+            .insert(addr, OneSideInfo::new(addr))
+            .expect("non-existent `addr` to reset_peer_state");
     }
 
     // make an outgoing on the side with the given addr. Ie,
@@ -259,6 +261,11 @@ impl SimulatedHardware {
                     .get_mut(&addr)
                     .expect("Missing addr from cores argument to run_until");
 
+                // terminated
+                if peer.has_unnotified_shutdown_requested.replace(false) {
+                    has_event_at_present_timestamp = true;
+                }
+
                 // timer
                 if let Some(timer) = peer.timer.get() {
                     assert!(
@@ -267,6 +274,7 @@ impl SimulatedHardware {
                     );
                     if timer == timestamp {
                         self.debug(format!("Timer triggered for {addr}"));
+                        peer.timer.set(None);
                         has_event_at_present_timestamp = true;
                     } else {
                         next_event_timestamp = min(next_event_timestamp, timer);
@@ -274,15 +282,18 @@ impl SimulatedHardware {
                 }
 
                 // read outgoing
-                if peer.has_unnotified_unread_outgoing_packets.get() {
+                if peer.has_unnotified_unread_outgoing_packets.replace(false) {
                     self.debug(format!("Unnotified unread outgoing packets for {addr}"));
-                    peer.has_unnotified_unread_outgoing_packets.set(false);
                     has_event_at_present_timestamp = true;
                 }
 
                 // read incoming
                 if let Some(incoming_packet) = peer.unread_incoming_packets.borrow().peek() {
-                    if timestamp == incoming_packet.receipt_timestamp {
+                    if timestamp == incoming_packet.receipt_timestamp
+                        && peer
+                            .is_next_unread_incoming_packet_possibly_unnotified
+                            .replace(false)
+                    {
                         has_event_at_present_timestamp = true;
                     }
                     if timestamp < incoming_packet.receipt_timestamp {
@@ -336,10 +347,6 @@ impl Hardware for OneSideHardware<'_> {
             self.our_addr, timestamp, old_timestamp
         ));
         old_timestamp
-    }
-
-    fn get_timer(&self) -> Option<u64> {
-        self.our_side().timer.get()
     }
 
     fn timestamp(&self) -> u64 {
@@ -401,6 +408,20 @@ impl Hardware for OneSideHardware<'_> {
                     incoming_packet.source
                 ));
                 assert_eq!(incoming_packet.dest, self.our_side().addr);
+
+                // if the /next/ packet is in the future, then we need to be notified of it! If the
+                // next packet is at the same timestamp, or also less than the present timestamp,
+                // then we've already been on_event'd while that packet is readable, and hence do
+                // not need another on_event.
+                if unread_incoming_packets
+                    .peek()
+                    .is_none_or(|p| self.timestamp() < p.receipt_timestamp)
+                {
+                    self.our_side()
+                        .is_next_unread_incoming_packet_possibly_unnotified
+                        .set(true);
+                }
+
                 return Some(ReadIncomingPacket {
                     packet: incoming_packet.buffer,
                     peer: incoming_packet.source,
@@ -464,6 +485,13 @@ impl Hardware for OneSideHardware<'_> {
             .borrow_mut()
             .push(wan_packet.clone());
         if let Some(destination_peer) = self.simulated.peers.get(&destination) {
+            // this check could technically be tightened, to only if wan_packet.receipt_timestamp ==
+            // (lowest receipt timestamp in unread_incoming_packets), but there's no need.
+            if (wan_packet.receipt_timestamp <= self.simulated.timestamp) {
+                destination_peer
+                    .is_next_unread_incoming_packet_possibly_unnotified
+                    .set(true);
+            }
             destination_peer
                 .unread_incoming_packets
                 .borrow_mut()

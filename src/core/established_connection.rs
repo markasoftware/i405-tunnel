@@ -4,7 +4,7 @@ use crate::{
     defragger::Defragger,
     deques::{ArrDeque, GlobalBitArrDeque},
     dtls,
-    hardware::{Hardware, ReadIncomingPacket, ReadOutgoingPacket},
+    hardware::{Hardware, ReadIncomingPacket, ReadOutgoingPacket, TimerTracker},
     jitter::Jitterator,
     messages::{self, Message, Serializable as _},
     queued_ip_packet::{FragmentResult, QueuedIpPacket},
@@ -33,6 +33,7 @@ const RELIABLE_MESSAGE_RTX_QUEUE_LENGTH: usize = 1024;
 pub(crate) struct EstablishedConnection {
     session: dtls::EstablishedSession,
     config: Config,
+    outgoing_packet_timer_tracker: TimerTracker,
     last_incoming_packet_timestamp: u64,
     next_outgoing_seqno: u64,
     jitterator: Jitterator,
@@ -71,7 +72,9 @@ impl OutgoingConnection {
     /// self.queued_packet == None after this call.
     fn next_queued_packet(&mut self, hardware: &impl Hardware) -> Option<QueuedIpPacket> {
         self.queued_packet.take().or_else(|| {
-            hardware.read_outgoing_packet().map(|rop| QueuedIpPacket::new(&rop.packet))
+            hardware
+                .read_outgoing_packet()
+                .map(|rop| QueuedIpPacket::new(&rop.packet))
         })
     }
 
@@ -114,7 +117,8 @@ impl EstablishedConnection {
         let mut jitterator = config.wire.jitterator()?;
         hardware.clear_event_listeners()?;
         hardware.socket_connect(&config.peer)?;
-        hardware.set_timer(
+        let outgoing_packet_timer_tracker = TimerTracker::with_timer(
+            hardware,
             hardware.timestamp() + jitterator.next_interval() - config.wire.packet_finalize_delta,
         );
         // TODO make configurable. Basically a retransmit timeout. How long after sending a packet
@@ -142,6 +146,7 @@ impl EstablishedConnection {
         );
         Ok(Self {
             session,
+            outgoing_packet_timer_tracker,
             outgoing_connection: OutgoingConnection::new(),
             i405_packet_length: ip_to_i405_length(config.wire.packet_length, config.peer),
             defragger: Defragger::new(),
@@ -189,7 +194,8 @@ impl EstablishedConnection {
 
         //// TIMER
         // TODO should probably put timer before terminated?
-        if let Some(timer_timestamp) = hardware.get_fired_timer() {
+        if let Some(timer_timestamp) = self.outgoing_packet_timer_tracker.get_fired_timer(hardware)
+        {
             // timer means that it's about time to send a packet -- let's finalize the packet and send
             // it to the hardware!
             let send_timestamp = timer_timestamp + self.config.wire.packet_finalize_delta;
@@ -305,8 +311,10 @@ impl EstablishedConnection {
             // );
             let next_interval = self.jitterator.next_interval();
             hardware.register_interval(next_interval);
-            hardware
-                .set_timer(send_timestamp + next_interval - self.config.wire.packet_finalize_delta);
+            self.outgoing_packet_timer_tracker.set_timer(
+                hardware,
+                send_timestamp + next_interval - self.config.wire.packet_finalize_delta,
+            );
 
             // check if the incoming connection timed out
             if hardware.timestamp() > self.last_incoming_packet_timestamp + self.config.wire.timeout

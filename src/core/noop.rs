@@ -20,7 +20,7 @@ impl Core {
 }
 
 impl super::Core for Core {
-    fn on_event(&mut self,hardware: &impl Hardware) {
+    fn on_event(&mut self, hardware: &impl Hardware) {
         if hardware.has_user_requested_shutdown() {
             hardware.shutdown();
         }

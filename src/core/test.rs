@@ -653,7 +653,10 @@ fn multiple_ongoing_negotiations() {
         &simulated_hardware.hardware(good_client_addr),
     )
     .unwrap();
-    cores.insert(good_client_addr, good_client_core.into());
+    cores
+        .insert(good_client_addr, good_client_core.into())
+        .unwrap();
+    simulated_hardware.reset_peer_state(good_client_addr);
     simulated_hardware.run_until(&mut cores, ms(15.0));
 
     // ensure that we can communicate on the good core
@@ -695,8 +698,8 @@ fn client_termination_and_reconnect() {
         &simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
-    cores.insert(client_addr(), new_client_core.into());
-    simulated_hardware.clear_requested_shutdown(&client_addr());
+    cores.insert(client_addr(), new_client_core.into()).unwrap();
+    simulated_hardware.reset_peer_state(client_addr());
 
     simulated_hardware.run_until(&mut cores, ms(2.002));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
@@ -731,21 +734,27 @@ fn server_termination_and_reconnect() {
         &simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
-    cores.insert(server_addr(), new_server_core.into());
-    simulated_hardware.clear_requested_shutdown(&server_addr());
+    cores.insert(server_addr(), new_server_core.into()).unwrap();
+    simulated_hardware.reset_peer_state(server_addr());
 
     // whether the simulated core will process incoming or outgoing packets first is indeterminate,
     // and if it processes this outgoing packet first, then it will start preparing a packet to fire
     // off, then immediately discard it. So we want to wait to enqueue any packets until the new
     // connection is made.
-    simulated_hardware.run_until(&mut cores, ms(2.002));
+
+    // needs to be over a second, because the client will have instantly sent the first packet of
+    // the new dtls handshake, which got dropped when we reset the server state. So we need to wait
+    // long enough for the timer to fire so it'll send the handshake again. (Could also rework the
+    // test by adding a small (eg 1ns) simulated network delay, and then we are guaranteed that the
+    // packet won't get "dropped" and instead reaches the new server)
+    simulated_hardware.run_until(&mut cores, ms(1003.0));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[5, 0, 4, 1]);
-    simulated_hardware.run_until(&mut cores, ms(4.0));
+    simulated_hardware.run_until(&mut cores, ms(1006.0));
     assert_eq!(
         simulated_hardware
             .sent_incoming_packets(&server_addr())
             .len(),
-        2
+        1
     );
 }
 
@@ -773,38 +782,36 @@ fn server_not_responding() {
         1
     );
 
-    // replace the old server without properly terminating it
-    let num_outgoing_packets_before_destruction = simulated_hardware
-        .sent_outgoing_packets(&server_addr())
-        .len();
-    cores.remove(&server_addr());
-    // ensure that it isn't somehow sending packets during destruction
+    cores
+        .insert(
+            server_addr(),
+            core::server::Core::new(
+                default_server_config(),
+                &simulated_hardware.hardware(server_addr()),
+            )
+            .unwrap()
+            .into(),
+        )
+        .unwrap();
+    simulated_hardware.reset_peer_state(server_addr());
     assert_eq!(
-        num_outgoing_packets_before_destruction,
         simulated_hardware
             .sent_outgoing_packets(&server_addr())
-            .len()
-    );
-
-    cores.insert(
-        server_addr(),
-        core::server::Core::new(
-            default_server_config(),
-            &simulated_hardware.hardware(server_addr()),
-        )
-        .unwrap()
-        .into(),
+            .len(),
+        0,
     );
 
     simulated_hardware.run_until(&mut cores, ms(11_000.0));
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
     simulated_hardware.run_until(&mut cores, ms(11_500.0));
+    // 1 because only the packets after the core was swapped out are recorded in simulated hardware
+    // (see how we assert this as 0 above)
     assert_eq!(
         simulated_hardware
             .sent_incoming_packets(&server_addr())
             .len(),
-        2
+        1
     );
     assert_eq!(
         simulated_hardware
@@ -839,26 +846,24 @@ fn client_not_responding() {
     );
 
     // replace the old client without properly terminating it
-    let num_outgoing_packets_before_destruction = simulated_hardware
-        .sent_outgoing_packets(&client_addr())
-        .len();
-    cores.remove(&client_addr());
-    // ensure that it isn't somehow sending packets during destruction
-    assert_eq!(
-        num_outgoing_packets_before_destruction,
-        simulated_hardware
-            .sent_outgoing_packets(&client_addr())
-            .len()
-    );
-
     let mut client_config = default_client_config();
     client_config.client_wire_config = LONGER_CLIENT_WIRE_CONFIG;
     client_config.server_wire_config = LONGER_SERVER_WIRE_CONFIG;
-    cores.insert(
-        client_addr(),
-        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
-            .unwrap()
-            .into(),
+    cores
+        .insert(
+            client_addr(),
+            core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+    simulated_hardware.reset_peer_state(client_addr());
+    // this is more a test of the simulated hardware than the Core:
+    assert_eq!(
+        simulated_hardware
+            .sent_outgoing_packets(&client_addr())
+            .len(),
+        0
     );
 
     simulated_hardware.run_until(&mut cores, ms(11_000.0));
@@ -871,11 +876,13 @@ fn client_not_responding() {
             .len(),
         2
     );
+    // only 1, used to be 2: Old simulated behavior kept the list of incoming packets the same when
+    // replacing a core, new one doesn't and only includes the "new" one.
     assert_eq!(
         simulated_hardware
             .sent_incoming_packets(&client_addr())
             .len(),
-        2
+        1
     );
 }
 

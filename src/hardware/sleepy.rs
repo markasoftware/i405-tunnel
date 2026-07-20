@@ -18,7 +18,10 @@ use crate::{
     utils::{ChannelThread, RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
-use super::{real::{configure_qdisc, epoch_timestamp, QdiscSettings}, ReadIncomingPacket, ReadOutgoingPacket, ShutdownRequested};
+use super::{
+    ReadIncomingPacket, ReadOutgoingPacket, ShutdownRequested,
+    real::{QdiscSettings, configure_qdisc, epoch_timestamp},
+};
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
@@ -211,7 +214,8 @@ impl Drop for SleepyHardware {
 }
 
 // the plan is to remove these Events entirely. Instead, we'll make everything polling-based, and
-// then simply use a condition variable triggered by each sending thread to 
+// then simply use a condition variable triggered by each sending thread to indicate that it's time
+// to read from some mpsc queue.
 enum Event {
     OutgoingRead {
         timestamp: u64,
@@ -321,10 +325,6 @@ impl Hardware for SleepyHardware {
 
     fn set_timer(&self, timestamp: u64) -> Option<u64> {
         self.timer.replace(Some(timestamp))
-    }
-
-    fn get_timer(&self) -> Option<u64> {
-        self.timer.get()
     }
 
     fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {

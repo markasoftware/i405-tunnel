@@ -4,7 +4,10 @@ pub(crate) mod simulated;
 pub(crate) mod sleepy;
 pub(crate) mod spinny;
 
-use std::{net::SocketAddr, sync::{atomic::AtomicU8, Arc}};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicU8},
+};
 
 use anyhow::Result;
 use real::QdiscSettings;
@@ -49,18 +52,30 @@ enum ShutdownRequestedState {
 impl ShutdownRequested {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicU8::new(ShutdownRequestedState::Running as u8))
+            inner: Arc::new(AtomicU8::new(ShutdownRequestedState::Running as u8)),
         }
     }
 
     pub(crate) fn user_request_shutdown(&self) {
         // TODO determine if it should be Relaxed
-        self.inner.compare_exchange(ShutdownRequestedState::Running as u8, ShutdownRequestedState::UserRequestedShutdown as u8, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+        // `Result` just tells us whether it compared equal or not; we don't care, since state is shutdown in progress regardless.
+        let _ = self.inner.compare_exchange(
+            ShutdownRequestedState::Running as u8,
+            ShutdownRequestedState::UserRequestedShutdown as u8,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn core_request_shutdown(&self) {
-        assert!(self.has_user_requested_shutdown(), "Core should not request shutdown until user requests it");
-        self.inner.store(ShutdownRequestedState::CoreRequestedShutdown as u8, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            self.has_user_requested_shutdown(),
+            "Core should not request shutdown until user requests it"
+        );
+        self.inner.store(
+            ShutdownRequestedState::CoreRequestedShutdown as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn has_user_requested_shutdown(&self) -> bool {
@@ -83,20 +98,43 @@ impl ShutdownRequested {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TimerTracker {
+    timer: Option<u64>,
+}
+
+impl TimerTracker {
+    pub(crate) fn new() -> Self {
+        Self { timer: None }
+    }
+
+    pub(crate) fn with_timer(hardware: &impl Hardware, timer: u64) -> Self {
+        let mut result = Self::new();
+        result.set_timer(hardware, timer);
+        result
+    }
+
+    pub(crate) fn get_fired_timer(&self, hardware: &impl Hardware) -> Option<u64> {
+        self.timer
+            .and_then(|timer| (hardware.timestamp() >= timer).then_some(timer))
+    }
+
+    pub(crate) fn has_fired(&self, hardware: &impl Hardware) -> bool {
+        self.get_fired_timer(hardware).is_some()
+    }
+
+    pub(crate) fn set_timer(&mut self, hardware: &impl Hardware, timer: u64) {
+        self.timer = Some(timer);
+        hardware.set_timer(timer);
+    }
+}
+
 /// A completely abstract interface to the outside world, for easy testing. The core I405 logic is
 /// only able to interact with the outside world through an instance of `Hardware`
 pub(crate) trait Hardware {
     /// Request an on_event as soon as possible after the given timestamp. It's guaranteed that
     /// on_event will be called at a time where timestamp() returns >= the requested timestamp.
     fn set_timer(&self, timestamp: u64) -> Option<u64>;
-    /// check whatever timer is set. Right now only one timer can be set.
-    fn get_timer(&self) -> Option<u64>;
-    fn get_fired_timer(&self) -> Option<u64> {
-        self.get_timer().filter(|t| self.timestamp() >= *t)
-    }
-    fn has_timer_fired(&self) -> bool {
-        self.get_fired_timer().is_some()
-    }
     /// Return the current timestamp. This is monotonic and should be used for all precise purposes.
     fn timestamp(&self) -> u64;
     /// Return nanos since unix epoch. May go backwards and all that fun.

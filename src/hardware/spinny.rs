@@ -165,10 +165,6 @@ impl Hardware for SpinnyHardware {
         self.timer.replace(Some(timestamp))
     }
 
-    fn get_timer(&self) -> Option<u64> {
-        self.timer.get()
-    }
-
     fn socket_connect(&self, _socket_addr: &std::net::SocketAddr) -> Result<()> {
         // Socket disconnection doesn't work right now so we don't connect at all:
         // self.socket.connect(socket_addr)?;

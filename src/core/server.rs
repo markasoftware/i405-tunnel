@@ -7,7 +7,7 @@ use crate::{
     constants::MAX_IP_PACKET_LENGTH,
     core::established_connection::{self, OnEventResult},
     dtls,
-    hardware::{Hardware, ReadIncomingPacket, real::QdiscSettings},
+    hardware::{Hardware, ReadIncomingPacket, TimerTracker, real::QdiscSettings},
     messages,
     utils::{ip_to_dtls_length, ip_to_i405_length},
     wire_config::WireConfig,
@@ -28,19 +28,6 @@ impl Core {
             config,
         })
     }
-}
-
-fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionState>>(
-    state: &mut Option<ConnectionState>,
-    f: F,
-) {
-    match f(std::mem::take(state).unwrap()) {
-        Ok(new_state) => std::mem::replace(state, Some(new_state)),
-        Err(err) => {
-            // TODO don't panic, instead use the config to decide whether to quit or retry.
-            panic!("Connection state error! {}", err);
-        }
-    };
 }
 
 impl super::Core for Core {
@@ -104,6 +91,7 @@ impl ServerConnectionStateTrait for Shutdown {
 #[derive(Debug)]
 struct NoConnection {
     negotiations: Vec<Negotiation>,
+    timer_tracker: TimerTracker,
 }
 
 #[derive(Debug)]
@@ -114,17 +102,17 @@ struct Negotiation {
     // TODO info so we can remove inactive negotiations.
 }
 
+fn next_no_connection_timer(hardware: &impl Hardware) -> u64 {
+    hardware.timestamp() + 1_000_000_000
+}
+
 impl NoConnection {
     fn new(hardware: &impl Hardware) -> Result<Self> {
         hardware.clear_event_listeners()?;
-        NoConnection::set_timer(hardware);
         Ok(NoConnection {
             negotiations: Vec::new(),
+            timer_tracker: TimerTracker::with_timer(hardware, next_no_connection_timer(hardware)),
         })
-    }
-
-    fn set_timer(hardware: &impl Hardware) {
-        hardware.set_timer(hardware.timestamp() + 1_000_000_000);
     }
 }
 
@@ -139,7 +127,7 @@ impl ServerConnectionStateTrait for NoConnection {
             return Ok((true, ConnectionState::Shutdown(Shutdown {})));
         }
 
-        if hardware.has_timer_fired() {
+        if self.timer_tracker.has_fired(hardware) {
             return Ok((true, self.on_timer(hardware)?));
         }
 
@@ -199,7 +187,8 @@ impl NoConnection {
                 }
             })
             .collect();
-        Self::set_timer(hardware);
+        self.timer_tracker
+            .set_timer(hardware, next_no_connection_timer(hardware));
         Ok(ConnectionState::NoConnection(self))
     }
 
@@ -302,6 +291,7 @@ impl NoConnection {
 
         Ok(ConnectionState::NoConnection(NoConnection {
             negotiations: new_negotiations,
+            timer_tracker: self.timer_tracker,
         }))
     }
 

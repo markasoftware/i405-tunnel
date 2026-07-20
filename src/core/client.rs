@@ -11,7 +11,7 @@ use crate::core::{
     established_connection,
 };
 use crate::hardware::real::QdiscSettings;
-use crate::hardware::{Hardware, ReadIncomingPacket};
+use crate::hardware::{Hardware, ReadIncomingPacket, TimerTracker};
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;
 use crate::{dtls, messages};
@@ -112,6 +112,7 @@ impl ConnectionStateTrait for Shutdown {
 #[derive(Debug)]
 struct NoConnection {
     negotiation: dtls::NegotiatingSession,
+    timer_tracker: TimerTracker,
 }
 
 fn send_packets(
@@ -151,9 +152,9 @@ impl NoConnection {
         timeout: u64,
     ) -> Result<NoConnection> {
         send_packets(config, hardware, packets_to_send)?;
-        hardware.set_timer(timeout);
         Ok(NoConnection {
             negotiation: session,
+            timer_tracker: TimerTracker::with_timer(hardware, timeout),
         })
     }
 }
@@ -173,7 +174,7 @@ impl ConnectionStateTrait for NoConnection {
         }
 
         //// TIMER
-        if hardware.has_timer_fired() {
+        if self.timer_tracker.has_fired(hardware) {
             let (new_negotiation, packets_to_send, next_timeout) =
                 self.negotiation.has_timed_out(hardware.timestamp())?;
             log::warn!(
@@ -233,6 +234,7 @@ struct C2SHandshakeSent {
     current_timeout_interval: u64,
     /// How many times we've timed out
     num_timeouts_happened: u32,
+    timer_tracker: TimerTracker,
 }
 
 impl C2SHandshakeSent {
@@ -244,11 +246,11 @@ impl C2SHandshakeSent {
         hardware.clear_event_listeners()?;
         hardware.socket_connect(&config.peer_address)?;
         let next_timeout_instant = hardware.timestamp() + C2S_RETRANSMIT_TIMEOUT;
-        hardware.set_timer(next_timeout_instant);
         let mut result = C2SHandshakeSent {
             session,
             current_timeout_interval: C2S_RETRANSMIT_TIMEOUT,
             num_timeouts_happened: 0,
+            timer_tracker: TimerTracker::with_timer(hardware, next_timeout_instant),
         };
         result.send_one_handshake(config, hardware)?;
         Ok(result)
@@ -298,7 +300,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
         }
 
         //// TIMER
-        if hardware.has_timer_fired() {
+        if self.timer_tracker.has_fired(hardware) {
             log::warn!(
                 "In-protocol handshake timeout; we sent C2S handshake {} ago and received no response, trying again.",
                 ns_to_str(self.current_timeout_interval),
@@ -320,7 +322,7 @@ impl ConnectionStateTrait for C2SHandshakeSent {
             self.current_timeout_interval =
                 (self.current_timeout_interval * 2).clamp(0, C2S_MAX_TIMEOUT);
             let next_timeout = hardware.timestamp() + self.current_timeout_interval;
-            hardware.set_timer(next_timeout);
+            self.timer_tracker.set_timer(hardware, next_timeout);
             return Ok((true, ConnectionState::C2SHandshakeSent(self)));
         }
 
