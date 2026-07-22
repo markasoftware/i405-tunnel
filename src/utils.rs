@@ -53,12 +53,16 @@ impl BasicStats {
     pub(crate) fn from_vec(mut vec: Vec<u64>) -> BasicStats {
         vec.sort_unstable();
         let len = u64::try_from(vec.len()).unwrap();
-        let average = vec.iter().sum::<u64>() / len;
-        let variance = vec
+        let average = (vec.iter().map(|x| *x as u128).sum::<u128>() / len as u128)
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let variance = (vec
             .iter()
-            .map(|x| (std::cmp::max(*x, average) - std::cmp::min(*x, average)) ^ 2)
-            .sum::<u64>()
-            / len;
+            .map(|x| (x.abs_diff(average) as u128).pow(2))
+            .sum::<u128>()
+            / len as u128)
+            .try_into()
+            .unwrap_or(u64::MAX);
         BasicStats {
             average,
             variance,
@@ -154,5 +158,30 @@ mod test {
             ip_to_i405_length(1000 + 22 + 8 + 20, "[fe80::]:1405".parse().unwrap()),
             980
         );
+    }
+
+    #[test]
+    fn test_basic_stats_from_vec() {
+        let stats = BasicStats::from_vec(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(stats.average, 6);
+        assert_eq!(stats.variance, 10);
+        assert_eq!(stats.p50, 6);
+        assert_eq!(stats.p99, 11);
+        assert_eq!(stats.p999, 11);
+    }
+
+    #[test]
+    fn test_basic_stats_from_long_vec() {
+        let mut vec = Vec::new();
+        for i in 0..10000 {
+            vec.push(i);
+        }
+        let stats = BasicStats::from_vec(vec);
+        assert_eq!(stats.average, 4999);
+        assert_eq!(stats.variance, 8333333);
+        // don't think about it too hard
+        assert_eq!(stats.p50, 5000);
+        assert_eq!(stats.p99, 9900);
+        assert_eq!(stats.p999, 9990);
     }
 }
