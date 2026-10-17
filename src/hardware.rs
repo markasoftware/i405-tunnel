@@ -162,7 +162,8 @@ pub(crate) trait Hardware {
     /// full so don't let that happen!
     fn read_incoming_packet(&self) -> Option<ReadIncomingPacket>;
 
-    /// Write an IP packet to the physical network interface at the given time. Should be called only shortly before the given time.
+    /// Write an IP packet to the physical network interface at the given time. Should be called
+    /// only shortly before the given time. Blocks until that time.
     fn send_outgoing_packet(
         &self,
         packet: &[u8],
