@@ -1,4 +1,4 @@
-use std::sync::{atomic::Ordering, mpsc, Arc};
+use std::sync::{Arc, atomic::Ordering, mpsc};
 
 // an mpsc queue that notifies a Parker whenever an item is added to a queue the first time after it
 // was observed as being empty. For our Cores: They consume data from multiple queues until there is
@@ -45,22 +45,62 @@ impl AtomicBool for std::sync::atomic::AtomicBool {
     }
 }
 
+trait MpscSender<T> {
+    fn send(&self, item: T) -> Result<(), mpsc::SendError<T>>;
+}
+
+trait MpscReceiver<T> {
+    fn try_recv(&self) -> Result<T, mpsc::TryRecvError>;
+}
+
+trait Mpsc<T> {
+    type Sender: MpscSender<T>;
+    type Receiver: MpscReceiver<T>;
+
+    fn channel() -> (Self::Sender, Self::Receiver);
+}
+
+impl<T> MpscSender<T> for mpsc::Sender<T> {
+    fn send(&self, item: T) -> Result<(), mpsc::SendError<T>> {
+        self.send(item)
+    }
+}
+
+impl<T> MpscReceiver<T> for mpsc::Receiver<T> {
+    fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+        self.try_recv()
+    }
+}
+
+struct StdMpsc;
+
+impl<T> Mpsc<T> for StdMpsc {
+    type Sender = mpsc::Sender<T>;
+    type Receiver = mpsc::Receiver<T>;
+
+    fn channel() -> (Self::Sender, Self::Receiver) {
+        mpsc::channel()
+    }
+}
+
 // don't need traits for mpsc::Sender or mpsc::Receiver because we only use the non-blocking `try_*`
 // methods on these, so loom wouldn't have anything to reorder wrt sending and receiving.
 
-pub(crate) struct Sender<T, U: Unparker, A: AtomicBool> {
-    inner: mpsc::Sender<T>,
+pub(crate) struct Sender<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> {
+    inner: M::Sender,
     unparker: U,
     observed_empty: Arc<A>,
 }
 
-pub(crate) struct Receiver<T, A: AtomicBool> {
-    inner: mpsc::Receiver<T>,
+pub(crate) struct Receiver<T, M: Mpsc<T>, A: AtomicBool> {
+    inner: M::Receiver,
     observed_empty: Arc<A>,
 }
 
-fn channel<T, U: Unparker, A: AtomicBool>(unparker: U) -> (Sender<T, U, A>, Receiver<T, A>) {
-    let (inner_sender, inner_receiver) = mpsc::channel();
+fn channel<T, M: Mpsc<T>, U: Unparker, A: AtomicBool>(
+    unparker: U,
+) -> (Sender<T, M, U, A>, Receiver<T, M, A>) {
+    let (inner_sender, inner_receiver) = M::channel();
     let observed_empty = Arc::new(A::new(false));
     (
         Sender {
@@ -71,29 +111,28 @@ fn channel<T, U: Unparker, A: AtomicBool>(unparker: U) -> (Sender<T, U, A>, Rece
         Receiver {
             inner: inner_receiver,
             observed_empty,
-        }
+        },
     )
 }
 
-impl<T, U: Unparker, A: AtomicBool> Sender<T, U, A> {
-    fn send(self: &mut Sender<T, U, A>, item: T) -> Result<(), mpsc::SendError<T>> {
+impl<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> Sender<T, M, U, A> {
+    fn send(self: &mut Sender<T, M, U, A>, item: T) -> Result<(), mpsc::SendError<T>> {
         // send first so we can't possibly wake up other side and they observe empty again before we
         // even sent it
         self.inner.send(item)?;
         // don't really need seqcst, but it ensures that loom is deterministic
         if self.observed_empty.load() {
+            self.observed_empty.store(false);
             self.unparker.unpark();
         }
         Ok(())
     }
 }
 
-impl<T, A: AtomicBool> Receiver<T, A> {
+impl<T, M: Mpsc<T>, A: AtomicBool> Receiver<T, M, A> {
     pub(crate) fn try_recv(self: &mut Self) -> Result<T, mpsc::TryRecvError> {
         match self.inner.try_recv() {
-            Ok(item) => {
-                Ok(item)
-            }
+            Ok(item) => Ok(item),
             Err(mpsc::TryRecvError::Empty) => {
                 self.observed_empty.store(true);
                 // try to read once more
@@ -106,7 +145,7 @@ impl<T, A: AtomicBool> Receiver<T, A> {
                     Err(mpsc::TryRecvError::Empty) => Err(mpsc::TryRecvError::Empty),
                     Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
                 }
-            },
+            }
             Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
         }
     }
@@ -115,10 +154,14 @@ impl<T, A: AtomicBool> Receiver<T, A> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{cell::Cell, sync::{atomic::AtomicU64, mpsc}};
-    use std::sync::atomic::AtomicBool as StdAtomicBool;
     use loom::sync::atomic::AtomicBool as LoomAtomicBool;
     use parking::Parker;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool as StdAtomicBool;
+    use std::{
+        cell::Cell,
+        sync::{atomic::AtomicU64, mpsc},
+    };
 
     impl AtomicBool for LoomAtomicBool {
         fn store(&self, val: bool) {
@@ -150,22 +193,68 @@ mod test {
         }
     }
 
-    impl Unparker for MockUnparker {
+    impl Unparker for &MockUnparker {
         fn unpark(&self) {
-            self.num_times_unparked.set(self.num_times_unparked.get() + 1);
+            self.num_times_unparked
+                .set(self.num_times_unparked.get() + 1);
         }
     }
 
+    // a little cursed but it works for us; doing a blanket impl over AsRef<Notify> makes it worried
+    // about conflicts due to future crates implementing AsRef<Notify> eg on parking::Unparker
+    impl Unparker for Arc<loom::sync::Notify> {
+        fn unpark(&self) {
+            self.notify()
+        }
+    }
+
+    // gigacursed: We can't use `loom::mpsc` because of what I interpret as a bug in loom: It
+    // doesn't properly branch / schedule / recognize cross-thread dependencies or whatever on
+    // try_recv and so only does one iteration if you use `loom::sync::mpsc`. Using a mutex
+    // explicitly like here lets it know for sure there is a cross-thread dependency.
+
+    impl<T> MpscSender<T> for Arc<loom::sync::Mutex<VecDeque<T>>> {
+        fn send(&self, item: T) -> Result<(), mpsc::SendError<T>> {
+            self.lock().unwrap().push_back(item);
+            Ok(())
+        }
+    }
+
+    impl<T> MpscReceiver<T> for Arc<loom::sync::Mutex<VecDeque<T>>> {
+        fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+            self.lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(mpsc::TryRecvError::Empty)
+        }
+    }
+
+    struct LoomMpsc;
+
+    impl<T> Mpsc<T> for LoomMpsc {
+        type Sender = Arc<loom::sync::Mutex<VecDeque<T>>>;
+        type Receiver = Arc<loom::sync::Mutex<VecDeque<T>>>;
+
+        fn channel() -> (Self::Sender, Self::Receiver) {
+            let sender = Arc::new(loom::sync::Mutex::new(VecDeque::new()));
+            (sender.clone(), sender)
+        }
+    }
+
+    // just mocks out the unparker and verifies it's unparked the correct number of times (rule out spurious wakeups)
     #[test]
-    fn send_recv_no_parker() {
+    fn send_recv_one_thread() {
         let unparker = MockUnparker::new();
-        let (mut sender, mut receiver) = channel::<u64, MockUnparker, StdAtomicBool>(unparker);
+        let (mut sender, mut receiver) =
+            channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
         // assert_eq vs unwrap, the eternal debate
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
         // why not twice?
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
 
+        assert_eq!(unparker.num_times_unparked(), 0);
         sender.send(0).unwrap();
+        assert_eq!(unparker.num_times_unparked(), 1);
         assert_eq!(receiver.try_recv(), Ok(0));
 
         sender.send(1).unwrap();
@@ -175,11 +264,43 @@ mod test {
         assert_eq!(receiver.try_recv(), Ok(2));
         assert_eq!(receiver.try_recv(), Ok(3));
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        // final count check
+        assert_eq!(unparker.num_times_unparked(), 1);
     }
 
+    // what does an effective loom test for the parking channel look like? The tricky bits are
+    // around ensuring that no matter how you're reading from the channel, you're consistently
+    // awoken enough to read everything. We won't assert against spurious wakeups here; the tests
+    // using MockUnparker above should handle that.
     #[test]
-    fn send_recv_parker() {
-        let unparker = MockUnparker::new();
-        let (mut sender, mut receiver) = channel::<u64, MockUnparker, StdAtomicBool>(unparker);
+    fn loom_two_threads() {
+        loom::model(|| {
+            let notify = Arc::new(loom::sync::Notify::new());
+            let (mut sender, mut receiver) =
+                channel::<u64, LoomMpsc, Arc<loom::sync::Notify>, LoomAtomicBool>(notify.clone());
+            let num_items = 2;
+            // SENDER
+            loom::thread::spawn(move || {
+                for i in 0..num_items {
+                    sender.send(i);
+                }
+            });
+            // RECEIVER
+            loom::thread::spawn(move || {
+                let mut next_expected: u64 = 0;
+                while next_expected < num_items {
+                    match receiver.try_recv() {
+                        Ok(i) => {
+                            assert_eq!(i, next_expected);
+                            next_expected += 1;
+                        }
+                        // block until we can read sth
+                        Err(mpsc::TryRecvError::Empty) => notify.wait(),
+                        Err(mpsc::TryRecvError::Disconnected) => panic!("Disconnected!"),
+                    }
+                }
+            });
+            // no need to `.join` the threads; loom::model always waits until spawned threads exit
+        });
     }
 }
