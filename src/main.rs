@@ -17,6 +17,7 @@ mod hardware;
 mod jitter;
 mod messages;
 mod monitor_packets;
+mod parking_channel;
 mod queued_ip_packet;
 mod reliability;
 mod utils;
