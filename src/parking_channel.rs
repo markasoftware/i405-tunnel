@@ -130,10 +130,7 @@ mod detail {
     }
 
     impl<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> Sender<T, M, U, A> {
-        pub(crate) fn send(
-            self: &mut Sender<T, M, U, A>,
-            item: T,
-        ) -> Result<(), mpsc::SendError<T>> {
+        pub(crate) fn send(self: &mut Sender<T, M, U, A>, item: T) -> Result<(), mpsc::SendError<T>> {
             // send first so we can't possibly wake up other side and they observe empty again before we
             // even sent it
             self.inner.as_ref().unwrap().send(item)?;
@@ -301,8 +298,7 @@ mod detail {
         #[test]
         fn sender_drop() {
             let unparker = MockUnparker::new();
-            let (mut sender, mut receiver) =
-                channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
+            let (mut sender, mut receiver) = channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
             assert_eq!(unparker.num_times_unparked(), 0);
             std::mem::drop(sender);
             assert_eq!(unparker.num_times_unparked(), 1);
@@ -324,14 +320,13 @@ mod detail {
                     );
                 // it took a very long time (about 15 minutes), but this passed at 3 as well.
                 let num_items = 2;
-                // SENDER
-                loom::thread::spawn(move || {
+                let send_thread = loom::thread::spawn(move || {
                     for i in 0..num_items {
-                        sender.send(i);
+                        sender.send(i).unwrap();
                     }
+                    sender
                 });
-                // RECEIVER
-                loom::thread::spawn(move || {
+                let recv_thread = loom::thread::spawn(move || {
                     let mut next_expected: u64 = 0;
                     while next_expected < num_items {
                         match receiver.try_recv() {
@@ -345,7 +340,15 @@ mod detail {
                         }
                     }
                 });
-                // no need to `.join` the threads; loom::model always waits until spawned threads exit
+                // in loom, you generally don't need to explicitly `join` the threads; the
+                // loom::model will implicitly go until all threads have completed. The reason we
+                // wait is subtle: We want to make sure `sender` is not dropped until after both
+                // threads are done, because on Drop, the sender does an extra explicit `unpark`! We
+                // want to make sure everything stays live / the receiver gets appropriately
+                // unparked even without the extra unpark from the drop.
+                recv_thread.join().unwrap();
+                // type annotation just to make sure it's actually returned
+                let _sender: super::Sender<u64, LoomMpsc, Arc<loom::sync::Notify>, LoomAtomicBool> = send_thread.join().unwrap();
             });
         }
     }
