@@ -99,7 +99,8 @@ mod detail {
     // methods on these, so loom wouldn't have anything to reorder wrt sending and receiving.
 
     pub(crate) struct Sender<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> {
-        inner: M::Sender,
+        // option so we can drop it before sending out the notification on Drop
+        inner: Option<M::Sender>,
         unparker: U,
         observed_empty: Arc<A>,
     }
@@ -117,7 +118,7 @@ mod detail {
         let observed_empty = Arc::new(A::new(false));
         (
             Sender {
-                inner: inner_sender,
+                inner: Some(inner_sender),
                 unparker,
                 observed_empty: observed_empty.clone(),
             },
@@ -129,16 +130,31 @@ mod detail {
     }
 
     impl<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> Sender<T, M, U, A> {
-        fn send(self: &mut Sender<T, M, U, A>, item: T) -> Result<(), mpsc::SendError<T>> {
+        pub(crate) fn send(
+            self: &mut Sender<T, M, U, A>,
+            item: T,
+        ) -> Result<(), mpsc::SendError<T>> {
             // send first so we can't possibly wake up other side and they observe empty again before we
             // even sent it
-            self.inner.send(item)?;
+            self.inner.as_ref().unwrap().send(item)?;
             // don't really need seqcst, but it ensures that loom is deterministic
             if self.observed_empty.load() {
                 self.observed_empty.store(false);
                 self.unparker.unpark();
             }
             Ok(())
+        }
+    }
+
+    impl<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> Drop for Sender<T, M, U, A> {
+        fn drop(&mut self) {
+            // drop the mpsc sender first so we're guaranteed that by the time the receiver observes
+            // it, they'll be able to read the Disconnected error.
+
+            // TODO loom test for this, it's a bit annoying cause we can't just use the VecDeque
+            // anymore...would need to wrap a real mpsc queue (not that hard tho)
+            self.inner = None;
+            self.unparker.unpark();
         }
     }
 
@@ -280,6 +296,17 @@ mod detail {
             assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
             // final count check
             assert_eq!(unparker.num_times_unparked(), 1);
+        }
+
+        #[test]
+        fn sender_drop() {
+            let unparker = MockUnparker::new();
+            let (mut sender, mut receiver) =
+                channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
+            assert_eq!(unparker.num_times_unparked(), 0);
+            std::mem::drop(sender);
+            assert_eq!(unparker.num_times_unparked(), 1);
+            assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Disconnected));
         }
 
         // what does an effective loom test for the parking channel look like? The tricky bits are
