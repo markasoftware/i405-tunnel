@@ -13,7 +13,14 @@ use std::sync::atomic::AtomicBool as StdAtomicBool;
 // but did not attempt to read from it again, and therefore does not need to be woken on the next
 // item.
 
-// traits only exist for easy Loom testing
+// This file is laughably complicated because I wanted to try out Loom. So this file is very
+// thoroughly tested by Loom, and in the process I discovered that Loom is not very good about
+// exploration. It's mpsc implementation does not have proper exploration hooks everywhere, so we
+// have to wrap an mpsc queue with random mutex locks and unlocks just to convince it that threads
+// are interacting. Loom's mpsc is especially bad because it will never emit a Disconnected, it just
+// goes to Empty indefinitely, which would break our test. So we're actually testing using a hacky
+// wrapper around std mpsc with extra loom mutex locks and unlocks :| but at the end of the day,
+// this fairly simple structure here is extremely thoroughly tested!
 
 pub(crate) type Sender<T> = detail::Sender<T, detail::StdMpsc, parking::Unparker, StdAtomicBool>;
 pub(crate) type Receiver<T> = detail::Receiver<T, detail::StdMpsc, StdAtomicBool>;
@@ -130,7 +137,10 @@ mod detail {
     }
 
     impl<T, M: Mpsc<T>, U: Unparker, A: AtomicBool> Sender<T, M, U, A> {
-        pub(crate) fn send(self: &mut Sender<T, M, U, A>, item: T) -> Result<(), mpsc::SendError<T>> {
+        pub(crate) fn send(
+            self: &mut Sender<T, M, U, A>,
+            item: T,
+        ) -> Result<(), mpsc::SendError<T>> {
             // send first so we can't possibly wake up other side and they observe empty again before we
             // even sent it
             self.inner.as_ref().unwrap().send(item)?;
@@ -147,9 +157,6 @@ mod detail {
         fn drop(&mut self) {
             // drop the mpsc sender first so we're guaranteed that by the time the receiver observes
             // it, they'll be able to read the Disconnected error.
-
-            // TODO loom test for this, it's a bit annoying cause we can't just use the VecDeque
-            // anymore...would need to wrap a real mpsc queue (not that hard tho)
             self.inner = None;
             self.unparker.unpark();
         }
@@ -183,12 +190,7 @@ mod detail {
     mod test {
         use super::*;
         use loom::sync::atomic::AtomicBool as LoomAtomicBool;
-        use parking::Parker;
-        use std::collections::VecDeque;
-        use std::{
-            cell::Cell,
-            sync::{atomic::AtomicU64, mpsc},
-        };
+        use std::{cell::Cell, sync::mpsc};
 
         impl AtomicBool for LoomAtomicBool {
             fn store(&self, val: bool) {
@@ -227,8 +229,9 @@ mod detail {
             }
         }
 
-        // a little cursed but it works for us; doing a blanket impl over AsRef<Notify> makes it worried
-        // about conflicts due to future crates implementing AsRef<Notify> eg on parking::Unparker
+        // a little cursed but it works for us; doing a blanket impl over AsRef<Notify> makes it
+        // worried about conflicts due to future crates implementing AsRef<Notify> eg on
+        // parking::Unparker
         impl Unparker for Arc<loom::sync::Notify> {
             fn unpark(&self) {
                 self.notify()
@@ -240,31 +243,57 @@ mod detail {
         // try_recv and so only does one iteration if you use `loom::sync::mpsc`. Using a mutex
         // explicitly like here lets it know for sure there is a cross-thread dependency.
 
-        impl<T> MpscSender<T> for Arc<loom::sync::Mutex<VecDeque<T>>> {
-            fn send(&self, item: T) -> Result<(), mpsc::SendError<T>> {
-                self.lock().unwrap().push_back(item);
-                Ok(())
-            }
-        }
-
-        impl<T> MpscReceiver<T> for Arc<loom::sync::Mutex<VecDeque<T>>> {
-            fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
-                self.lock()
-                    .unwrap()
-                    .pop_front()
-                    .ok_or(mpsc::TryRecvError::Empty)
-            }
-        }
-
         struct LoomMpsc;
 
+        struct LoomSender<T> {
+            inner: Option<mpsc::Sender<T>>,
+            mutex: Arc<loom::sync::Mutex<()>>,
+        }
+
+        impl<T> MpscSender<T> for LoomSender<T> {
+            fn send(&self, item: T) -> Result<(), mpsc::SendError<T>> {
+                let _guard = self.mutex.lock().unwrap();
+                self.inner.as_ref().unwrap().send(item)
+            }
+        }
+
+        // we need to do mutex ops around the drop in order for loom to properly fail when we swap
+        // the order of the operations in the ParkingChannel Drop implementation.
+        impl<T> Drop for LoomSender<T> {
+            fn drop(&mut self) {
+                let _guard = self.mutex.lock().unwrap();
+                drop(self.inner.take());
+            }
+        }
+
+        struct LoomReceiver<T> {
+            inner: mpsc::Receiver<T>,
+            mutex: Arc<loom::sync::Mutex<()>>,
+        }
+
+        impl<T> MpscReceiver<T> for LoomReceiver<T> {
+            fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+                let _guard = self.mutex.lock().unwrap();
+                self.inner.try_recv()
+            }
+        }
+
         impl<T> Mpsc<T> for LoomMpsc {
-            type Sender = Arc<loom::sync::Mutex<VecDeque<T>>>;
-            type Receiver = Arc<loom::sync::Mutex<VecDeque<T>>>;
+            type Sender = LoomSender<T>;
+            type Receiver = LoomReceiver<T>;
 
             fn channel() -> (Self::Sender, Self::Receiver) {
-                let sender = Arc::new(loom::sync::Mutex::new(VecDeque::new()));
-                (sender.clone(), sender)
+                let (sender, receiver) = mpsc::channel::<T>();
+                let mutex = Arc::new(loom::sync::Mutex::new(()));
+                let sender = LoomSender {
+                    inner: Some(sender),
+                    mutex: mutex.clone(),
+                };
+                let receiver = LoomReceiver {
+                    inner: receiver,
+                    mutex,
+                };
+                (sender, receiver)
             }
         }
 
@@ -298,7 +327,8 @@ mod detail {
         #[test]
         fn sender_drop() {
             let unparker = MockUnparker::new();
-            let (mut sender, mut receiver) = channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
+            let (sender, mut receiver) =
+                channel::<u64, StdMpsc, &MockUnparker, StdAtomicBool>(&unparker);
             assert_eq!(unparker.num_times_unparked(), 0);
             std::mem::drop(sender);
             assert_eq!(unparker.num_times_unparked(), 1);
@@ -309,6 +339,13 @@ mod detail {
         // around ensuring that no matter how you're reading from the channel, you're consistently
         // awoken enough to read everything. We won't assert against spurious wakeups here; the tests
         // using MockUnparker above should handle that.
+
+        // Generally the best way to verify that loom is actually testing what you want it to test
+        // is by mutation test: Modify the code in a way that should subtly break the test, and
+        // verify that it actually breaks. For example, for us, that means eg changing the order at
+        // which we add to the queue, and reset the "observed empty" atomic bool, and observing that
+        // the test fails. I'm not gonna automate that, but if you modify any of this code,
+        // definitely do some mutations and check that the loom tests fail!
         #[test]
         #[ignore]
         fn loom_two_threads() {
@@ -347,8 +384,49 @@ mod detail {
                 // want to make sure everything stays live / the receiver gets appropriately
                 // unparked even without the extra unpark from the drop.
                 recv_thread.join().unwrap();
-                // type annotation just to make sure it's actually returned
-                let _sender: super::Sender<u64, LoomMpsc, Arc<loom::sync::Notify>, LoomAtomicBool> = send_thread.join().unwrap();
+                // type annotation just to make sure it's actually returned and wasn't dropped
+                // earlier
+                let _sender: super::Sender<u64, LoomMpsc, Arc<loom::sync::Notify>, LoomAtomicBool> =
+                    send_thread.join().unwrap();
+            });
+        }
+
+        #[test]
+        #[ignore]
+        fn loom_shutdown() {
+            loom::model(|| {
+                let notify = Arc::new(loom::sync::Notify::new());
+                let (mut sender, mut receiver) =
+                    channel::<u64, LoomMpsc, Arc<loom::sync::Notify>, LoomAtomicBool>(
+                        notify.clone(),
+                    );
+                // I think this tests everything we want (mutation eg in the order of operations in
+                // the ParkingChannel Sender Drop impl causes this to fail)
+                let num_items = 1;
+                loom::thread::spawn(move || {
+                    for i in 0..num_items {
+                        sender.send(i).unwrap();
+                    }
+                });
+                loom::thread::spawn(move || {
+                    let mut next_expected: u64 = 0;
+                    while next_expected < num_items {
+                        match receiver.try_recv() {
+                            Ok(i) => {
+                                assert_eq!(i, next_expected);
+                                next_expected += 1;
+                            }
+                            // block until we can read sth
+                            Err(mpsc::TryRecvError::Empty) => notify.wait(),
+                            Err(mpsc::TryRecvError::Disconnected) => panic!("Disconnected!"),
+                        }
+                    }
+                    // now, unlike the simple test, the sender could be dropped. Let's make sure
+                    // that eventually happens, and wakes us up!
+                    while receiver.try_recv().unwrap_err() != mpsc::TryRecvError::Disconnected {
+                        notify.wait();
+                    }
+                });
             });
         }
     }
