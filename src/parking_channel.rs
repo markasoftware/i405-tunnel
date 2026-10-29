@@ -29,6 +29,21 @@ pub(crate) fn channel<T>(unparker: parking::Unparker) -> (Sender<T>, Receiver<T>
     detail::channel(unparker)
 }
 
+pub(crate) mod sync {
+    use super::{StdAtomicBool, detail};
+
+    pub(crate) type Sender<T, const N: usize> =
+        detail::Sender<T, detail::StdSyncMpsc<N>, parking::Unparker, StdAtomicBool>;
+    pub(crate) type Receiver<T, const N: usize> =
+        detail::Receiver<T, detail::StdSyncMpsc<N>, StdAtomicBool>;
+
+    pub(crate) fn channel<T, const N: usize>(
+        unparker: parking::Unparker,
+    ) -> (Sender<T, N>, Receiver<T, N>) {
+        detail::channel(unparker)
+    }
+}
+
 mod detail {
 
     use std::sync::atomic::AtomicBool as StdAtomicBool;
@@ -85,6 +100,12 @@ mod detail {
         }
     }
 
+    impl<T> MpscSender<T> for mpsc::SyncSender<T> {
+        fn send(&self, item: T) -> Result<(), mpsc::SendError<T>> {
+            self.send(item)
+        }
+    }
+
     impl<T> MpscReceiver<T> for mpsc::Receiver<T> {
         fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
             self.try_recv()
@@ -99,6 +120,17 @@ mod detail {
 
         fn channel() -> (Self::Sender, Self::Receiver) {
             mpsc::channel()
+        }
+    }
+
+    pub(crate) struct StdSyncMpsc<const N: usize>;
+
+    impl<T, const N: usize> Mpsc<T> for StdSyncMpsc<N> {
+        type Sender = mpsc::SyncSender<T>;
+        type Receiver = mpsc::Receiver<T>;
+
+        fn channel() -> (Self::Sender, Self::Receiver) {
+            mpsc::sync_channel(N)
         }
     }
 
