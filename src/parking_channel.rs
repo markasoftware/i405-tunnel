@@ -29,19 +29,15 @@ pub(crate) fn channel<T>(unparker: parking::Unparker) -> (Sender<T>, Receiver<T>
     detail::channel(unparker)
 }
 
-pub(crate) mod sync {
-    use super::{StdAtomicBool, detail};
+pub(crate) type SyncSender<T, const N: usize> =
+    detail::Sender<T, detail::StdSyncMpsc<N>, parking::Unparker, StdAtomicBool>;
+pub(crate) type SyncReceiver<T, const N: usize> =
+    detail::Receiver<T, detail::StdSyncMpsc<N>, StdAtomicBool>;
 
-    pub(crate) type Sender<T, const N: usize> =
-        detail::Sender<T, detail::StdSyncMpsc<N>, parking::Unparker, StdAtomicBool>;
-    pub(crate) type Receiver<T, const N: usize> =
-        detail::Receiver<T, detail::StdSyncMpsc<N>, StdAtomicBool>;
-
-    pub(crate) fn channel<T, const N: usize>(
-        unparker: parking::Unparker,
-    ) -> (Sender<T, N>, Receiver<T, N>) {
-        detail::channel(unparker)
-    }
+pub(crate) fn sync_channel<T, const N: usize>(
+    unparker: parking::Unparker,
+) -> (SyncSender<T, N>, SyncReceiver<T, N>) {
+    detail::channel(unparker)
 }
 
 mod detail {

@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
     sync::{Arc, mpsc},
@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use parking::Parker;
 
 use crate::{
     array_array::IpPacketBuffer,
@@ -15,6 +16,7 @@ use crate::{
     deviation_stats::DeviationStatsThread,
     hardware::Hardware,
     monitor_packets::MonitorPacketsThread,
+    parking_channel,
     utils::{ChannelThread, RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
@@ -26,14 +28,13 @@ use super::{
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
 const OVERSLEEP_WARNING: Duration = Duration::from_micros(250);
+const OUTGOING_READS_CHANNEL_QLEN: usize = 2;
 
 pub(crate) struct SleepyHardware {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
     // for interval tracking
     next_outgoing_packet_id: Cell<u64>,
-    // true if the core has a pending request to read an outgoing packet
-    currently_reading_outgoing: Cell<bool>,
     // we'll "connect" to this address to disconnect:
     _disconnect_addr: SocketAddr,
 
@@ -42,17 +43,20 @@ pub(crate) struct SleepyHardware {
     tun: Arc<tun_rs::SyncDevice>,
     tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
 
-    outgoing_read_thread: ChannelThread<()>,
+    _outgoing_read_thread: ChannelThread<()>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
+    // There are simpler ways to do a stop token (eg, weak Arc) but we already have the
+    // ChannelThread, may's well use it.
     _incoming_read_thread: ChannelThread<()>,
     deviation_stats_thread: Option<DeviationStatsThread>,
     monitor_packets_thread: Option<MonitorPacketsThread>,
 
-    // events_rx should be listed after the threads, because if it's dropped before the threads are
-    // dropped, then the threads may try to send to their events_txs after the receiver has been
-    // dropped, and get errors.
-    events_rx: mpsc::Receiver<Event>,
+    incoming_reads_rx: RefCell<parking_channel::Receiver<ReadIncomingPacket>>,
+    outgoing_reads_rx:
+        RefCell<parking_channel::SyncReceiver<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>>,
+
+    parker: Parker,
 
     shutdown_requested: ShutdownRequested,
 }
@@ -64,10 +68,12 @@ impl SleepyHardware {
         deviation_stats: Option<Duration>,
         monitor_packets_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        let (outgoing_read_requests_tx, outgoing_read_requests_rx) = mpsc::channel();
-        let (incoming_reads_tx, incoming_reads_rx) = mpsc::channel();
-
-        let (events_tx, events_rx) = mpsc::channel();
+        let (parker, unparker) = parking::pair();
+        let (outgoing_reads_channel_tx, outgoing_reads_channel_rx) = mpsc::channel();
+        let (incoming_reads_channel_tx, incoming_reads_channel_rx) = mpsc::channel();
+        let (outgoing_reads_tx, outgoing_reads_rx) =
+            parking_channel::sync_channel(unparker.clone());
+        let (incoming_reads_tx, incoming_reads_rx) = parking_channel::channel(unparker.clone());
 
         let socket = Arc::new(UdpSocket::bind(listen_addr)?);
         // we set a read timeout so that the read thread can't block indefinitely, which would
@@ -91,9 +97,11 @@ impl SleepyHardware {
         let shutdown_requested = ShutdownRequested::new();
         ctrlc::set_handler({
             let shutdown_requested = shutdown_requested.clone();
+            let unparker = unparker.clone();
             move || {
                 log::info!("Shutting down I405 due to received signal");
                 shutdown_requested.user_request_shutdown();
+                unparker.unpark();
             }
         })
         .expect("Error installing signal handlers");
@@ -101,7 +109,6 @@ impl SleepyHardware {
         Ok(Self {
             epoch,
             next_outgoing_packet_id: Cell::new(0),
-            currently_reading_outgoing: Cell::new(false),
             _disconnect_addr: crate::hardware::real::disconnect_addr(listen_addr),
 
             timer: Cell::new(None),
@@ -109,24 +116,27 @@ impl SleepyHardware {
             tun: tun.clone(),
             tun_interrupt_event: tun_interrupt_event.clone(),
 
-            events_rx,
             shutdown_requested,
 
-            outgoing_read_thread: ChannelThread::spawn(outgoing_read_requests_tx, {
-                let events_tx = events_tx.clone();
-                move || {
-                    outgoing_read_thread(
-                        outgoing_read_requests_rx,
-                        events_tx,
-                        tun,
-                        tun_interrupt_event,
-                        epoch,
-                    )
-                }
+            incoming_reads_rx: RefCell::new(incoming_reads_rx),
+            outgoing_reads_rx: RefCell::new(outgoing_reads_rx),
+            parker,
+
+            _outgoing_read_thread: ChannelThread::spawn(outgoing_reads_channel_tx, move || {
+                outgoing_read_thread(
+                    outgoing_reads_channel_rx,
+                    outgoing_reads_tx,
+                    tun,
+                    tun_interrupt_event,
+                    epoch,
+                )
             }),
-            _incoming_read_thread: ChannelThread::spawn(incoming_reads_tx, {
-                let events_tx = events_tx.clone();
-                move || incoming_read_thread(incoming_reads_rx, events_tx, incoming_read_socket)
+            _incoming_read_thread: ChannelThread::spawn(incoming_reads_channel_tx, move || {
+                incoming_read_thread(
+                    incoming_reads_channel_rx,
+                    incoming_reads_tx,
+                    incoming_read_socket,
+                )
             }),
             deviation_stats_thread: deviation_stats.map(DeviationStatsThread::spawn),
             monitor_packets_thread: monitor_packets_dir
@@ -145,115 +155,83 @@ impl SleepyHardware {
 
             // only set if the user requested a timer, /and/ that timer is short enough that we're
             // actually able to use it.
-            let event_or_timeout = match self.timer.get() {
+            match self.timer.get() {
                 Some(timer_nanos) => {
                     let timeout_instant = timestamp_to_instant(self.epoch, timer_nanos);
                     let overshoot_duration =
                         Instant::now().saturating_duration_since(timeout_instant);
+                    // why won't this happen every time? first of all, idk, and second of all,
+                    // usually park_deadline() will wake up a bit after the deadline hopefully,
+                    // which means the on_event will see that the timer passed, and clear it, before
+                    // we loop around again here.
                     if !overshoot_duration.is_zero() {
                         log::warn!(
                             "Timer set in the past, by {}",
                             humantime::format_duration(overshoot_duration)
                         );
-                    }
-                    let timeout_duration_from_now =
-                        timeout_instant.saturating_duration_since(Instant::now());
-                    // TODO don't keep trying to recv events if we are late for the next timer, give
-                    // precedence to the timer. Probably want to do so even if we aren't quite at the timer time yet.
-                    self.events_rx.recv_timeout(timeout_duration_from_now)
-                }
-                None => self
-                    .events_rx
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            match event_or_timeout {
-                Ok(Event::OutgoingRead { timestamp, packet }) => {
-                    // TODO the packet comes to us as &[u8], then we wrap it in an
-                    // IpPacketBuffer, then we deref it here, then it'll almost certainly be
-                    // made back into an IpPacketBuffer again later. Does explicitly converting
-                    // it back and forth between a slice and an IpPacketBuffer cause even more
-                    // copying than necessary? Probably depends on inlining and stuff but I'm
-                    // not sure!
-                    if self.currently_reading_outgoing.get() {
-                        // important to set to false /before/ calling the event handler, because the
-                        // event handler may set it back to true:
-                        self.currently_reading_outgoing.replace(false);
-                        // core.on_read_outgoing_packet(self, &packet, timestamp);
-                        todo!();
+                        // don't park if timer passed
                     } else {
-                        log::warn!(
-                            "Dropping packet because currently_reading_outgoing=false (this is normal after reconnection)"
-                        );
+                        self.parker.park_deadline(timeout_instant);
                     }
                 }
-                Ok(Event::IncomingRead { addr, packet }) => {
-                    //core.on_read_incoming_packet(self, &packet, addr);
-                    todo!();
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let activated_timer = self.timer.take();
-                    //core.on_timer(self, activated_timer.unwrap());
-                    todo!();
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("events_rx shouldn't disconnect as long as the hardware lives.")
-                }
-            }
+                // TODO before on_event merge: how did user-iniated shutdown work before? i didn't
+                // see it pushing to the event queue from the ctrlc handler.
+                None => self.parker.park(),
+            };
+            core.on_event(self);
         }
     }
 }
 
 impl Drop for SleepyHardware {
     fn drop(&mut self) {
-        // shuts down the in-progress tun.recv. I believe it's `poll`-ing on a pipe
+        // shuts down the in-progress tun.recv. I believe it's `poll`-ing on a pipe. `trigger()`
+        // doesn't just trigger inflight `recv_intr` calls -- all future `recv_inter` will
+        // immediately interrupt until the event is `reset`, so there's no race here: Even if the
+        // outgoing read thread loops around and passes the next channel_rx.try_recv after the first
+        // time the tun event is interrupted, it will get interrupted immediately again, etc, until
+        // it observes channel_rx.try_recv = Disconnected.
         self.tun_interrupt_event
             .trigger()
             .expect("Failed to trigger tun_rs InterruptEvent during sleepy shutdown");
     }
 }
 
-// the plan is to remove these Events entirely. Instead, we'll make everything polling-based, and
-// then simply use a condition variable triggered by each sending thread to indicate that it's time
-// to read from some mpsc queue.
-enum Event {
-    OutgoingRead {
-        timestamp: u64,
-        packet: IpPacketBuffer,
-    },
-    IncomingRead {
-        addr: SocketAddr,
-        packet: IpPacketBuffer,
-    },
-}
-
 fn outgoing_read_thread(
-    read_request_rx: mpsc::Receiver<()>,
-    tx: mpsc::Sender<Event>,
+    rx: mpsc::Receiver<()>,
+    mut tx: parking_channel::SyncSender<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>,
     tun: Arc<tun_rs::SyncDevice>,
     tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
     epoch: Instant,
 ) {
-    while let Ok(()) = read_request_rx.recv() {
-        let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
-        match tun.recv_intr(&mut buf, &tun_interrupt_event) {
-            Ok(len) => {
-                buf.shrink(len);
-                if tx
-                    .send(Event::OutgoingRead {
-                        packet: buf,
-                        timestamp: instant_to_timestamp(epoch, Instant::now()),
-                    })
-                    .is_err()
-                {
-                    // the thread got disconnected
-                    return;
-                }
-            }
-            Err(err) => {
-                // if we are shutting down, ignore ConnectionAborted error -- that's normal.
-                if err.kind() != std::io::ErrorKind::Interrupted {
-                    log::error!("Outgoing read error (from tun): {err:?}");
+    loop {
+        match rx.try_recv() {
+            Ok(()) => panic!("Should never receive actual data in outgoing_read_thread"),
+            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {
+                let mut buf = IpPacketBuffer::new_empty(MAX_IP_PACKET_LENGTH);
+                // tun_interrupt_event is triggered on shutdown, which will cause next loop and then Disconnected.
+                match tun.recv_intr(&mut buf, &tun_interrupt_event) {
+                    Ok(len) => {
+                        buf.shrink(len);
+                        // synchronous send without timeout is OK here: will disconnect on shutdown.
+                        if tx
+                            .send(ReadOutgoingPacket {
+                                packet: buf,
+                                recv_timestamp: instant_to_timestamp(epoch, Instant::now()),
+                            })
+                            .is_err()
+                        {
+                            // disconnected is only err here
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        // if we are shutting down, ignore ConnectionAborted -- that's normal
+                        if err.kind() != std::io::ErrorKind::Interrupted {
+                            log::error!("Outgoing read error (from tun): {err:?}");
+                        }
+                    }
                 }
             }
         }
@@ -261,7 +239,11 @@ fn outgoing_read_thread(
     log::trace!("outgoing read thread quitting");
 }
 
-fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket: Arc<UdpSocket>) {
+fn incoming_read_thread(
+    rx: mpsc::Receiver<()>,
+    mut tx: parking_channel::Sender<ReadIncomingPacket>,
+    socket: Arc<UdpSocket>,
+) {
     let mut last_block = Instant::now() - SOCKET_READ_TIMEOUT;
     // keep reading packets until the channel disconnects
     loop {
@@ -273,7 +255,11 @@ fn incoming_read_thread(rx: mpsc::Receiver<()>, tx: mpsc::Sender<Event>, socket:
                 match socket.recv_from(&mut buf) {
                     Ok((len_recvd, addr)) => {
                         buf.shrink(len_recvd);
-                        tx.send(Event::IncomingRead { addr, packet: buf }).unwrap();
+                        tx.send(ReadIncomingPacket {
+                            peer: addr,
+                            packet: buf,
+                        })
+                        .unwrap();
                     }
                     // TODO somehow signal the error more seriously?
                     Err(err) => {
@@ -334,15 +320,15 @@ impl Hardware for SleepyHardware {
     }
 
     fn read_outgoing_packet(&self) -> Option<ReadOutgoingPacket> {
-        // there was a serious bug here previously, where we'd send an outgoing read request to the
-        // outgoing read thread even if we already had an outstanding request. The problem is, we
-        // set currently_reading_outgoing to false when we receive an incoming packet, so if
-        // multiple requests were sent to the thread, we'd drop the second one upon receipt. I'm not
-        // sure how to test this super effectively other than the TCP throughput end-to-end test.
-        // if !self.currently_reading_outgoing.replace(true) {
-        //     self.outgoing_read_thread.tx().send(()).unwrap();
-        // }
-        todo!();
+        // borrow_mut safe: Result is not a reference nor does it hold any reference so cannot
+        // possibly hold the refcell open.
+        match self.outgoing_reads_rx.borrow_mut().try_recv() {
+            Ok(pkt) => Some(pkt),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("Outgoing read thread disconnected while main thread still running")
+            }
+        }
     }
 
     // TODO consider remove Result from signature since it always succeeds (or, at least, we don't
@@ -397,9 +383,9 @@ impl Hardware for SleepyHardware {
         Ok(())
     }
 
+    // TODO before merge on_event: do we need this anymore? or should it just be clear_timer?
     fn clear_event_listeners(&self) -> Result<()> {
         self.timer.replace(None);
-        self.currently_reading_outgoing.replace(false);
         // self.socket.connect(self.disconnect_addr)?;
         Ok(())
     }
@@ -448,6 +434,14 @@ impl Hardware for SleepyHardware {
     }
 
     fn read_incoming_packet(&self) -> Option<ReadIncomingPacket> {
-        todo!();
+        // borrow_mut safe: Result is not a reference nor does it hold any reference so cannot
+        // possibly hold the refcell open.
+        match self.incoming_reads_rx.borrow_mut().try_recv() {
+            Ok(pkt) => Some(pkt),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("Incoming read thread disconnected while main thread still running")
+            }
+        }
     }
 }
