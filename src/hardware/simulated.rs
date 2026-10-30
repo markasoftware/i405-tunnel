@@ -399,6 +399,7 @@ impl Hardware for OneSideHardware<'_> {
                             incoming_packet.buffer.len(),
                             self.our_side().addr
                         ));
+                        return None;
                     }
                 }
                 self.simulated.debug(format!(
