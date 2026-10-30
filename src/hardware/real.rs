@@ -46,6 +46,13 @@ pub(crate) struct RealHardware<T: HardwareTime> {
     tun: Arc<tun_rs::SyncDevice>,
     tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
 
+    // important for these to be dropped before the outgoing/incoming read threads, because the
+    // outgoing read thread uses a synchronous send into one of these channels with no deadline, the
+    // only way to make sure it exits is to drop the receiver first.
+    incoming_reads_rx: RefCell<parking_channel::Receiver<ReadIncomingPacket>>,
+    outgoing_reads_rx:
+        RefCell<parking_channel::SyncReceiver<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>>,
+
     _outgoing_read_thread: ChannelThread<()>,
     // don't need to send anything here, we are always listening to incoming reads. It's still
     // useful to have a ChannelThread so that we can use channel closure as an effective stop token.
@@ -54,10 +61,6 @@ pub(crate) struct RealHardware<T: HardwareTime> {
     _incoming_read_thread: ChannelThread<()>,
     deviation_stats_thread: Option<DeviationStatsThread>,
     monitor_packets_thread: Option<MonitorPacketsThread>,
-
-    incoming_reads_rx: RefCell<parking_channel::Receiver<ReadIncomingPacket>>,
-    outgoing_reads_rx:
-        RefCell<parking_channel::SyncReceiver<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>>,
 
     parker: T::Parker,
 
