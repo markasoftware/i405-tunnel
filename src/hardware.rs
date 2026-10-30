@@ -2,7 +2,6 @@ pub(crate) mod real;
 #[cfg(test)]
 pub(crate) mod simulated;
 pub(crate) mod sleepy;
-pub(crate) mod spinny;
 
 use std::{
     net::SocketAddr,

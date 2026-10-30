@@ -2,12 +2,15 @@ use std::{
     cell::{Cell, RefCell},
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
-use parking::Parker;
 
 use crate::{
     array_array::IpPacketBuffer,
@@ -16,7 +19,7 @@ use crate::{
     deviation_stats::DeviationStatsThread,
     hardware::Hardware,
     monitor_packets::MonitorPacketsThread,
-    parking_channel,
+    parking_channel::{self, Unparker},
     utils::{ChannelThread, RelativeDirection, instant_to_timestamp, timestamp_to_instant},
 };
 
@@ -30,7 +33,7 @@ const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(1);
 const OVERSLEEP_WARNING: Duration = Duration::from_micros(250);
 const OUTGOING_READS_CHANNEL_QLEN: usize = 2;
 
-pub(crate) struct SleepyHardware {
+pub(crate) struct RealHardware<T: HardwareTime> {
     epoch: Instant,
     // we increment this when event listeners are cleared, and include it in all requests to other
     // for interval tracking
@@ -56,19 +59,19 @@ pub(crate) struct SleepyHardware {
     outgoing_reads_rx:
         RefCell<parking_channel::SyncReceiver<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>>,
 
-    parker: Parker,
+    parker: T::Parker,
 
     shutdown_requested: ShutdownRequested,
 }
 
-impl SleepyHardware {
+impl<T: HardwareTime> RealHardware<T> {
     pub(crate) fn new(
         listen_addr: SocketAddr,
         tun: tun_rs::SyncDevice,
         deviation_stats: Option<Duration>,
         monitor_packets_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        let (parker, unparker) = parking::pair();
+        let (parker, unparker) = T::parker_pair();
         let (outgoing_reads_channel_tx, outgoing_reads_channel_rx) = mpsc::channel();
         let (incoming_reads_channel_tx, incoming_reads_channel_rx) = mpsc::channel();
         let (outgoing_reads_tx, outgoing_reads_rx) =
@@ -183,7 +186,7 @@ impl SleepyHardware {
     }
 }
 
-impl Drop for SleepyHardware {
+impl<T: HardwareTime> Drop for RealHardware<T> {
     fn drop(&mut self) {
         // shuts down the in-progress tun.recv. I believe it's `poll`-ing on a pipe. `trigger()`
         // doesn't just trigger inflight `recv_intr` calls -- all future `recv_inter` will
@@ -197,9 +200,9 @@ impl Drop for SleepyHardware {
     }
 }
 
-fn outgoing_read_thread(
+fn outgoing_read_thread<U: Unparker>(
     rx: mpsc::Receiver<()>,
-    mut tx: parking_channel::SyncSender<ReadOutgoingPacket, OUTGOING_READS_CHANNEL_QLEN>,
+    mut tx: parking_channel::SyncSender<ReadOutgoingPacket, U, OUTGOING_READS_CHANNEL_QLEN>,
     tun: Arc<tun_rs::SyncDevice>,
     tun_interrupt_event: Arc<tun_rs::InterruptEvent>,
     epoch: Instant,
@@ -239,9 +242,9 @@ fn outgoing_read_thread(
     log::trace!("outgoing read thread quitting");
 }
 
-fn incoming_read_thread(
+fn incoming_read_thread<U: Unparker>(
     rx: mpsc::Receiver<()>,
-    mut tx: parking_channel::Sender<ReadIncomingPacket>,
+    mut tx: parking_channel::Sender<ReadIncomingPacket, U>,
     socket: Arc<UdpSocket>,
 ) {
     let mut last_block = Instant::now() - SOCKET_READ_TIMEOUT;
@@ -281,26 +284,7 @@ fn incoming_read_thread(
     log::trace!("incoming read thread quitting");
 }
 
-fn precise_sleep(wake_at: Instant) {
-    let now = Instant::now();
-    if now < wake_at {
-        std::thread::sleep(wake_at.saturating_duration_since(now));
-        let oversleep_duration = Instant::now().saturating_duration_since(wake_at);
-        if oversleep_duration > OVERSLEEP_WARNING {
-            log::warn!(
-                "precise_sleep overslept by {}",
-                humantime::format_duration(oversleep_duration)
-            );
-        }
-    } else {
-        log::warn!(
-            "precise_sleep called too late (by {})",
-            humantime::format_duration(now - wake_at)
-        );
-    }
-}
-
-impl Hardware for SleepyHardware {
+impl<T: HardwareTime> Hardware for RealHardware<T> {
     fn timestamp(&self) -> u64 {
         instant_to_timestamp(self.epoch, Instant::now())
     }
@@ -340,7 +324,7 @@ impl Hardware for SleepyHardware {
         timestamp: Option<u64>,
     ) -> Result<()> {
         if let Some(timestamp) = timestamp {
-            precise_sleep(timestamp_to_instant(self.epoch, timestamp));
+            T::sleep_until(timestamp_to_instant(self.epoch, timestamp));
         }
         let actual_socket_send_instant = Instant::now();
         match self.socket.send_to(packet, destination) {
@@ -443,5 +427,131 @@ impl Hardware for SleepyHardware {
                 panic!("Incoming read thread disconnected while main thread still running")
             }
         }
+    }
+}
+
+// functions that are supposed to have a connection with time, which makes the difference between
+// sleepy mode and spinny mode.
+trait HardwareTime {
+    type Parker: Parker + 'static;
+    type Unparker: Unparker + Clone + Send + 'static;
+
+    fn parker_pair() -> (Self::Parker, Self::Unparker);
+    fn sleep_until(wake_at: Instant);
+}
+
+trait Parker {
+    fn park(&self);
+    fn park_deadline(&self, deadline: Instant);
+}
+
+impl Parker for parking::Parker {
+    fn park(&self) {
+        self.park();
+    }
+
+    fn park_deadline(&self, deadline: Instant) {
+        self.park_deadline(deadline);
+    }
+}
+
+pub(crate) struct SleepyHardwareTime;
+
+impl HardwareTime for SleepyHardwareTime {
+    type Parker = parking::Parker;
+    type Unparker = parking::Unparker;
+
+    fn parker_pair() -> (Self::Parker, Self::Unparker) {
+        parking::pair()
+    }
+
+    fn sleep_until(wake_at: Instant) {
+        let now = Instant::now();
+        if now < wake_at {
+            std::thread::sleep(wake_at.saturating_duration_since(now));
+            let oversleep_duration = Instant::now().saturating_duration_since(wake_at);
+            if oversleep_duration > OVERSLEEP_WARNING {
+                log::warn!(
+                    "sleep_until sleepy overslept by {}",
+                    humantime::format_duration(oversleep_duration)
+                );
+            }
+        } else {
+            log::warn!(
+                "sleep_until sleepy called too late (by {})",
+                humantime::format_duration(now - wake_at)
+            );
+        }
+    }
+}
+
+pub(crate) struct SpinnyHardwareTime;
+
+impl HardwareTime for SpinnyHardwareTime {
+    type Parker = SpinnyParker;
+    type Unparker = SpinnyParker;
+
+    fn parker_pair() -> (Self::Parker, Self::Unparker) {
+        let woken = Arc::new(AtomicBool::new(false));
+        (
+            SpinnyParker {
+                woken: woken.clone(),
+            },
+            SpinnyParker { woken },
+        )
+    }
+
+    fn sleep_until(wake_at: Instant) {
+        let start_delay = Instant::now().saturating_duration_since(wake_at);
+        if !start_delay.is_zero() {
+            log::warn!(
+                "sleep_until called too late (spinny), by {}",
+                humantime::format_duration(start_delay)
+            )
+        }
+        while Instant::now() < wake_at {
+            // TODO investigate whether the hint causes VMs to deschedule more often due to PLE (pause-).
+            std::hint::spin_loop();
+        }
+        let oversleep_duration = Instant::now().saturating_duration_since(wake_at);
+        if oversleep_duration > OVERSLEEP_WARNING {
+            log::warn!(
+                "Overslept during spinny sleep_until, by {}",
+                humantime::format_duration(oversleep_duration)
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SpinnyParker {
+    woken: Arc<AtomicBool>,
+}
+
+impl SpinnyParker {
+    fn compare_exchange_woken(&self) -> bool {
+        self.woken
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+impl Parker for SpinnyParker {
+    fn park(&self) {
+        while !self.compare_exchange_woken() {
+            std::hint::spin_loop();
+        }
+    }
+
+    fn park_deadline(&self, deadline: Instant) {
+        while !self.compare_exchange_woken() && Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+impl Unparker for SpinnyParker {
+    fn unpark(&self) {
+        self.woken.store(true, Ordering::SeqCst);
     }
 }

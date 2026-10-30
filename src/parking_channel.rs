@@ -22,32 +22,33 @@ use std::sync::atomic::AtomicBool as StdAtomicBool;
 // wrapper around std mpsc with extra loom mutex locks and unlocks :| but at the end of the day,
 // this fairly simple structure here is extremely thoroughly tested!
 
-pub(crate) type Sender<T> = detail::Sender<T, detail::StdMpsc, parking::Unparker, StdAtomicBool>;
+pub(crate) type Sender<T, U> = detail::Sender<T, detail::StdMpsc, U, StdAtomicBool>;
 pub(crate) type Receiver<T> = detail::Receiver<T, detail::StdMpsc, StdAtomicBool>;
 
-pub(crate) fn channel<T>(unparker: parking::Unparker) -> (Sender<T>, Receiver<T>) {
+pub(crate) fn channel<T, U: Unparker>(unparker: U) -> (Sender<T, U>, Receiver<T>) {
     detail::channel(unparker)
 }
 
-pub(crate) type SyncSender<T, const N: usize> =
-    detail::Sender<T, detail::StdSyncMpsc<N>, parking::Unparker, StdAtomicBool>;
+pub(crate) type SyncSender<T, U, const N: usize> =
+    detail::Sender<T, detail::StdSyncMpsc<N>, U, StdAtomicBool>;
 pub(crate) type SyncReceiver<T, const N: usize> =
     detail::Receiver<T, detail::StdSyncMpsc<N>, StdAtomicBool>;
 
-pub(crate) fn sync_channel<T, const N: usize>(
-    unparker: parking::Unparker,
-) -> (SyncSender<T, N>, SyncReceiver<T, N>) {
+pub(crate) fn sync_channel<T, U: Unparker, const N: usize>(
+    unparker: U,
+) -> (SyncSender<T, U, N>, SyncReceiver<T, N>) {
     detail::channel(unparker)
+}
+
+pub(crate) trait Unparker {
+    fn unpark(&self);
 }
 
 mod detail {
 
+    use super::Unparker;
     use std::sync::atomic::AtomicBool as StdAtomicBool;
     use std::sync::{Arc, atomic::Ordering, mpsc};
-
-    pub(crate) trait Unparker {
-        fn unpark(&self);
-    }
 
     impl Unparker for parking::Unparker {
         fn unpark(&self) {
