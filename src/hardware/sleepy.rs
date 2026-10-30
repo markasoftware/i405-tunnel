@@ -151,7 +151,16 @@ impl<T: HardwareTime> RealHardware<T> {
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
     pub(crate) fn run(&self, mut core: impl core::Core) {
-        while !self.shutdown_requested.has_core_requested_shutdown() {
+        loop {
+            // order of things in the loop is quite important:
+            // 1. core.on_event() must go first, so that it can set up initial timer and/or "observed empty" parking channels.
+            // 2. we must check core requested shutdown immediately after on_event, because if it wants to shut down, it may not have observed anything empty or set any timers and the park would hang.
+            // 3. we gotta park somewhere, so it's here.
+            core.on_event(self);
+
+            if self.shutdown_requested.has_core_requested_shutdown() {
+                break;
+            }
             // we don't do precise sleep for timers, because everything time-sensitive that the Core
             // does is done via timestamps on other core methods. It's never important that the core
             // itself do something at a precise timestamp.
@@ -181,7 +190,6 @@ impl<T: HardwareTime> RealHardware<T> {
                 // see it pushing to the event queue from the ctrlc handler.
                 None => self.parker.park(),
             };
-            core.on_event(self);
         }
     }
 }
