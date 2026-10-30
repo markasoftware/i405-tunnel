@@ -11,7 +11,7 @@ use crate::core::Core;
 use crate::utils::RelativeDirection;
 use crate::{core, hardware::Hardware};
 
-use super::real::QdiscSettings;
+use super::real_utils::QdiscSettings;
 use super::{ReadIncomingPacket, ReadOutgoingPacket, ShutdownRequested};
 
 #[derive(Debug, Clone)]
@@ -487,7 +487,7 @@ impl Hardware for OneSideHardware<'_> {
         if let Some(destination_peer) = self.simulated.peers.get(&destination) {
             // this check could technically be tightened, to only if wan_packet.receipt_timestamp ==
             // (lowest receipt timestamp in unread_incoming_packets), but there's no need.
-            if (wan_packet.receipt_timestamp <= self.simulated.timestamp) {
+            if wan_packet.receipt_timestamp <= self.simulated.timestamp {
                 destination_peer
                     .is_next_unread_incoming_packet_possibly_unnotified
                     .set(true);

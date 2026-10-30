@@ -10,7 +10,7 @@ use crate::core::{
     C2S_RETRANSMIT_TIMEOUT, OLDEST_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
     established_connection,
 };
-use crate::hardware::real::QdiscSettings;
+use crate::hardware::real_utils::QdiscSettings;
 use crate::hardware::{Hardware, ReadIncomingPacket, TimerTracker};
 use crate::utils::{ip_to_dtls_length, ip_to_i405_length, ns_to_str};
 use crate::wire_config::WireConfig;

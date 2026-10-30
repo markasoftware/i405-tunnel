@@ -7,7 +7,7 @@ use crate::{
     constants::MAX_IP_PACKET_LENGTH,
     core::established_connection::{self, OnEventResult},
     dtls,
-    hardware::{Hardware, ReadIncomingPacket, TimerTracker, real::QdiscSettings},
+    hardware::{Hardware, ReadIncomingPacket, TimerTracker, real_utils::QdiscSettings},
     messages,
     utils::{ip_to_dtls_length, ip_to_i405_length},
     wire_config::WireConfig,

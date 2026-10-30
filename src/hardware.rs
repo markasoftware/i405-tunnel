@@ -1,7 +1,7 @@
 pub(crate) mod real;
+pub(crate) mod real_utils;
 #[cfg(test)]
 pub(crate) mod simulated;
-pub(crate) mod sleepy;
 
 use std::{
     net::SocketAddr,
@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
-use real::QdiscSettings;
+use real_utils::QdiscSettings;
 
 use crate::{array_array::IpPacketBuffer, utils::RelativeDirection};
 

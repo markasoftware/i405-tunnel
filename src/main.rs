@@ -1,7 +1,7 @@
 use config_cli::ContainsCommonConfigCli as _;
 use hardware::{
     Hardware,
-    real::{resolve_socket_addr_string, set_sched_fifo},
+    real_utils::{resolve_socket_addr_string, set_sched_fifo},
 };
 use wire_config::to_wire_configs;
 
@@ -29,8 +29,9 @@ fn main() {
     let configuration = config_cli::parse_args();
     let common_config_cli = configuration.common_config_cli();
 
-    let tun_config = hardware::real::tun_config_from_common_config_cli(common_config_cli);
-    let tun = hardware::real::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
+    let tun_config = hardware::real_utils::tun_config_from_common_config_cli(common_config_cli);
+    let tun =
+        hardware::real_utils::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
     let default_listen_addr = match configuration {
         config_cli::ConfigCli::Client(_) => "0.0.0.0:0",
         config_cli::ConfigCli::Server(_) => "0.0.0.0:1405",
@@ -56,14 +57,13 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let hardware =
-                hardware::sleepy::RealHardware::<hardware::sleepy::SleepyHardwareTime>::new(
-                    listen_addr,
-                    tun,
-                    common_config_cli.outgoing_send_deviation_stats,
-                    monitor_packets_dir,
-                )
-                .expect("Failed to construct SleepyHardware");
+            let hardware = hardware::real::RealHardware::<hardware::real::SleepyHardwareTime>::new(
+                listen_addr,
+                tun,
+                common_config_cli.outgoing_send_deviation_stats,
+                monitor_packets_dir,
+            )
+            .expect("Failed to construct SleepyHardware");
             let core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (sleepy)");
             hardware.run(core);
@@ -74,14 +74,13 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let hardware =
-                hardware::sleepy::RealHardware::<hardware::sleepy::SpinnyHardwareTime>::new(
-                    listen_addr,
-                    tun,
-                    common_config_cli.outgoing_send_deviation_stats,
-                    monitor_packets_dir,
-                )
-                .expect("Failed to construct SpinnyHardware");
+            let hardware = hardware::real::RealHardware::<hardware::real::SpinnyHardwareTime>::new(
+                listen_addr,
+                tun,
+                common_config_cli.outgoing_send_deviation_stats,
+                monitor_packets_dir,
+            )
+            .expect("Failed to construct SpinnyHardware");
             let core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (spinny)");
             hardware.run(core);
