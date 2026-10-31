@@ -1,7 +1,7 @@
 use config_cli::ContainsCommonConfigCli as _;
 use hardware::{
     Hardware,
-    real::{resolve_socket_addr_string, set_sched_fifo},
+    real_utils::{resolve_socket_addr_string, set_sched_fifo},
 };
 use wire_config::to_wire_configs;
 
@@ -17,6 +17,7 @@ mod hardware;
 mod jitter;
 mod messages;
 mod monitor_packets;
+mod parking_channel;
 mod queued_ip_packet;
 mod reliability;
 mod utils;
@@ -28,8 +29,9 @@ fn main() {
     let configuration = config_cli::parse_args();
     let common_config_cli = configuration.common_config_cli();
 
-    let tun_config = hardware::real::tun_config_from_common_config_cli(common_config_cli);
-    let tun = hardware::real::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
+    let tun_config = hardware::real_utils::tun_config_from_common_config_cli(common_config_cli);
+    let tun =
+        hardware::real_utils::make_tun(tun_config).expect("Failed to construct TUN; are you root?");
     let default_listen_addr = match configuration {
         config_cli::ConfigCli::Client(_) => "0.0.0.0:0",
         config_cli::ConfigCli::Server(_) => "0.0.0.0:1405",
@@ -55,7 +57,7 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let hardware = hardware::sleepy::SleepyHardware::new(
+            let hardware = hardware::real::RealHardware::<hardware::real::SleepyHardwareTime>::new(
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
@@ -72,7 +74,7 @@ fn main() {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
             }
 
-            let hardware = hardware::spinny::SpinnyHardware::new(
+            let hardware = hardware::real::RealHardware::<hardware::real::SpinnyHardwareTime>::new(
                 listen_addr,
                 tun,
                 common_config_cli.outgoing_send_deviation_stats,
