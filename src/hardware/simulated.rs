@@ -390,15 +390,8 @@ impl Hardware for OneSideHardware<'_> {
         if let Some(incoming_packet) = unread_incoming_packets.peek() {
             if self.timestamp() >= incoming_packet.receipt_timestamp {
                 let incoming_packet = unread_incoming_packets.pop().unwrap();
-                self.simulated.debug(format!(
-                    "Reading incoming packet of size {} on {}, from {}",
-                    incoming_packet.buffer.len(),
-                    self.our_side().addr,
-                    incoming_packet.source
-                ));
-                assert_eq!(incoming_packet.dest, self.our_side().addr);
-                let incoming_packet = match self.our_side().connected_addr.get() {
-                    Some(connected_addr) if connected_addr != incoming_packet.source => {
+                if let Some(connected_addr) = self.our_side().connected_addr.get() {
+                    if connected_addr != incoming_packet.source {
                         self.simulated.debug(format!(
                             "Connected to {} but got packet from {} of size {}, on {}. Dropping.",
                             connected_addr,
@@ -406,10 +399,18 @@ impl Hardware for OneSideHardware<'_> {
                             incoming_packet.buffer.len(),
                             self.our_side().addr
                         ));
-                        None
+                        // TODO we don't actually drop yet, it's annoying to do the logic right to
+                        // loop through until a real packet. This is a BUG albeit a minor one since
+                        // i don't think we use connect at all anywhere right now.
                     }
-                    _ => Some(incoming_packet),
-                };
+                }
+                self.simulated.debug(format!(
+                    "Reading incoming packet of size {} on {}, from {}",
+                    incoming_packet.buffer.len(),
+                    self.our_side().addr,
+                    incoming_packet.source
+                ));
+                assert_eq!(incoming_packet.dest, self.our_side().addr);
 
                 // if the /next/ packet is in the future, then we need to be notified of it! If the
                 // next packet is at the same timestamp, or also less than the present timestamp,
@@ -424,7 +425,7 @@ impl Hardware for OneSideHardware<'_> {
                         .set(true);
                 }
 
-                return incoming_packet.map(|incoming_packet| ReadIncomingPacket {
+                return Some(ReadIncomingPacket {
                     packet: incoming_packet.buffer,
                     peer: incoming_packet.source,
                 });
