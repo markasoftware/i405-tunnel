@@ -269,11 +269,11 @@ fn incoming_read_thread<U: Unparker>(
                 match socket.recv_from(&mut buf) {
                     Ok((len_recvd, addr)) => {
                         buf.shrink(len_recvd);
-                        tx.send(ReadIncomingPacket {
+                        // ok if it fails; means shutting down and we'll exit normally in a sec.
+                        let _ = tx.send(ReadIncomingPacket {
                             peer: addr,
                             packet: buf,
-                        })
-                        .unwrap();
+                        });
                     }
                     // TODO somehow signal the error more seriously?
                     Err(err) => {
