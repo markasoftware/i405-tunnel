@@ -69,6 +69,16 @@ fn main() {
             hardware.run(core);
         }
         config_cli::PollMode::Spinny => {
+            if std::thread::available_parallelism()
+                .expect("Failed to get available parallelism")
+                .get()
+                < 2
+            {
+                panic!(
+                    "It's not safe to use spinny mode with only a single CPU core, because the spinny thread can starve the other threads. Get more parallelism or use sleepy mode."
+                );
+            }
+
             let sched_fifo = !common_config_cli.no_sched_fifo;
             if sched_fifo {
                 set_sched_fifo().expect("Failed to set SCHED_FIFO");
