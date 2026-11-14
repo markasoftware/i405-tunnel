@@ -64,9 +64,9 @@ fn main() {
                 monitor_packets_dir,
             )
             .expect("Failed to construct SleepyHardware");
-            let core = make_core(&configuration, &hardware);
+            let mut core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (sleepy)");
-            hardware.run(core);
+            hardware.run(core.as_mut());
         }
         config_cli::PollMode::Spinny => {
             if std::thread::available_parallelism()
@@ -91,17 +91,17 @@ fn main() {
                 monitor_packets_dir,
             )
             .expect("Failed to construct SpinnyHardware");
-            let core = make_core(&configuration, &hardware);
+            let mut core = make_core(&configuration, &hardware);
             log::info!("Starting I405 (spinny)");
-            hardware.run(core);
+            hardware.run(core.as_mut());
         }
     };
 }
 
-fn make_core(
+fn make_core<'h, H: Hardware + 'h>(
     configuration: &config_cli::ConfigCli,
-    hardware: &impl Hardware,
-) -> core::ConcreteCore {
+    hardware: H,
+) -> Box<dyn core::Core + 'h> {
     let common_config_cli = configuration.common_config_cli();
 
     match &configuration {
@@ -119,20 +119,16 @@ fn make_core(
                 should_configure_qdisc: !common_config_cli.no_tun_qdisc,
                 monitor_packets: client_configuration.monitor_packets.is_some(),
             };
-            core::ConcreteCore::Client(
-                core::client::Core::new(client_config, hardware)
-                    .expect("Failed to create client core"),
-            )
+            core::client::Core::new_boxed(client_config, hardware)
+                .expect("Failed to create client core")
         }
         config_cli::ConfigCli::Server(_) => {
             let server_config = core::server::Config {
                 pre_shared_key: common_config_cli.pre_shared_key.clone(),
                 should_configure_qdisc: !common_config_cli.no_tun_qdisc,
             };
-            core::ConcreteCore::Server(
-                core::server::Core::new(server_config, hardware)
-                    .expect("Failed to create server core"),
-            )
+            core::server::Core::new_boxed(server_config, hardware)
+                .expect("Failed to create server core")
         }
     }
 }

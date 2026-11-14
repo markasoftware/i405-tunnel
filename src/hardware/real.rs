@@ -153,13 +153,13 @@ impl<T: HardwareTime> RealHardware<T> {
 
     /// Run our poor excuse for an event loop until interrupted by SIGINT
     // TODO this doesn't really need to be generic, could just use ConcreteCore
-    pub(crate) fn run(&self, mut core: impl core::Core) {
+    pub(crate) fn run(&self, core: &mut dyn core::Core) {
         loop {
             // order of things in the loop is quite important:
             // 1. core.on_event() must go first, so that it can set up initial timer and/or "observed empty" parking channels.
             // 2. we must check core requested shutdown immediately after on_event, because if it wants to shut down, it may not have observed anything empty or set any timers and the park would hang.
             // 3. we gotta park somewhere, so it's here.
-            core.on_event(self);
+            core.on_event();
 
             if self.shutdown_requested.has_core_requested_shutdown() {
                 break;
@@ -295,7 +295,7 @@ fn incoming_read_thread<U: Unparker>(
     log::trace!("incoming read thread quitting");
 }
 
-impl<T: HardwareTime> Hardware for RealHardware<T> {
+impl<T: HardwareTime> Hardware for &RealHardware<T> {
     fn timestamp(&self) -> u64 {
         instant_to_timestamp(self.epoch, Instant::now())
     }

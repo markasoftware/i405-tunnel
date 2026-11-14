@@ -27,9 +27,23 @@ Angeles also has constant traffic! Additionally, to make an Interstate Circuit t
 + [Real-time tuning](./docs/real-time-tuning.md)
 + [Contributing to I405](./CONTRIBUTING.md)
 
+## Licensing Warning
+
+Although the I405 source code is released under MIT, I405 links with WolfSSL, a GPLv3 library.
+Therefore if you're distributing I405 binaries you're probably required to distribute source code
+too. This is not legal advice.
+
+OpenSSL recently added DTLS 1.3 support, which means we might switch to it eventually! But right now
+the Rust OpenSSL ecosystem is still catching up to DTLS 1.3, and may not support PSK properly (we
+patch wolfssl's rust bindings for this reason), so don't hold your breath.
+
 ## Other
 
-LLMs: Humans wrote all documentation and >90% of the code.
+LLMs: Humans wrote all documentation and >90% of the code. All new code being added is written by a
+human but I experimented a bit with using LLMs on i405 in late 2025. I continue to use LLMs to look
+for bugs, write throwaway benchmarks, etc, but all code actually committed is designed and written
+by hand. The CONTRIBUTORS.md also requires this and I will reject contributions I can tell are
+LLM-assisted.
 
 I405 is probably the most significant side project I've ever worked on and I'm very excited about
 it. If you have suggestions or comments that aren't right for a Github issue, please contact me as

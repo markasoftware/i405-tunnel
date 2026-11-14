@@ -20,15 +20,16 @@ use super::established_connection::OnEventResult;
 use super::{C2S_MAX_RETRANSMITS, C2S_MAX_TIMEOUT, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
-pub(crate) struct Core {
+pub(crate) struct Core<H: Hardware> {
     config: Config,
     // this option should never really be empty; we just need to be able to std::mem::take out of it
     // temporarily.
     state: Option<ConnectionState>,
+    hardware: H,
 }
 
-impl Core {
-    pub(crate) fn new(config: Config, hardware: &impl Hardware) -> Result<Self> {
+impl<'h, H: Hardware + 'h> Core<H> {
+    pub(crate) fn new(config: Config, hardware: H) -> Result<Self> {
         if config.should_configure_qdisc {
             hardware.configure_qdisc(&QdiscSettings::new(Duration::from_nanos(
                 config.client_wire_config.packet_interval_max,
@@ -36,33 +37,25 @@ impl Core {
         }
         Ok(Self {
             state: Some(ConnectionState::NoConnection(NoConnection::new(
-                &config, hardware,
+                &config, &hardware,
             )?)),
             config,
+            hardware,
         })
+    }
+
+    pub(crate) fn new_boxed(config: Config, hardware: H) -> Result<Box<dyn super::Core + 'h>> {
+        Self::new(config, hardware).map(|c| Box::new(c) as _)
     }
 }
 
-fn replace_state_with_result<F: FnOnce(ConnectionState) -> Result<ConnectionState>>(
-    state: &mut Option<ConnectionState>,
-    f: F,
-) {
-    match f(std::mem::take(state).unwrap()) {
-        Ok(new_state) => std::mem::replace(state, Some(new_state)),
-        Err(err) => {
-            // TODO don't panic, instead use the config to decide whether to quit or retry.
-            panic!("Connection state error! {}", err);
-        }
-    };
-}
-
-impl super::Core for Core {
-    fn on_event(&mut self, hardware: &impl Hardware) {
+impl<H: Hardware> super::Core for Core<H> {
+    fn on_event(&mut self) {
         // keep calling the state's on_event until it makes no progress.
         loop {
             match std::mem::take(&mut self.state)
                 .unwrap()
-                .on_event_client(&self.config, hardware)
+                .on_event_client(&self.config, &self.hardware)
             {
                 // made progress, keep looping
                 Ok((true, new_state)) => self.state = Some(new_state),

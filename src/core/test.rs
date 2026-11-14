@@ -1,9 +1,10 @@
+use crate::Hardware;
 /// The bulk of "integration"-style tests go here. We use a "simulated" Hardware so everything's
 /// super fast and reproducible. We also have some true integration tests that set up Linux network
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
 use crate::array_array::IpPacketBuffer;
 use crate::constants::{IPV4_HEADER_LENGTH, UDP_HEADER_LENGTH};
-use crate::core::{self, Core};
+use crate::core;
 use crate::hardware::simulated::{LocalPacket, SimulatedHardware, WanPacket};
 use crate::utils::{RelativeDirection, ip_to_i405_length};
 use crate::wire_config::WireConfig;
@@ -93,38 +94,36 @@ fn server_addr() -> SocketAddr {
     "10.140.5.2:1405".parse().unwrap()
 }
 
-fn simulated_pair(
+fn simulated_hardware(default_delay: u64) -> SimulatedHardware {
+    SimulatedHardware::new(vec![client_addr(), server_addr()], default_delay)
+}
+
+fn simulated_cores<'h>(
+    simulated_hardware: &'h SimulatedHardware,
     client_wire_config: WireConfig,
     server_wire_config: WireConfig,
-    default_delay: u64,
-) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
-    let simulated_hardware =
-        SimulatedHardware::new(vec![client_addr(), server_addr()], default_delay);
-    let server_core = core::server::Core::new(
+) -> BTreeMap<SocketAddr, Box<dyn core::Core + 'h>> {
+    let server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.client_wire_config = client_wire_config;
     client_config.server_wire_config = server_wire_config;
     let client_core =
-        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+        core::client::Core::new_boxed(client_config, simulated_hardware.hardware(client_addr()))
             .unwrap();
-    let cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
-    (simulated_hardware, cores)
+    BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)])
 }
 
-fn default_simulated_pair(
-    default_delay: u64,
-) -> (SimulatedHardware, BTreeMap<SocketAddr, core::ConcreteCore>) {
-    simulated_pair(
+fn default_simulated_cores<'h>(
+    simulated_hardware: &'h SimulatedHardware,
+) -> BTreeMap<SocketAddr, Box<dyn core::Core + 'h>> {
+    simulated_cores(
+        simulated_hardware,
         DEFAULT_CLIENT_WIRE_CONFIG,
         DEFAULT_SERVER_WIRE_CONFIG,
-        default_delay,
     )
 }
 
@@ -148,7 +147,8 @@ fn setup_logging() {
 #[test]
 fn simple() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
 
     assert!(simulated_hardware.qdisc_settings(&client_addr()).is_some());
     assert!(simulated_hardware.qdisc_settings(&server_addr()).is_none());
@@ -203,21 +203,18 @@ fn simple() {
 #[test]
 fn dont_configure_qdisc() {
     setup_logging();
-    let mut simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
+    let simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], 0);
     let mut server_config = default_server_config();
     server_config.should_configure_qdisc = false;
     let server_core =
-        core::server::Core::new(server_config, &simulated_hardware.hardware(server_addr()))
-            .unwrap();
+        core::server::Core::new(server_config, simulated_hardware.hardware(server_addr())).unwrap();
     let mut client_config = default_client_config();
     client_config.should_configure_qdisc = false;
     let client_core =
-        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
-            .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+        core::client::Core::new(client_config, simulated_hardware.hardware(client_addr())).unwrap();
+    let client_core: Box<dyn core::Core> = Box::new(client_core);
+    let server_core: Box<dyn core::Core> = Box::new(server_core);
+    let mut cores = BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)]);
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.run_until(&mut cores, ms(5.0));
     // ensure that they're connected
@@ -235,7 +232,8 @@ fn dont_configure_qdisc() {
 #[test]
 fn fragmentation() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
 
     let packet = long_packet(1200);
 
@@ -261,7 +259,8 @@ fn fragmentation() {
 #[test]
 fn wan_packet_length() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
 
     let dtls_packet_length: usize =
         usize::from(DEFAULT_PACKET_LENGTH - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH);
@@ -330,7 +329,8 @@ fn packing() {
     let second_message_length: usize =
         payload_length - MESSAGE_HEADER_LENGTH * 2 - first_message_length;
 
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(first_message_length));
     simulated_hardware.make_outgoing_packet(&client_addr(), &long_packet(second_message_length));
 
@@ -432,8 +432,12 @@ fn assert_statistics(vec: Vec<u64>, min: u64, max: u64, average_range: std::ops:
 #[ignore]
 fn jitter() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) =
-        simulated_pair(JITTERED_CLIENT_WIRE_CONFIG, JITTERED_SERVER_WIRE_CONFIG, 0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = simulated_cores(
+        &simulated_hardware,
+        JITTERED_CLIENT_WIRE_CONFIG,
+        JITTERED_SERVER_WIRE_CONFIG,
+    );
 
     // should involve on the order of 10,000 packets going either way, which is a large enough N
     // that jitter stats should be good
@@ -477,20 +481,17 @@ fn drop_and_reorder() {
     simulated_hardware.drop_packet(2);
     simulated_hardware.delay_packet(3, ms(500.0));
     simulated_hardware.delay_packet(4, ms(1500.0));
-    let server_core = core::server::Core::new(
+    let server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
-    let client_core = core::client::Core::new(
+    let client_core = core::client::Core::new_boxed(
         default_client_config(),
-        &simulated_hardware.hardware(client_addr()),
+        simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+    let mut cores = BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)]);
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[4, 3, 2, 1]);
@@ -584,22 +585,18 @@ fn long_distance_reorder(packet_1: u64, packet_2: u64, reorder_1st_instead_of_dr
 #[test]
 fn wrong_psk() {
     setup_logging();
-    let mut simulated_hardware =
-        SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
-    let server_core = core::server::Core::new(
+    let simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], ms(1.0));
+    let server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.pre_shared_key = "wrong password".into();
     let client_core =
-        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+        core::client::Core::new_boxed(client_config, simulated_hardware.hardware(client_addr()))
             .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+    let mut cores = BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)]);
 
     simulated_hardware.run_until(&mut cores, ms(1.0));
 
@@ -622,40 +619,37 @@ fn multiple_ongoing_negotiations() {
     setup_logging();
     let evil_client_addr = "10.140.5.10:1405".parse().unwrap();
     let good_client_addr = "10.140.5.20:1405".parse().unwrap();
-    let mut simulated_hardware = SimulatedHardware::new(
+    let simulated_hardware = SimulatedHardware::new(
         vec![good_client_addr, evil_client_addr, server_addr()],
         ms(1.0),
     );
-    let server_core = core::server::Core::new(
+    let server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.pre_shared_key = "wrong password".into();
-    let evil_client_core = core::client::Core::new(
-        client_config,
-        &simulated_hardware.hardware(evil_client_addr),
-    )
-    .unwrap();
-    let noop_core = core::noop::Core::new(&simulated_hardware.hardware(good_client_addr)).unwrap();
+    let evil_client_core =
+        core::client::Core::new_boxed(client_config, simulated_hardware.hardware(evil_client_addr))
+            .unwrap();
+    let noop_core =
+        core::noop::Core::new_boxed(simulated_hardware.hardware(good_client_addr)).unwrap();
     let mut cores = BTreeMap::from([
-        (evil_client_addr, evil_client_core.into()),
-        (good_client_addr, noop_core.into()),
-        (server_addr(), server_core.into()),
+        (evil_client_addr, evil_client_core),
+        (good_client_addr, noop_core),
+        (server_addr(), server_core),
     ]);
 
     // should be partway through the negotiation by now
     simulated_hardware.run_until(&mut cores, ms(4.0));
 
-    let good_client_core = core::client::Core::new(
+    let good_client_core = core::client::Core::new_boxed(
         default_client_config(),
-        &simulated_hardware.hardware(good_client_addr),
+        simulated_hardware.hardware(good_client_addr),
     )
     .unwrap();
-    cores
-        .insert(good_client_addr, good_client_core.into())
-        .unwrap();
+    cores.insert(good_client_addr, good_client_core).unwrap();
     simulated_hardware.reset_peer_state(good_client_addr);
     simulated_hardware.run_until(&mut cores, ms(15.0));
 
@@ -678,7 +672,8 @@ fn multiple_ongoing_negotiations() {
 #[test]
 fn client_termination_and_reconnect() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let mut simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
 
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
@@ -693,9 +688,9 @@ fn client_termination_and_reconnect() {
     // shut down and replace the core
     simulated_hardware.request_shutdown(&client_addr());
     simulated_hardware.run_until(&mut cores, ms(2.001));
-    let new_client_core = core::client::Core::new(
+    let new_client_core = core::client::Core::new_boxed(
         default_client_config(),
-        &simulated_hardware.hardware(client_addr()),
+        simulated_hardware.hardware(client_addr()),
     )
     .unwrap();
     cores.insert(client_addr(), new_client_core.into()).unwrap();
@@ -715,7 +710,8 @@ fn client_termination_and_reconnect() {
 #[test]
 fn server_termination_and_reconnect() {
     setup_logging();
-    let (mut simulated_hardware, mut cores) = default_simulated_pair(0);
+    let simulated_hardware = simulated_hardware(0);
+    let mut cores = default_simulated_cores(&simulated_hardware);
 
     // send a packet just to ensure it actually establishes connection the first time.
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
@@ -729,12 +725,12 @@ fn server_termination_and_reconnect() {
 
     simulated_hardware.request_shutdown(&server_addr());
     simulated_hardware.run_until(&mut cores, ms(2.001));
-    let new_server_core = core::server::Core::new(
+    let new_server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
-    cores.insert(server_addr(), new_server_core.into()).unwrap();
+    cores.insert(server_addr(), new_server_core).unwrap();
     simulated_hardware.reset_peer_state(server_addr());
 
     // whether the simulated core will process incoming or outgoing packets first is indeterminate,
@@ -762,8 +758,12 @@ fn server_termination_and_reconnect() {
 // reconnect?
 #[test]
 fn server_not_responding() {
-    let (mut simulated_hardware, mut cores) =
-        simulated_pair(LONGER_CLIENT_WIRE_CONFIG, LONGER_SERVER_WIRE_CONFIG, 0);
+    let mut simulated_hardware = simulated_hardware(0);
+    let mut cores = simulated_cores(
+        &simulated_hardware,
+        LONGER_CLIENT_WIRE_CONFIG,
+        LONGER_SERVER_WIRE_CONFIG,
+    );
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
@@ -785,12 +785,11 @@ fn server_not_responding() {
     cores
         .insert(
             server_addr(),
-            core::server::Core::new(
+            core::server::Core::new_boxed(
                 default_server_config(),
-                &simulated_hardware.hardware(server_addr()),
+                simulated_hardware.hardware(server_addr()),
             )
-            .unwrap()
-            .into(),
+            .unwrap(),
         )
         .unwrap();
     simulated_hardware.reset_peer_state(server_addr());
@@ -825,8 +824,12 @@ fn server_not_responding() {
 // allow the client to reconnect?
 #[test]
 fn client_not_responding() {
-    let (mut simulated_hardware, mut cores) =
-        simulated_pair(LONGER_CLIENT_WIRE_CONFIG, LONGER_SERVER_WIRE_CONFIG, 0);
+    let mut simulated_hardware = simulated_hardware(0);
+    let mut cores = simulated_cores(
+        &simulated_hardware,
+        LONGER_CLIENT_WIRE_CONFIG,
+        LONGER_SERVER_WIRE_CONFIG,
+    );
 
     simulated_hardware.make_outgoing_packet(&client_addr(), &[1, 4, 0, 5]);
     simulated_hardware.make_outgoing_packet(&server_addr(), &[5, 4, 0, 1]);
@@ -852,9 +855,11 @@ fn client_not_responding() {
     cores
         .insert(
             client_addr(),
-            core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
-                .unwrap()
-                .into(),
+            core::client::Core::new_boxed(
+                client_config,
+                simulated_hardware.hardware(client_addr()),
+            )
+            .unwrap(),
         )
         .unwrap();
     simulated_hardware.reset_peer_state(client_addr());
@@ -892,20 +897,17 @@ fn monitor_packets() {
     setup_logging();
     let delay = ms(2.2);
     let simulated_hardware = SimulatedHardware::new(vec![client_addr(), server_addr()], delay);
-    let server_core = core::server::Core::new(
+    let server_core = core::server::Core::new_boxed(
         default_server_config(),
-        &simulated_hardware.hardware(server_addr()),
+        simulated_hardware.hardware(server_addr()),
     )
     .unwrap();
     let mut client_config = default_client_config();
     client_config.monitor_packets = true;
     let client_core =
-        core::client::Core::new(client_config, &simulated_hardware.hardware(client_addr()))
+        core::client::Core::new_boxed(client_config, simulated_hardware.hardware(client_addr()))
             .unwrap();
-    let mut cores = BTreeMap::from([
-        (client_addr(), client_core.into()),
-        (server_addr(), server_core.into()),
-    ]);
+    let mut cores = BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)]);
     let mut simulated_hardware = simulated_hardware;
 
     // First establish the connection by running for a few milliseconds

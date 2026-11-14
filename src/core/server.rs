@@ -16,26 +16,32 @@ use crate::{
 use super::{PROTOCOL_VERSION, established_connection::EstablishedConnection};
 
 #[derive(Debug)]
-pub(crate) struct Core {
+pub(crate) struct Core<H: Hardware> {
+    hardware: H,
     config: Config,
     state: Option<ConnectionState>,
 }
 
-impl Core {
-    pub(crate) fn new(config: Config, hardware: &impl Hardware) -> Result<Self> {
+impl<'h, H: Hardware + 'h> Core<H> {
+    pub(crate) fn new(config: Config, hardware: H) -> Result<Self> {
         Ok(Self {
-            state: Some(ConnectionState::NoConnection(NoConnection::new(hardware)?)),
+            state: Some(ConnectionState::NoConnection(NoConnection::new(&hardware)?)),
+            hardware,
             config,
         })
     }
+
+    pub(crate) fn new_boxed(config: Config, hardware: H) -> Result<Box<dyn super::Core + 'h>> {
+        Self::new(config, hardware).map(|c| Box::new(c) as _)
+    }
 }
 
-impl super::Core for Core {
-    fn on_event(&mut self, hardware: &impl Hardware) {
+impl<H: Hardware> super::Core for Core<H> {
+    fn on_event(&mut self) {
         loop {
             match std::mem::take(&mut self.state)
                 .unwrap()
-                .on_event_server(&self.config, hardware)
+                .on_event_server(&self.config, &self.hardware)
             {
                 // made progress, keep looping
                 Ok((true, new_state)) => self.state = Some(new_state),

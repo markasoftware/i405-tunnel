@@ -7,7 +7,6 @@ use anyhow::Result;
 
 use crate::array_array::IpPacketBuffer;
 use crate::constants::MAX_IP_PACKET_LENGTH;
-use crate::core::Core;
 use crate::utils::RelativeDirection;
 use crate::{core, hardware::Hardware};
 
@@ -117,7 +116,7 @@ pub(crate) struct PacketStatus {
 /// Hardware implementation for testing only.
 #[derive(Debug)]
 pub(crate) struct SimulatedHardware {
-    peers: BTreeMap<SocketAddr, OneSideInfo>,
+    peers: RefCell<BTreeMap<SocketAddr, OneSideInfo>>,
     /// All packets that have been sent from any of the sides are collected here in addition to the
     /// specific peers they were sent from/to.
     all_wan_packets: RefCell<Vec<WanPacket>>,
@@ -126,7 +125,7 @@ pub(crate) struct SimulatedHardware {
     /// Additional delay beyond the `default_delay`
     packets_to_delay: HashMap<u64, u64>,
     default_delay: u64,
-    timestamp: u64,
+    timestamp: Cell<u64>,
 }
 
 impl SimulatedHardware {
@@ -142,7 +141,7 @@ impl SimulatedHardware {
             packets_to_drop: HashSet::new(),
             packets_to_delay: HashMap::new(),
             default_delay,
-            timestamp: 0,
+            timestamp: Cell::new(0),
         }
     }
 
@@ -173,7 +172,7 @@ impl SimulatedHardware {
     }
 
     // make an outgoing on the side with the given addr. Ie,
-    pub(crate) fn make_outgoing_packet(&mut self, addr: &SocketAddr, packet: &[u8]) {
+    pub(crate) fn make_outgoing_packet(&self, addr: &SocketAddr, packet: &[u8]) {
         let peer = self
             .peers
             .get(addr)
@@ -239,14 +238,14 @@ impl SimulatedHardware {
 
     /// Read as "run until, but not including, stop_timestamp." Upon exit, the timestamp field will
     /// be equal to stop_timestamp, but no events at that timestamp will have been processed.
-    pub(crate) fn run_until(
-        &mut self,
-        cores: &mut BTreeMap<SocketAddr, core::ConcreteCore>,
+    pub(crate) fn run_until<'h>(
+        &'h self,
+        cores: &mut BTreeMap<SocketAddr, Box<dyn core::Core + 'h>>,
         stop_timestamp: u64,
     ) {
         // The strategy here is to (a) determine if anything has happened since the last
-        while self.timestamp < stop_timestamp {
-            let timestamp = self.timestamp;
+        while self.timestamp.get() < stop_timestamp {
+            let timestamp = self.timestamp.get();
             let mut next_event_timestamp = stop_timestamp;
             // track if ANY peer made progress at this timestamp, in which case we will need to
             // re-evaluate the next timestamp and perhaps call on_event again before advancing
@@ -308,7 +307,7 @@ impl SimulatedHardware {
 
                 if has_event_at_present_timestamp {
                     has_event_at_present_timestamp_in_any_peer = true;
-                    core.on_event(&self.hardware(addr));
+                    core.on_event();
                 }
             }
 
@@ -317,14 +316,14 @@ impl SimulatedHardware {
                     "Done with present timestamp; advancing to {}ns",
                     next_event_timestamp
                 ));
-                self.timestamp = next_event_timestamp;
+                self.timestamp.set(next_event_timestamp);
             }
         }
     }
 
     // idk if AsRef<str> is really the best signature here
     fn debug<S: AsRef<str>>(&self, msg: S) {
-        log::debug!("{}ns: {}", self.timestamp, msg.as_ref());
+        log::debug!("{}ns: {}", self.timestamp.get(), msg.as_ref());
     }
 }
 
@@ -350,7 +349,7 @@ impl Hardware for OneSideHardware<'_> {
     }
 
     fn timestamp(&self) -> u64 {
-        self.simulated.timestamp
+        self.simulated.timestamp.get()
     }
 
     fn epoch_timestamp(&self) -> u64 {
