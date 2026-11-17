@@ -194,18 +194,18 @@ impl SimulatedHardware {
         }
     }
 
+    fn peer(&self, addr: &SocketAddr) -> std::cell::Ref<'_, OneSideInfo> {
+        std::cell::Ref::<'_, SimulatedHardwareInner>::map(self.inner.borrow(), |i| &i.peers[addr])
+    }
+
     // for the next few methods, since it's only for testing it's better to just clone rather than
     // to deal with returning a Ref
     pub(crate) fn sent_incoming_packets(&self, addr: &SocketAddr) -> Vec<LocalPacket> {
-        self.inner.borrow().peers[addr]
-            .sent_incoming_packets
-            .clone()
+        self.peer(addr).sent_incoming_packets.clone()
     }
 
     pub(crate) fn sent_outgoing_packets(&self, addr: &SocketAddr) -> Vec<WanPacket> {
-        self.inner.borrow().peers[addr]
-            .sent_outgoing_packets
-            .clone()
+        self.peer(addr).sent_outgoing_packets.clone()
     }
 
     pub(crate) fn all_wan_packets(&self) -> Vec<WanPacket> {
@@ -213,11 +213,11 @@ impl SimulatedHardware {
     }
 
     pub(crate) fn qdisc_settings(&self, addr: &SocketAddr) -> Option<QdiscSettings> {
-        self.inner.borrow().peers[addr].qdisc_settings
+        self.peer(addr).qdisc_settings
     }
 
     pub(crate) fn packet_statuses(&self, addr: &SocketAddr) -> Vec<PacketStatus> {
-        self.inner.borrow().peers[addr].packet_statuses.clone()
+        self.peer(addr).packet_statuses.clone()
     }
 
     pub(crate) fn drop_packet(&self, nth: u64) {
