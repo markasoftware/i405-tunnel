@@ -1,4 +1,3 @@
-use crate::Hardware;
 /// The bulk of "integration"-style tests go here. We use a "simulated" Hardware so everything's
 /// super fast and reproducible. We also have some true integration tests that set up Linux network
 /// netspaces and crap, but it's much easier to mess with stuff and assert stuff here.
@@ -908,7 +907,6 @@ fn monitor_packets() {
         core::client::Core::new_boxed(client_config, simulated_hardware.hardware(client_addr()))
             .unwrap();
     let mut cores = BTreeMap::from([(client_addr(), client_core), (server_addr(), server_core)]);
-    let mut simulated_hardware = simulated_hardware;
 
     // First establish the connection by running for a few milliseconds
     simulated_hardware.run_until(&mut cores, ms(10.0));
